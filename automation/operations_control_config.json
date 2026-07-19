@@ -1,0 +1,33 @@
+{
+  "timezone": "Asia/Shanghai",
+  "operations_db": "/home/pwn/workspace/company/operations/runtime/operations_control.db",
+  "router_db": "/home/pwn/workspace/company/operations/runtime/company_router.db",
+  "content_job_dir": "/home/pwn/workspace/company/operations/runtime/content-jobs",
+  "hermes_state_db": "/home/pwn/.hermes/state.db",
+  "review_root": "/home/pwn/workspace/company/operations/runtime/tvcr-reviews",
+  "hermes_executable": "hermes",
+  "tvcr_max_turns": 20,
+  "max_delivery_attempts": 50,
+  "delivery_retry_base_seconds": 60,
+  "delivery_retry_max_seconds": 3600,
+  "token_warning_thresholds": {
+    "article-production": {
+      "direct_tokens": 120000,
+      "cache_read_tokens": 750000,
+      "tool_calls": 40,
+      "duration_seconds": 1800
+    },
+    "video-production": {
+      "direct_tokens": 180000,
+      "cache_read_tokens": 1500000,
+      "tool_calls": 60,
+      "duration_seconds": 1800
+    },
+    "security-exploration": {
+      "direct_tokens": 250000,
+      "cache_read_tokens": 2000000,
+      "tool_calls": 100,
+      "duration_seconds": 3600
+    }
+  }
+}

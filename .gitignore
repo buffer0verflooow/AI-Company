@@ -1,0 +1,74 @@
+# Local credentials and secret material
+.env
+.env.*
+**/.env
+**/.env.*
+secrets/
+secrets*
+credentials/
+**/auth.json
+**/*cookie*
+**/*credential*
+*.pem
+*.key
+id_rsa*
+*.p12
+*.pfx
+.netrc
+.npmrc
+
+# Runtime databases — contain WeChat OpenIDs, user message excerpts, and the
+# sensitive-knowledge desensitization queue. Never publish.
+*.db
+*.db-*
+*.db.bak*
+*.sqlite
+*.sqlite3
+
+# Runtime and generated state (per-run artifacts, logs, chat sessions,
+# scraped external content, publish/reach stats)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.uv-cache/
+.cache/
+.tools/
+node_modules/
+state/
+outputs/
+tmp/
+*.log
+operations/runtime/
+marketing/runtime/
+marketing/evidence/
+finance/sources/
+
+# Vendored / third-party project trees and bulky assets
+# (11GB of models+venv, third-party tools, a cloned course repo with its own .git)
+projects/mineru/
+projects/Pixelle-Video/
+projects/wenyi/
+source-material/
+
+# Local deployment overrides
+*.local.yaml
+*.local.yml
+*.local.json
+.deployment.local
+
+# Archives & large media
+*.tar.gz
+*.zip
+
+# Desktop / editor metadata
+.DS_Store
+Thumbs.db
+.obsidian/workspace.json
+
+# Local-only operational docs (kept out of the public repo)
+DEPLOYMENT.md

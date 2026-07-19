@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root {
+    --bg: #fafaf5;
+    --primary: #3553ff;
+    --accent: #6c5ce7;
+    --ink: #1a1a1a;
+    --grey: #7a7a78;
+    --white: #ffffff;
+    --code-bg: #1e1e2e;
+    --code-text: #cdd6f4;
+    --code-keyword: #cba6f7;
+    --code-func: #89b4fa;
+    --code-string: #a6e3a1;
+    --code-comment: #6c7086;
+    --code-return: #fab387;
+    --code-error: #f38ba8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1080px;
+    background: var(--bg);
+    font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--ink);
+  }
+
+  .header {
+    padding: 28px 36px 0;
+  }
+  .header .meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: "DejaVu Sans Mono", "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--primary);
+    margin-bottom: 6px;
+  }
+  .header hr {
+    border: none;
+    border-top: 1px solid rgba(53, 83, 255, 0.2);
+    margin: 8px 0;
+  }
+  .header h1 {
+    font-size: 24px;
+    text-align: center;
+    color: var(--ink);
+    font-weight: 700;
+    margin-top: 12px;
+  }
+
+  .main {
+    display: flex;
+    gap: 20px;
+    padding: 16px 36px;
+  }
+
+  /* Code panel */
+  .code-panel {
+    width: 520px;
+    flex-shrink: 0;
+  }
+  .code-titlebar {
+    background: #262637;
+    border-radius: 8px 8px 0 0;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .code-titlebar .dots {
+    display: flex; gap: 7px;
+  }
+  .code-titlebar .dots span {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+  .code-titlebar .dots span:nth-child(1) { background: #ff5f57; }
+  .code-titlebar .dots span:nth-child(2) { background: #ffbd2e; }
+  .code-titlebar .dots span:nth-child(3) { background: #28ca41; }
+  .code-titlebar .filename {
+    color: #9399b2;
+    font-size: 11px;
+    font-family: "DejaVu Sans Mono", monospace;
+    margin-left: auto;
+  }
+
+  .code-body {
+    background: var(--code-bg);
+    border-radius: 0 0 8px 8px;
+    padding: 14px 0;
+    font-family: "DejaVu Sans Mono", "JetBrains Mono", monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    overflow: hidden;
+  }
+  .code-body .line {
+    display: flex;
+    padding: 0 14px;
+  }
+  .code-body .ln {
+    color: #585b70;
+    width: 24px;
+    text-align: right;
+    margin-right: 14px;
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .code-body .code { white-space: pre; }
+  .kw { color: var(--code-keyword); }
+  .fn { color: var(--code-func); }
+  .st { color: var(--code-string); }
+  .cm { color: var(--code-comment); }
+  .rt { color: var(--code-return); }
+  .er { color: var(--code-error); }
+  .hl-line { background: rgba(203, 166, 247, 0.06); }
+
+  /* Callouts panel */
+  .callouts-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 68px;
+  }
+  .callout {
+    background: var(--white);
+    border-radius: 8px;
+    padding: 10px 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    border: 1px solid rgba(0,0,0,0.06);
+    position: relative;
+  }
+  .callout::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 6px; bottom: 6px;
+    width: 3px;
+    border-radius: 2px;
+  }
+  .callout.c1::before { background: var(--primary); }
+  .callout.c2::before { background: var(--accent); }
+  .callout.c3::before { background: #00c48c; }
+  .callout.c4::before { background: #ff6b6b; }
+  .callout.c5::before { background: #ffd93d; }
+  .callout.c6::before { background: var(--accent); }
+
+  .callout .num {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .callout.c1 .num { color: var(--primary); border: 2px solid var(--primary); }
+  .callout.c2 .num { color: var(--accent); border: 2px solid var(--accent); }
+  .callout.c3 .num { color: #00c48c; border: 2px solid #00c48c; }
+  .callout.c4 .num { color: #ff6b6b; border: 2px solid #ff6b6b; }
+  .callout.c5 .num { color: #ffd93d; border: 2px solid #ffd93d; }
+  .callout.c6 .num { color: var(--accent); border: 2px solid var(--accent); }
+
+  .callout .body { flex: 1; }
+  .callout .title {
+    font-size: 13px; font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .callout.c1 .title { color: var(--primary); }
+  .callout.c2 .title { color: var(--accent); }
+  .callout.c3 .title { color: #00c48c; }
+  .callout.c4 .title { color: #ff6b6b; }
+  .callout.c5 .title { color: #cc9900; }
+  .callout.c6 .title { color: var(--accent); }
+
+  .callout .desc {
+    font-size: 11px; color: var(--grey);
+    line-height: 1.6;
+  }
+
+  .connector {
+    position: absolute;
+    left: -24px;
+    top: 50%;
+    width: 24px;
+    border-top: 1px dashed rgba(53, 83, 255, 0.25);
+  }
+
+  .footer {
+    padding: 12px 36px 16px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--grey);
+  }
+  .footer hr {
+    border: none;
+    border-top: 1px solid rgba(53, 83, 255, 0.2);
+    margin-bottom: 12px;
+  }
+  .accent-bar {
+    height: 4px;
+    background: var(--accent);
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="meta">
+    <span>FIG_14.02B — Agent Loop Code Breakdown</span>
+    <span>PHASE 14</span>
+  </div>
+  <hr>
+  <h1>拆解 Agent Loop：80 行 Python 看懂 AI Agent 的心脏</h1>
+  <hr style="opacity:0.5">
+</div>
+
+<div class="main">
+  <!-- Code -->
+  <div class="code-panel">
+    <div class="code-titlebar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <span class="filename">agent_loop.py</span>
+    </div>
+    <div class="code-body">
+      <div class="line"><span class="ln">1</span><span class="code"><span class="kw">class</span> <span class="fn">AgentLoop</span>:</span></div>
+      <div class="line"><span class="ln">2</span><span class="code">    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, llm, tools, max_turns=<span class="rt">50</span>):</span></div>
+      <div class="line"><span class="ln">3</span><span class="code">        <span class="kw">self</span>.llm = llm</span></div>
+      <div class="line"><span class="ln">4</span><span class="code">        <span class="kw">self</span>.tools = tools</span></div>
+      <div class="line"><span class="ln">5</span><span class="code">        <span class="kw">self</span>.max_turns = max_turns</span></div>
+      <div class="line"><span class="ln">6</span><span class="code"></span></div>
+      <div class="line"><span class="ln">7</span><span class="code">    <span class="kw">def</span> <span class="fn">run</span>(<span class="kw">self</span>, query: <span class="kw">str</span>) -> <span class="kw">str</span>:</span></div>
+      <div class="line hl-line"><span class="ln">8</span><span class="code">        msgs = [{<span class="st">"role"</span>:<span class="st">"user"</span>,<span class="st">"content"</span>:query}]</span></div>
+      <div class="line"><span class="ln">9</span><span class="code"></span></div>
+      <div class="line hl-line"><span class="ln">10</span><span class="code">        <span class="kw">for</span> turn <span class="kw">in</span> <span class="fn">range</span>(<span class="kw">self</span>.max_turns):</span></div>
+      <div class="line"><span class="ln">11</span><span class="code">            resp = <span class="kw">self</span>.llm.chat(</span></div>
+      <div class="line"><span class="ln">12</span><span class="code">                msgs, tools=<span class="kw">self</span>.tools.schemas</span></div>
+      <div class="line"><span class="ln">13</span><span class="code">            )</span></div>
+      <div class="line"><span class="ln">14</span><span class="code">            msgs.append(resp)</span></div>
+      <div class="line"><span class="ln">15</span><span class="code"></span></div>
+      <div class="line hl-line"><span class="ln">16</span><span class="code">            calls = resp.get(<span class="st">"tool_calls"</span>, [])</span></div>
+      <div class="line hl-line"><span class="ln">17</span><span class="code">            <span class="kw">if</span> <span class="kw">not</span> calls:</span></div>
+      <div class="line hl-line"><span class="ln">18</span><span class="code">                <span class="kw">return</span> resp[<span class="st">"content"</span>]</span></div>
+      <div class="line"><span class="ln">19</span><span class="code"></span></div>
+      <div class="line"><span class="ln">20</span><span class="code">            <span class="kw">for</span> c <span class="kw">in</span> calls:</span></div>
+      <div class="line"><span class="ln">21</span><span class="code">                tool = <span class="kw">self</span>.tools.get(c[<span class="st">"name"</span>])</span></div>
+      <div class="line"><span class="ln">22</span><span class="code">                <span class="kw">if</span> <span class="kw">not</span> tool:</span></div>
+      <div class="line"><span class="ln">23</span><span class="code">                    obs = <span class="er">f"Error: not found"</span></span></div>
+      <div class="line"><span class="ln">24</span><span class="code">                <span class="kw">else</span>:</span></div>
+      <div class="line hl-line"><span class="ln">25</span><span class="code">                    <span class="kw">try</span>:</span></div>
+      <div class="line hl-line"><span class="ln">26</span><span class="code">                        obs = tool.run(c[<span class="st">"args"</span>])</span></div>
+      <div class="line hl-line"><span class="ln">27</span><span class="code">                    <span class="kw">except</span> <span class="fn">Exception</span> <span class="kw">as</span> e:</span></div>
+      <div class="line hl-line"><span class="ln">28</span><span class="code">                        obs = <span class="er">f"Error: {e}"</span></span></div>
+      <div class="line"><span class="ln">29</span><span class="code"></span></div>
+      <div class="line hl-line"><span class="ln">30</span><span class="code">                msgs.append({</span></div>
+      <div class="line hl-line"><span class="ln">31</span><span class="code">                    <span class="st">"role"</span>: <span class="st">"tool"</span>,</span></div>
+      <div class="line hl-line"><span class="ln">32</span><span class="code">                    <span class="st">"content"</span>: obs</span></div>
+      <div class="line hl-line"><span class="ln">33</span><span class="code">                })</span></div>
+      <div class="line"><span class="ln">34</span><span class="code"></span></div>
+      <div class="line"><span class="ln">35</span><span class="code">        <span class="kw">return</span> <span class="st">"Max turns reached"</span></span></div>
+    </div>
+  </div>
+
+  <!-- Callouts -->
+  <div class="callouts-panel">
+    <div class="callout c1">
+      <div class="num">①</div>
+      <div class="body">
+        <div class="title">消息缓冲区</div>
+        <div class="desc">保存完整对话历史<br>缺了它 → 模型失忆</div>
+      </div>
+    </div>
+    <div class="callout c2">
+      <div class="num">②</div>
+      <div class="body">
+        <div class="title">轮次预算</div>
+        <div class="desc">max_turns 硬上限<br>防止无限循环烧钱</div>
+      </div>
+    </div>
+    <div class="callout c3">
+      <div class="num">③</div>
+      <div class="body">
+        <div class="title">停止判断</div>
+        <div class="desc">没调用工具？<br>→ 直接返回结果</div>
+      </div>
+    </div>
+    <div class="callout c4">
+      <div class="num">④</div>
+      <div class="body">
+        <div class="title">容错执行</div>
+        <div class="desc">try/except 包裹<br>出错 → 模型可重试</div>
+      </div>
+    </div>
+    <div class="callout c5">
+      <div class="num">⑤</div>
+      <div class="body">
+        <div class="title">观察回传</div>
+        <div class="desc">结果注入消息队列<br>→ 进入下一轮循环</div>
+      </div>
+    </div>
+    <div class="callout c6">
+      <div class="num">⑥</div>
+      <div class="body">
+        <div class="title">超时退出</div>
+        <div class="desc">达到最大轮次<br>强制返回</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <hr>
+  核心设计：工具执行出错不崩溃 → 模型从错误观察中自我纠正
+</div>
+<div class="accent-bar"></div>
+
+</body>
+</html>

@@ -1,0 +1,68 @@
+{
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
+  "operations_db": "/home/pwn/workspace/company/operations/runtime/operations_control.db",
+  "router_db": "/home/pwn/workspace/company/operations/runtime/company_router.db",
+  "run_root": "/home/pwn/workspace/company/operations/runtime/autonomy-runs",
+  "market_signals_db": "/home/pwn/workspace/company/marketing/market_signals.db",
+  "market_min_pulse_score": 60,
+  "market_theme_cooldown_hours": 168,
+  "market_material_score_delta": 8,
+  "hermes_executable": "hermes",
+  "hermes_state_db": "/home/pwn/.hermes/state.db",
+  "operator_max_turns": 30,
+  "operator_timeout_seconds": 1200,
+  "max_actions_per_cycle": 1,
+  "minimum_score": 55,
+  "queue_age_boost_per_day": 12,
+  "queue_age_boost_cap": 40,
+  "auto_execute_risk_levels": ["low"],
+  "outcome_followup_after_hours": 24,
+  "approval_digest_items": 3,
+  "proactive_delivery": true,
+  "proactive_delivery_platforms": ["weixin"],
+  "operator_delivery_chars": 1400,
+  "hermes_repo": "/home/pwn/.hermes/hermes-agent",
+  "standing_missions": [
+    {
+      "id": "portfolio-momentum",
+      "enabled": false,
+      "title": "推进公司组合中最高价值的停滞事项",
+      "product_line": "company",
+      "cadence_hours": 24,
+      "base_score": 68,
+      "risk_level": "low",
+      "prompt": "检查公司 DASHBOARD、projects 总览以及各项目 TRACKING。识别一个价值高、已有足够本地证据、且无需外部动作即可推进的停滞事项；直接完成其内部准备工作，并产出可执行交付包。不要把整理待办清单本身当作完成。"
+    },
+    {
+      "id": "content-flow",
+      "enabled": true,
+      "title": "减少内容库存等待并准备下一项可交付内容",
+      "product_line": "article-production",
+      "cadence_hours": 72,
+      "base_score": 64,
+      "risk_level": "low",
+      "prompt": "检查两条文章项目的 TRACKING、现有文章、QA 与真实表现数据。选择一个无需公开发布即可推进的最高价值步骤，例如发布准备包、选题 brief、质量缺口修复建议或复用素材包，并在产物目录中直接完成。"
+    },
+    {
+      "id": "revenue-evidence",
+      "enabled": true,
+      "title": "推进最接近收入且证据充分的内部准备工作",
+      "product_line": "security-exploration",
+      "cadence_hours": 168,
+      "base_score": 61,
+      "risk_level": "low",
+      "prompt": "只读检查安全产品线、财务账摘要和已授权本地证据。选择最接近真实收入、但不需要外部扫描、漏洞提交或联系第三方的内部准备工作，直接形成验证清单、报告骨架、证据索引或决策包。"
+    },
+    {
+      "id": "h1-bounty-discovery",
+      "enabled": true,
+      "title": "HackerOne 赏金目标发现与 ROI 排序",
+      "product_line": "security-exploration",
+      "cadence_hours": 168,
+      "base_score": 72,
+      "risk_level": "low",
+      "prompt": "通过 web_search 和 web_extract 分析 HackerOne 公开赏金计划（不进行任何主动扫描、探测或渗透）。对每个目标收集：赏金范围（$）、资产类型（Web/API/Mobile/IoT）、Scope 大小、平均响应时间、历史 bounty paid 情况。只推荐 Web/API 为主的目标（本机无移动设备）。按 ROI 排序输出 Top 5 推荐，含推荐理由和切入点建议。产物写入 ~/workspace/hackerone/discovery/。禁止任何形式的主动扫描、端口探测、漏洞测试或 H1 提交。"
+    }
+  ]
+}

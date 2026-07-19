@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200, initial-scale=1.0">
+<style>
+  :root {
+    --bg: #0A0D1A;
+    --panel: #131830;
+    --panel-hover: #1B2244;
+    --primary: #3553FF;
+    --primary-light: #6B8EFF;
+    --amber: #D4A83D;
+    --amber-light: #E8C46C;
+    --emerald: #2D9F5E;
+    --crimson: #D9453B;
+    --text: #E8E6DC;
+    --text-secondary: #A8A6A0;
+    --text-muted: #7A7878;
+    --border: rgba(53, 83, 255, 0.15);
+    --code-bg: #090C18;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1200px;
+    height: 675px;
+    background: var(--bg);
+    font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    padding: 28px 48px 0;
+    flex-shrink: 0;
+  }
+  .header .meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 10px;
+    color: var(--primary-light);
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+  .header hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 6px 0 14px;
+  }
+  .header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    text-align: center;
+    color: var(--text);
+    letter-spacing: 0.04em;
+  }
+  .header .subtitle {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  /* ── Main Grid ── */
+  .main {
+    flex: 1;
+    display: flex;
+    gap: 24px;
+    padding: 20px 48px 0;
+    min-height: 0;
+  }
+
+  /* ── Element Card ── */
+  .elem-card {
+    flex: 1;
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .elem-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+  .elem-card.card-name::after   { background: var(--primary); }
+  .elem-card.card-desc::after   { background: var(--amber); }
+  .elem-card.card-schema::after { background: var(--emerald); }
+
+  .elem-card .step-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .elem-card .step-num {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .card-name   .step-num { color: var(--primary-light); border: 2px solid var(--primary); }
+  .card-desc   .step-num { color: var(--amber-light);  border: 2px solid var(--amber); }
+  .card-schema .step-num { color: #4FC17C;             border: 2px solid var(--emerald); }
+
+  .elem-card .step-label {
+    font-size: 15px; font-weight: 700;
+  }
+  .card-name   .step-label { color: var(--primary-light); }
+  .card-desc   .step-label { color: var(--amber-light); }
+  .card-schema .step-label { color: #4FC17C; }
+
+  .elem-card .sub-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* Code snippet inside card */
+  .elem-card .code-snip {
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin: 10px 0;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 10.5px;
+    line-height: 1.65;
+    color: #cdd6f4;
+    border: 1px solid rgba(53, 83, 255, 0.12);
+  }
+  .code-snip .cs-kw  { color: #cba6f7; }
+  .code-snip .cs-str { color: #a6e3a1; }
+  .code-snip .cs-num { color: #fab387; }
+  .code-snip .cs-cm  { color: #6c7086; }
+  .code-snip .cs-fn  { color: #89b4fa; }
+  .code-snip .cs-warn { color: #f9e2af; }
+
+  .elem-card .point {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.65;
+    margin-top: auto;
+  }
+  .elem-card .point strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* ── Connector Arrows between cards ── */
+  .connector {
+    width: 24px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary-light);
+    opacity: 0.35;
+  }
+  .connector svg { width: 20px; height: 20px; }
+
+  /* ── Metrics Bar ── */
+  .metrics-bar {
+    display: flex;
+    gap: 20px;
+    padding: 14px 48px 4px;
+    flex-shrink: 0;
+  }
+  .metric {
+    flex: 1;
+    background: rgba(19, 24, 48, 0.7);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .metric .metric-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .metric-improvement .metric-icon { background: rgba(45, 159, 94, 0.15); }
+  .metric-warning    .metric-icon { background: rgba(212, 168, 61, 0.15); }
+
+  .metric .metric-body { flex: 1; }
+  .metric .metric-value {
+    font-size: 20px; font-weight: 700;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    letter-spacing: -0.02em;
+  }
+  .metric-improvement .metric-value { color: var(--emerald); }
+  .metric-warning    .metric-value { color: var(--amber); }
+
+  .metric .metric-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .metric .metric-arrow {
+    font-size: 18px; color: #4FC17C;
+  }
+  .metric .metric-from { color: var(--crimson); font-weight: 700; }
+  .metric .metric-to   { color: var(--emerald); font-weight: 700; }
+
+  /* ── Footer ── */
+  .footer {
+    padding: 10px 48px 16px;
+    flex-shrink: 0;
+  }
+  .footer hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin-bottom: 10px;
+  }
+  .footer-text {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  /* ── Geometric accents ── */
+  .geo-dot {
+    position: absolute;
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--primary-light);
+    opacity: 0.25;
+  }
+
+  /* ── Badge: what to do vs what NOT to do ── */
+  .do-dont {
+    display: flex;
+    gap: 8px;
+    margin: 10px 0;
+  }
+  .do-dont span {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .do-dont .do   { background: rgba(45,159,94,0.15);  color: var(--emerald); }
+  .do-dont .dont { background: rgba(217,69,59,0.12);   color: var(--crimson); }
+
+  /* Warning stripe at very bottom */
+  .accent-stripe {
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary), var(--primary-light), var(--amber), var(--emerald));
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="meta">
+    <span>FIG_02.01 — TOOL SCHEMA DESIGN</span>
+    <span>PHASE 02</span>
+  </div>
+  <hr>
+  <h1>工具 Schema 三要素：让模型准确选对工具</h1>
+  <div class="subtitle">一条 Schema 定义的好坏，直接决定 Agent 能不能用对工具</div>
+</div>
+
+<!-- Three Columns -->
+<div class="main">
+
+  <!-- Card 1: 工具名 -->
+  <div class="elem-card card-name">
+    <div class="step-badge">
+      <div class="step-num">①</div>
+      <div>
+        <div class="step-label">工具名</div>
+        <div class="sub-label">name</div>
+      </div>
+    </div>
+    <div class="code-snip">
+      <span class="cs-cm"># ✅ 好命名：动词-名词, 层级清晰</span><br>
+      <span class="cs-str">"search_contacts"</span><br>
+      <span class="cs-str">"notes_create"</span><br>
+      <span class="cs-str">"weather_get_forecast"</span><br>
+      <br>
+      <span class="cs-cm"># ❌ 坏命名：单一名词, 无意义前缀</span><br>
+      <span class="cs-warn">"search"</span><br>
+      <span class="cs-warn">"tool1"</span><br>
+      <span class="cs-warn">"create"</span>
+    </div>
+    <div class="do-dont">
+      <span class="do">snake_case</span>
+      <span class="dont">camelCase</span>
+      <span class="do">命名空间前缀</span>
+      <span class="dont">单一名词</span>
+    </div>
+    <div class="point">
+      <strong>命名即定位。</strong>模型通过名字<strong>快速排除</strong>不相关工具。名字模糊 → 批量误调用。
+    </div>
+  </div>
+
+  <!-- Connector -->
+  <div class="connector">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M5 12h12M13 6l6 6-6 6"/>
+    </svg>
+  </div>
+
+  <!-- Card 2: 工具描述 -->
+  <div class="elem-card card-desc">
+    <div class="step-badge">
+      <div class="step-num">②</div>
+      <div>
+        <div class="step-label">工具描述</div>
+        <div class="sub-label">description</div>
+      </div>
+    </div>
+    <div class="code-snip">
+      <span class="cs-cm"># ✅ 好描述：Use when + NOT when</span><br>
+      <span class="cs-str">"Use when user asks to search</span><br>
+      <span class="cs-str"> contacts by name or phone.</span><br>
+      <span class="cs-str"> Do not use for email lookup —</span><br>
+      <span class="cs-str"> use search_emails instead."</span><br>
+      <br>
+      <span class="cs-cm"># ❌ 坏描述：一句带过, 无排他信息</span><br>
+      <span class="cs-warn">"Search contacts."</span>
+    </div>
+    <div class="point">
+      <strong>模型<u>只读 description</u>来决定调用哪个工具。</strong>
+      描述模糊 → 准确率 <span style="color:var(--crimson);font-weight:700;">62%</span>
+      &nbsp;描述清晰 → <span style="color:var(--emerald);font-weight:700;">89%</span>
+    </div>
+  </div>
+
+  <!-- Connector -->
+  <div class="connector">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M5 12h12M13 6l6 6-6 6"/>
+    </svg>
+  </div>
+
+  <!-- Card 3: 参数定义 -->
+  <div class="elem-card card-schema">
+    <div class="step-badge">
+      <div class="step-num">③</div>
+      <div>
+        <div class="step-label">参数定义</div>
+        <div class="sub-label">input_schema</div>
+      </div>
+    </div>
+    <div class="code-snip">
+      <span class="cs-cm">// JSON Schema — 精确约束</span><br>
+      {<br>
+      &nbsp;&nbsp;<span class="cs-str">"type"</span>: <span class="cs-str">"object"</span>,<br>
+      &nbsp;&nbsp;<span class="cs-str">"properties"</span>: {<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="cs-str">"unit"</span>: {<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cs-str">"type"</span>: <span class="cs-str">"string"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cs-str">"enum"</span>: [<span class="cs-str">"celsius"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cs-str">"fahrenheit"</span>]<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+      &nbsp;&nbsp;},<br>
+      &nbsp;&nbsp;<span class="cs-str">"required"</span>: [<span class="cs-str">"unit"</span>]<br>
+      }
+    </div>
+    <div class="do-dont">
+      <span class="do">enum 封闭集合</span>
+      <span class="dont">type:any 通配</span>
+      <span class="do">required 必填</span>
+      <span class="dont">无 description</span>
+    </div>
+    <div class="point">
+      <strong>参数越精确，幻觉越少。</strong>enum 封闭可选值，required 标记必填字段 —— 让模型无法「编造」参数。
+    </div>
+  </div>
+
+</div>
+
+<!-- Metrics Bar -->
+<div class="metrics-bar">
+  <div class="metric metric-improvement">
+    <div class="metric-icon">📈</div>
+    <div class="metric-body">
+      <div class="metric-value">
+        <span class="metric-from">62%</span>
+        <span class="metric-arrow"> → </span>
+        <span class="metric-to">89%</span>
+      </div>
+      <div class="metric-label">工具描述质量对<strong>工具选择准确率</strong>的影响</div>
+    </div>
+  </div>
+  <div class="metric metric-warning">
+    <div class="metric-icon">⚠️</div>
+    <div class="metric-body">
+      <div class="metric-value">15–30%</div>
+      <div class="metric-label">单体工具（一个 tool 包所有功能）相比<strong>原子化工具</strong>的精度损失</div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  <hr>
+  <div class="footer-text">Tool Schema 设计原则 · AI 工程从零开始 · Phase 02</div>
+</div>
+<div class="accent-stripe"></div>
+
+</body>
+</html>

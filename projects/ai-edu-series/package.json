@@ -1,0 +1,15 @@
+{
+  "name": "ai-edu-series",
+  "version": "1.0.0",
+  "description": "- GitHub: https://github.com/rohitg00/ai-engineering-from-scratch - 503 节课, 20 个阶段, Python/TypeScript/Rust/Julia - MIT 开源, 月活 15 万读者",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}

@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Estimate model token cost by joining measured usage to evidence-backed prices.
+
+The company already measures tokens precisely (``operational_runs``) and stores
+provider prices precisely (``finance_ledger.model_prices``), but nothing ever
+multiplied the two.  As a result the dominant production path recorded
+``$0.00`` cost, which silently biased every downstream ROI judgement toward
+"free / profitable".
+
+This module is a small, pure price-join.  It never invents an FX rate: a cost
+is reported in USD only when the matched price row is already denominated in
+USD; otherwise the native amount + currency are kept so no cost silently
+collapses to zero.  A run that cannot be priced stays explicitly ``unpriced``
+(never ``$0``), preserving the ledger's "unknown is not zero" discipline.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+COMPANY_ROOT = Path("/home/pwn/workspace/company")
+DEFAULT_FINANCE_DB = COMPANY_ROOT / "finance/finance_ledger.db"
+
+# Statuses that mean a real, provider-confirmed cost is already recorded.  A
+# computed estimate must never overwrite one of these.
+ACTUAL_COST_STATUSES = {"actual", "confirmed", "provider_reported", "billed"}
+
+PER_MILLION = 1_000_000
+
+# (usage-token field on the run, price column on the price row)
+_COST_COMPONENTS = (
+    ("input_tokens", "input_price"),
+    ("output_tokens", "output_price"),
+    ("cache_read_tokens", "cache_read_price"),
+    ("cache_write_tokens", "cache_write_price"),
+)
+
+
+def _norm(model: Any) -> str:
+    return str(model or "").strip().lower()
+
+
+def _base(slug: str) -> str:
+    """Provider-independent base name: ``deepseek/deepseek-v4-pro`` -> ``deepseek-v4-pro``."""
+    return slug.rsplit("/", 1)[-1] if slug else ""
+
+
+def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> Dict[str, Any]:
+    """Load evidence-backed prices read-only.
+
+    Returns a lookup with ``by_slug`` (exact, lowercased ``model_slug``) and
+    ``by_base`` (provider-stripped name -> candidate rows).  Missing DB / table
+    yields an empty table so callers degrade to "unpriced" rather than crash.
+    """
+    by_slug: Dict[str, List[Dict[str, Any]]] = {}
+    by_base: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        db = sqlite3.connect(f"file:{finance_db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {"by_slug": by_slug, "by_base": by_base}
+    db.row_factory = sqlite3.Row
+    try:
+        cols = {row[1] for row in db.execute("PRAGMA table_info(model_prices)")}
+        if not {"model_slug", "currency", "input_price", "output_price"}.issubset(cols):
+            return {"by_slug": by_slug, "by_base": by_base}
+        for row in db.execute(
+            """SELECT provider,model_slug,currency,unit,
+                      input_price,output_price,cache_read_price,cache_write_price
+               FROM model_prices"""
+        ):
+            info = {
+                "provider": str(row["provider"] or ""),
+                "model_slug": str(row["model_slug"] or ""),
+                "currency": str(row["currency"] or "").upper(),
+                "unit": str(row["unit"] or "millionTokens"),
+                "input_price": row["input_price"],
+                "output_price": row["output_price"],
+                "cache_read_price": row["cache_read_price"],
+                "cache_write_price": row["cache_write_price"],
+            }
+            slug = _norm(info["model_slug"])
+            if not slug:
+                continue
+            by_slug.setdefault(slug, []).append(info)
+            by_base.setdefault(_base(slug), []).append(info)
+    except sqlite3.Error:
+        return {"by_slug": {}, "by_base": {}}
+    finally:
+        db.close()
+    return {"by_slug": by_slug, "by_base": by_base}
+
+
+def _pick(candidates: List[Dict[str, Any]], model_norm: str) -> Optional[Dict[str, Any]]:
+    """Deterministic winner among price rows sharing a base name.
+
+    Prefer USD (so figures stay comparable in a mixed-provider deployment),
+    then an exact full-slug match, then the first row.  The choice is always
+    recorded as an *estimate* with its provenance, so an operator can correct a
+    mispriced provider via the outcome path.
+    """
+    if not candidates:
+        return None
+    usd = [item for item in candidates if item["currency"] == "USD"]
+    pool = usd or candidates
+    for item in pool:
+        if _norm(item["model_slug"]) == model_norm:
+            return item
+    return pool[0]
+
+
+def match_price(model: Any, table: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    model_norm = _norm(model)
+    if not model_norm:
+        return None
+    base = _base(model_norm)
+    # Consider every row sharing the base name (covers both ``deepseek-v4-pro``
+    # and ``deepseek/deepseek-v4-pro``) so USD preference can win over an exact
+    # non-USD match.
+    candidates = list(table.get("by_base", {}).get(base, []))
+    if not candidates:
+        candidates = list(table.get("by_slug", {}).get(model_norm, []))
+    return _pick(candidates, model_norm)
+
+
+def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> Dict[str, Any]:
+    """Estimate the cost of one run from its measured tokens.
+
+    Never fabricates: unmatched -> ``unpriced``; matched non-USD -> native
+    amount kept, ``estimated_cost_usd`` left ``None`` (no FX guess); price
+    components that are absent for the model are listed in
+    ``unpriced_components`` rather than assumed free-but-hidden.
+    """
+    token_counts = {field: int(tokens.get(field) or 0) for field, _ in _COST_COMPONENTS}
+    total_tokens = sum(token_counts.values())
+    result: Dict[str, Any] = {
+        "estimated_cost_usd": None,
+        "estimated_cost_native": None,
+        "estimated_cost_currency": "",
+        "cost_status": "unknown",
+        "matched_slug": "",
+        "matched_provider": "",
+        "priced_components": [],
+        "unpriced_components": [],
+    }
+    if not _norm(model) or total_tokens == 0:
+        return result
+    price = match_price(model, table)
+    if price is None:
+        result["cost_status"] = "unpriced"
+        result["unpriced_components"] = [field for field, count in token_counts.items() if count]
+        return result
+
+    native = 0.0
+    priced: List[str] = []
+    unpriced: List[str] = []
+    for field, price_col in _COST_COMPONENTS:
+        count = token_counts[field]
+        if not count:
+            continue
+        rate = price.get(price_col)
+        if rate is None:
+            unpriced.append(field)
+            continue
+        native += count * float(rate) / PER_MILLION
+        priced.append(field)
+
+    currency = price["currency"]
+    native = round(native, 6)
+    result.update({
+        "estimated_cost_native": native,
+        "estimated_cost_currency": currency,
+        # USD only when the price itself is USD — no invented FX rate.
+        "estimated_cost_usd": native if currency == "USD" else None,
+        "cost_status": "estimated" if priced else "unpriced",
+        "matched_slug": price["model_slug"],
+        "matched_provider": price["provider"],
+        "priced_components": priced,
+        "unpriced_components": unpriced,
+    })
+    return result
+
+
+def price_run_update(
+    model: Any,
+    tokens: Dict[str, Any],
+    table: Dict[str, Any],
+    *,
+    existing_cost_status: Any = "",
+) -> Optional[Dict[str, Any]]:
+    """Return column updates for a run, or ``None`` to leave it untouched.
+
+    A confirmed/actual cost is authoritative and never replaced by an estimate.
+    """
+    if _norm(existing_cost_status) in ACTUAL_COST_STATUSES:
+        return None
+    est = estimate_cost(model, tokens, table)
+    return {
+        "estimated_cost_usd": est["estimated_cost_usd"],
+        "estimated_cost_native": est["estimated_cost_native"],
+        "estimated_cost_currency": est["estimated_cost_currency"],
+        "cost_status": est["cost_status"],
+        "_pricing": {
+            "matched_slug": est["matched_slug"],
+            "matched_provider": est["matched_provider"],
+            "priced_components": est["priced_components"],
+            "unpriced_components": est["unpriced_components"],
+        },
+    }
+
+
+def cost_rollup(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate cost honestly: confirmed USD, estimated USD, native non-USD, and
+    the still-unpriced token volume — so no consumer can sum a basis that omits
+    the unpriced portion.
+    """
+    confirmed_usd = 0.0
+    estimated_usd = 0.0
+    estimated_native: Dict[str, float] = {}
+    unpriced_runs = 0
+    unpriced_tokens = 0
+    priced_runs = 0
+    for run in runs:
+        status = _norm(run.get("cost_status") or "unknown")
+        tokens = sum(int(run.get(field) or 0) for field, _ in _COST_COMPONENTS)
+        if status in ACTUAL_COST_STATUSES:
+            confirmed_usd += float(run.get("actual_cost_usd") or 0)
+            priced_runs += 1
+        elif status == "estimated":
+            priced_runs += 1
+            usd = run.get("estimated_cost_usd")
+            if usd is not None:
+                estimated_usd += float(usd)
+            native = run.get("estimated_cost_native")
+            currency = str(run.get("estimated_cost_currency") or "").upper()
+            if usd is None and native is not None and currency:
+                estimated_native[currency] = round(estimated_native.get(currency, 0.0) + float(native), 6)
+        else:
+            unpriced_runs += 1
+            unpriced_tokens += tokens
+    return {
+        "confirmed_cost_usd": round(confirmed_usd, 6),
+        "estimated_cost_usd": round(estimated_usd, 6),
+        "estimated_cost_native": estimated_native,
+        "priced_runs": priced_runs,
+        "unpriced_runs": unpriced_runs,
+        "unpriced_token_volume": unpriced_tokens,
+    }

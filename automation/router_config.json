@@ -2,6 +2,7 @@
   "enabled": true,
   "dispatch_security": true,
   "auto_run_security": true,
+  "authorized_targets": [],
   "swarm_repo": "/home/pwn/workspace/research/swarm-knowledge",
   "swarm_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db",
   "state_db": "/home/pwn/workspace/company/operations/runtime/company_router.db",

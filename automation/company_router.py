@@ -66,12 +66,15 @@ ACTIVE_SECURITY_TERMS = {
 AUTHORIZATION_TERMS = {
     "已授权", "明确授权", "授权范围", "in scope", "in-scope", "scope内",
     "hackerone项目", "hackerone program", "赏金项目", "自有系统", "本地靶场",
-}
+}  # retained for reference only — NOT trusted for authorization (see classify_message)
 EXTERNAL_ACTION_TERMS = {
     "发布", "推送", "提交hackerone", "发送", "删除", "付款", "转账", "上线",
 }
+# Only strip an external-action term when the negator is directly attached
+# ("不发布", "禁止推送"). A wide window used to swallow "不要忘记发布" and let a
+# real publish slip through; a near-miss now stays flagged (fail toward approval).
 NEGATED_EXTERNAL_ACTION_RE = re.compile(
-    r"(?:不|不要|无需|禁止|不得|暂不|先不|仅生成|只生成)[^，。；\n]{0,16}"
+    r"(?:不|不要|无需|禁止|不得|暂不|先不|仅生成|只生成)[^，。；\n]{0,1}"
     r"(?:发布|推送|提交hackerone|发送|删除|付款|转账|上线)",
     re.I,
 )
@@ -165,7 +168,23 @@ def extract_target(message: str) -> tuple[str, str]:
     return "unknown", ""
 
 
-def classify_message(message: str) -> RouteDecision:
+def _is_internal_target(target_type: str, target: str) -> bool:
+    """Local/own targets that need no external scope authorization."""
+    if target_type == "apk":
+        return True
+    value = (target or "").lower()
+    if value.startswith("/home/pwn/workspace/") or value.startswith("localhost"):
+        return True
+    if target_type == "ip":
+        try:
+            addr = ipaddress.ip_address(target)
+            return addr.is_private or addr.is_loopback
+        except ValueError:
+            return False
+    return False
+
+
+def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> RouteDecision:
     text = " ".join((message or "").split())
     lowered = text.lower()
 
@@ -215,19 +234,22 @@ def classify_message(message: str) -> RouteDecision:
         )
 
     target_type, target = extract_target(text)
-    active = _contains_any(text, ACTIVE_SECURITY_TERMS)
-    authorized = _contains_any(text, AUTHORIZATION_TERMS)
-    local_target = target.startswith("/home/pwn/workspace/") if target else False
-    authorization_required = bool(active and target and not (authorized or local_target))
-
     if any(term in lowered for term in ("生成报告", "写报告", "整理报告", "输出报告", "出报告", "write report", "writeup")):
         intent = "report"
     elif any(term in lowered for term in ("利用", "exploit", "poc")):
         intent = "exploit"
-    elif active:
+    elif _contains_any(text, ACTIVE_SECURITY_TERMS):
         intent = "recon"
     else:
         intent = "analyze"
+
+    # exploit (incl. poc) and recon are active testing; report/analyze are passive.
+    active = intent in {"exploit", "recon"}
+    # Authorization comes from a trusted scope allowlist (config), NEVER from
+    # in-band user text like "已授权". Internal/local targets need no scope.
+    allow = {str(item).strip().lower() for item in authorized_targets if str(item).strip()}
+    authorized = bool(target) and target.lower() in allow
+    authorization_required = bool(active and target and not (authorized or _is_internal_target(target_type, target)))
 
     profile = "breadth" if intent == "recon" else "depth" if intent in {"analyze", "exploit"} else "balanced"
     action = "approval_required" if authorization_required or external_action else "dispatch_swarm"
@@ -853,7 +875,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
             status_updates=updates,
         )}
 
-    decision = classify_message(message)
+    decision = classify_message(message, config.get("authorized_targets") or [])
     if decision.action == "dispatch_swarm" and not EXPLICIT_NEW_SWARM_RE.search(message):
         dedup_minutes = int(config.get("swarm_dedup_window_minutes", 10))
         recent = state.recent_for_session(
@@ -998,7 +1020,7 @@ def main() -> int:
         print(json.dumps(handle_hook(parse_hook_stdin(), config), ensure_ascii=False))
         return 0
 
-    decision = classify_message(args.message)
+    decision = classify_message(args.message, config.get("authorized_targets") or [])
     if not args.dispatch:
         print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
         return 0

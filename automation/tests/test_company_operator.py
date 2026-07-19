@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -163,6 +165,78 @@ class CompanyOperatorTests(unittest.TestCase):
 
             self.assertEqual(selected[0]["mission_id"], "slower")
             self.assertGreater(selected[0]["effective_score"], 68)
+
+    def test_budget_scales_with_backlog_and_selects_sources_fairly(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config.update({
+                "base_actions_per_cycle": 1,
+                "max_actions_per_cycle": 4,
+                "queue_items_per_action": 2,
+            })
+            db_path = Path(config["operations_db"])
+            db = connect(db_path)
+            now = datetime(2026, 7, 15, tzinfo=timezone.utc).isoformat()
+            rows = []
+            for index, source in enumerate(("market_pulse", "market_pulse", "standing_mission", "standing_mission", "experiment", "experiment")):
+                rows.append((
+                    f"opp-{index}", f"key-{index}", source, f"ref-{index}", "company",
+                    f"task-{index}", "safe", "internal_mission", "low", 100 - index, now, now,
+                ))
+            db.executemany(
+                """INSERT INTO autonomy_opportunities
+                   (opportunity_id,idempotency_key,source_type,source_ref,product_line,title,
+                    description,action_kind,risk_level,requires_approval,approval_granted,score,
+                    status,evidence_json,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,0,0,?,'open','{}',?,?)""",
+                rows,
+            )
+            db.commit()
+            db.close()
+
+            selected = select_executable(db_path, config)
+
+            self.assertEqual(len(selected), 3)
+            self.assertEqual({item["source_type"] for item in selected}, {
+                "market_pulse", "standing_mission", "experiment",
+            })
+
+    def test_cycle_executes_budget_in_bounded_parallel(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config.update({
+                "base_actions_per_cycle": 1,
+                "max_actions_per_cycle": 3,
+                "queue_items_per_action": 1,
+                "max_parallel_workers": 2,
+                "standing_missions": [
+                    {"id": f"mission-{index}", "title": f"任务 {index}", "product_line": "company",
+                     "cadence_hours": 24, "base_score": 70 - index, "risk_level": "low", "prompt": "safe"}
+                    for index in range(4)
+                ],
+            })
+            lock = threading.Lock()
+            active = 0
+            peak = 0
+
+            def fake_worker(_opportunity, run_dir, _config):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                (run_dir / "action-report.md").write_text("done", encoding="utf-8")
+                (run_dir / "result.json").write_text("{}", encoding="utf-8")
+                with lock:
+                    active -= 1
+                return {"status": "completed", "summary": "done", "next_action": "", "metrics": {}, "error": ""}
+
+            result = run_cycle(config, worker=fake_worker)
+
+            self.assertEqual(len(result["executions"]), 3)
+            self.assertEqual(peak, 2)
 
     def test_completed_run_creates_outcome_followup_but_never_auto_executes_it(self):
         with tempfile.TemporaryDirectory() as td:
@@ -422,6 +496,35 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertEqual(delivered[0][0]["chat_id"], "chat-1")
             self.assertIn("公司自驱日报", delivered[0][1])
             self.assertIn("主动完成", delivered[0][1])
+
+    def test_operator_surfaces_non_allowlisted_delivery_in_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["proactive_delivery"] = True
+            config["proactive_delivery_platforms"] = ["weixin"]
+            config["delivery_fallback_path"] = str(root / "dead-letters.jsonl")
+            router = sqlite3.connect(config["router_db"])
+            router.execute(
+                """CREATE TABLE route_events (
+                   delivery_platform TEXT,delivery_chat_id TEXT,delivery_thread_id TEXT,
+                   delivery_user_id TEXT,updated_at TEXT)"""
+            )
+            router.execute(
+                "INSERT INTO route_events VALUES ('qq','chat-1','','user-1','2026-07-15T00:00:00+00:00')"
+            )
+            router.commit()
+            router.close()
+
+            result = run_cycle(config, worker=lambda *_args: {
+                "status": "completed", "summary": "done", "next_action": "", "metrics": {}, "error": "",
+            })
+
+            self.assertFalse(result["delivered"])
+            self.assertIn("terminal:", result["delivery_error"])
+            records = [json.loads(line) for line in Path(config["delivery_fallback_path"]).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(records[0]["kind"], "autonomy-cycle")
+            self.assertIn("公司自驱日报", records[0]["message"])
 
     def test_worker_usage_is_linked_by_operator_run_directory(self):
         with tempfile.TemporaryDirectory() as td:

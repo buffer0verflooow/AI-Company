@@ -27,6 +27,7 @@
   "result_context_chars": 6000,
   "proactive_delivery": true,
   "proactive_delivery_platforms": ["weixin"],
+  "delivery_fallback_path": "/home/pwn/workspace/company/operations/runtime/delivery-dead-letters.jsonl",
   "proactive_result_chars": 6000,
   "proactive_delivery_default_chars": 3000,
   "proactive_delivery_chars_by_platform": {"weixin": 1800},

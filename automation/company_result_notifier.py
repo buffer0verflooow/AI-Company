@@ -175,6 +175,59 @@ def _delivery_retry_ready(config: Dict[str, Any], row: Any) -> bool:
     return (datetime.now(timezone.utc) - last_at).total_seconds() >= delay
 
 
+def _delivery_fallback_path(config: Dict[str, Any]) -> Path:
+    configured = str(config.get("delivery_fallback_path") or "").strip()
+    return Path(configured) if configured else Path(config["state_db"]).parent / "delivery-dead-letters.jsonl"
+
+
+def record_terminal_delivery(
+    config: Dict[str, Any],
+    *,
+    kind: str,
+    identifier: str,
+    origin: Dict[str, str],
+    message: str,
+    reason: str,
+) -> str:
+    """Persist an undeliverable terminal notification for management recovery."""
+    path = _delivery_fallback_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "recorded_at": utc_now(),
+        "kind": kind,
+        "identifier": identifier,
+        "origin": origin,
+        "reason": reason,
+        "message": message,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return str(path)
+
+
+def list_terminal_deliveries(config: Dict[str, Any], limit: int = 50) -> list[Dict[str, Any]]:
+    """Return the newest locally surfaced terminal notifications."""
+    path = _delivery_fallback_path(config)
+    if not path.is_file():
+        return []
+    records: list[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records[-max(0, limit):][::-1]
+
+
+def _terminal_reason(config: Dict[str, Any], origin: Dict[str, str]) -> str:
+    allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
+    if allowed and origin.get("platform", "").lower() not in allowed:
+        return f"delivery platform not allowlisted: {origin.get('platform', '')}"
+    return ""
+
+
 def _origin_for_row(config: Dict[str, Any], row: Any) -> Dict[str, str]:
     stored = {
         "platform": str(row["delivery_platform"] or ""),
@@ -240,7 +293,10 @@ def process_once(
     mirror: Optional[MirrorFn] = None,
 ) -> Dict[str, int]:
     """Reconcile run state, recover dead runners, and deliver terminal results."""
-    summary = {"checked": 0, "running": 0, "restarted": 0, "delivered": 0, "failed": 0, "waiting_target": 0}
+    summary = {
+        "checked": 0, "running": 0, "restarted": 0, "delivered": 0,
+        "failed": 0, "waiting_target": 0, "terminal": 0,
+    }
     if not config.get("proactive_delivery", True):
         return summary
 
@@ -296,15 +352,21 @@ def process_once(
                 summary["waiting_target"] += 1
                 continue
 
-            allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
-            if allowed and origin["platform"].lower() not in allowed:
+            message = _format_terminal_message(config, row, result)
+            message = _fit_delivery_message(config, origin, message)
+            terminal_reason = _terminal_reason(config, origin)
+            if terminal_reason:
+                fallback = record_terminal_delivery(
+                    config, kind="swarm", identifier=run_id, origin=origin,
+                    message=message, reason=terminal_reason,
+                )
                 state.update(
                     event_id,
-                    delivery_attempts=attempts,
-                    delivery_error=f"delivery platform not allowlisted: {origin['platform']}",
+                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
                     last_delivery_at=utc_now(),
                 )
-                summary["failed"] += 1
+                summary["terminal"] += 1
                 continue
 
             state.update(
@@ -314,8 +376,6 @@ def process_once(
                 delivery_thread_id=origin.get("thread_id", ""),
                 delivery_user_id=origin.get("user_id", ""),
             )
-            message = _format_terminal_message(config, row, result)
-            message = _fit_delivery_message(config, origin, message)
             ok, error = deliverer(config, origin, message)
             if ok:
                 state.update(
@@ -388,15 +448,21 @@ def process_once(
                 )
                 summary["waiting_target"] += 1
                 continue
-            allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
-            if allowed and origin["platform"].lower() not in allowed:
+            message = _format_content_message(row, payload)
+            message = _fit_delivery_message(config, origin, message)
+            terminal_reason = _terminal_reason(config, origin)
+            if terminal_reason:
+                fallback = record_terminal_delivery(
+                    config, kind="content", identifier=run_id, origin=origin,
+                    message=message, reason=terminal_reason,
+                )
                 state.update(
                     event_id,
-                    delivery_attempts=attempts,
-                    delivery_error=f"delivery platform not allowlisted: {origin['platform']}",
+                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
                     last_delivery_at=utc_now(),
                 )
-                summary["failed"] += 1
+                summary["terminal"] += 1
                 continue
             state.update(
                 event_id,
@@ -405,8 +471,6 @@ def process_once(
                 delivery_thread_id=origin.get("thread_id", ""),
                 delivery_user_id=origin.get("user_id", ""),
             )
-            message = _format_content_message(row, payload)
-            message = _fit_delivery_message(config, origin, message)
             ok, error = deliverer(config, origin, message)
             if ok:
                 state.update(
@@ -460,22 +524,26 @@ def process_once(
                 )
                 summary["waiting_target"] += 1
                 continue
-            allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
-            if allowed and origin["platform"].lower() not in allowed:
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=attempts,
-                    delivery_error=f"delivery platform not allowlisted: {origin['platform']}",
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
-                continue
             message = format_review_message(
                 Path(operations_db), review_id,
                 limit=int((config.get("tvcr_delivery_chars_by_platform") or {}).get(
                     origin["platform"], config.get("tvcr_delivery_default_chars", 1000)
                 )),
             )
+            terminal_reason = _terminal_reason(config, origin)
+            if terminal_reason:
+                fallback = record_terminal_delivery(
+                    config, kind="tvcr", identifier=review_id, origin=origin,
+                    message=message, reason=terminal_reason,
+                )
+                update_review(
+                    Path(operations_db), review_id,
+                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
+                    last_delivery_at=utc_now(),
+                )
+                summary["terminal"] += 1
+                continue
             ok, error = deliverer(config, origin, message)
             if ok:
                 update_review(
@@ -505,8 +573,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Deliver completed company Swarm results")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--list-terminal", action="store_true")
+    parser.add_argument("--limit", type=int, default=50)
     args = parser.parse_args()
-    summary = process_once(load_config(Path(args.config)))
+    config = load_config(Path(args.config))
+    if args.list_terminal:
+        print(json.dumps(list_terminal_deliveries(config, args.limit), ensure_ascii=False, indent=2))
+        return 0
+    summary = process_once(config)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False))
     return 0

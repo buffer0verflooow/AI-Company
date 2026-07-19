@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from automation.company_result_notifier import _fit_delivery_message, process_once
+from automation.company_result_notifier import _fit_delivery_message, list_terminal_deliveries, process_once
 from automation.company_router import RouterState, classify_message, resolve_session_origin
 from automation.operations_control import business_period, connect as connect_operations, create_review, import_proposals
 from datetime import date
@@ -123,6 +123,46 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual(row["proactive_delivered"], 0)
             self.assertEqual(row["delivery_attempts"], 1)
             self.assertEqual(row["delivery_error"], "network down")
+            state.close()
+
+    def test_non_allowlisted_platform_becomes_terminal_with_local_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "router.db")
+            fallback = Path(td) / "dead-letters.jsonl"
+            state = RouterState(db_path)
+            decision = classify_message("分析本机 APK 认证逻辑")
+            event_id = state.insert(
+                "session-qq", "qq", "hash-qq", "安全分析", decision,
+                origin={"platform": "qq", "chat_id": "chat-qq", "user_id": "user-qq"},
+            )
+            state.update(event_id, run_id="run-qq", status="running")
+            state.close()
+            config = self._config(td, db_path)
+            config["delivery_fallback_path"] = str(fallback)
+            calls = []
+            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "completed", "result": "done"}):
+                first = process_once(
+                    config,
+                    deliverer=lambda *_args: (calls.append(1) or True, ""),
+                    mirror=lambda _origin, _message: True,
+                )
+                second = process_once(
+                    config,
+                    deliverer=lambda *_args: (calls.append(1) or True, ""),
+                    mirror=lambda _origin, _message: True,
+                )
+            self.assertEqual(first["terminal"], 1)
+            self.assertEqual(second["checked"], 0)
+            self.assertEqual(calls, [])
+            records = [json.loads(line) for line in fallback.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["identifier"], "run-qq")
+            self.assertIn("done", records[0]["message"])
+            self.assertEqual(list_terminal_deliveries(config, 1)[0]["identifier"], "run-qq")
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(row["delivery_attempts"], config["max_delivery_attempts"])
+            self.assertIn("terminal:", row["delivery_error"])
             state.close()
 
     def test_completed_article_job_is_delivered(self):

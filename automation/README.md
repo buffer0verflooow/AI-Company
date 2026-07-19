@@ -53,7 +53,11 @@ Hermes Cron 任务 `company-product-result-notifier` 每分钟运行一次，无
 5. 投递得到明确成功响应后，才写入 `proactive_delivered=1`；
 6. 同时把通知镜像到 Hermes 会话记录，后续对话能够看到该结果。
 
-当前正式配置只允许主动投递到 `weixin`。失败投递保留错误和尝试次数，后续 Cron 可重试。
+当前正式配置只允许主动投递到 `weixin`。可重试的网络失败保留错误、尝试次数并按退避策略重试；来源平台不在白名单时会立即进入 `terminal`，不再空耗 50 次重试，同时把完整通知写入 `operations/runtime/delivery-dead-letters.jsonl`，供管理者恢复或改道投递。
+
+```bash
+python3 automation/company_result_notifier.py --list-terminal --limit 20
+```
 
 ## 安全知识晋升
 
@@ -103,7 +107,7 @@ python3 automation/operations_control.py proposals
 
 ## 每日自治经营
 
-`company_operator.py` 补上 Router 之前缺失的主动入口。它不等待用户消息，而是从长期经营任务、TVCR 提案、已批准实验和缺少结果的 Run 中建立机会队列；每天选择一个满足风险和授权边界的内部任务执行。
+`company_operator.py` 补上 Router 之前缺失的主动入口。它不等待用户消息，而是从长期经营任务、TVCR 提案、已批准实验和缺少结果的 Run 中建立机会队列；每周期按可执行积压动态分配预算，在不同来源间轮转选择，并用配置限定的并行 Worker 执行满足风险和授权边界的内部任务。默认正式配置为基础预算 1、每 2 个积压增加 1 个名额、最多 4 项、最多 2 个并行 Worker。
 
 默认 Worker 只能向 `operations/runtime/autonomy-runs/<run_id>/` 写入产物。公开发布、付款、删除、外部安全测试和 HackerOne 提交仍必须审批。自治运行本身会作为 `source_type=autonomy` 进入经营账本，由下一轮 TVCR 评价实际价值。
 

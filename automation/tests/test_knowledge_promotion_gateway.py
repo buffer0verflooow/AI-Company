@@ -62,7 +62,7 @@ class KnowledgePromotionTests(unittest.TestCase):
             self.assertTrue(output.exists())
             self.assertIn("approved_by: reviewer", output.read_text(encoding="utf-8"))
 
-    def test_sensitive_candidate_can_only_use_clean_human_rewrite(self):
+    def test_security_topic_reaches_disclosure_gate_and_accepts_clean_rewrite(self):
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "swarm.db"
             gate = Path(td) / "gate.db"
@@ -73,13 +73,70 @@ class KnowledgePromotionTests(unittest.TestCase):
             )])
             scan(source, gate)
             candidate = list_candidates(gate)[0]
-            self.assertEqual(candidate["status"], "blocked_sensitive")
+            self.assertEqual(candidate["status"], "needs_disclosure")
+            self.assertEqual(candidate["sensitivity_status"], "topic_needs_review")
             reviewed = Path(td) / "reviewed.md"
             reviewed.write_text("# General lesson\n\nUse layered patch management and evidence-based validation.", encoding="utf-8")
             with self.assertRaises(ValueError):
                 approve(gate, candidate["candidate_id"], "reviewer", reviewed, "unknown")
             approve(gate, candidate["candidate_id"], "reviewer", reviewed, "public")
             self.assertEqual(list_candidates(gate)[0]["status"], "approved")
+
+    def test_code_filenames_are_not_misclassified_as_live_domains(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            self._source(source, [(
+                "k4", 3, "technique", "Review main.py and config.json before release.",
+                "Code review", "engineering", "understand",
+                json.dumps({"base_confidence": 0.9, "cross_validation": 1.0}),
+                "active", json.dumps(["public"]), "2026-07-15",
+            )])
+            scan(source, gate)
+            candidate = list_candidates(gate)[0]
+            self.assertEqual(candidate["status"], "pending_approval")
+            self.assertEqual(candidate["sensitivity_status"], "passed")
+
+    def test_approve_still_rejects_concrete_leaks(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            self._source(source, [(
+                "k5", 3, "technique", "Generic public lesson.", "Lesson", "general", "understand",
+                json.dumps({"base_confidence": 0.9, "cross_validation": 1.0}),
+                "active", json.dumps(["public"]), "2026-07-15",
+            )])
+            scan(source, gate)
+            candidate = list_candidates(gate)[0]
+            reviewed = Path(td) / "reviewed.md"
+            reviewed.write_text("Contact analyst@example.com with token=secret-value", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must-redact"):
+                approve(gate, candidate["candidate_id"], "reviewer", reviewed, "public")
+
+    def test_promote_rejects_content_tampered_after_approval(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            wiki = Path(td) / "wiki"
+            self._source(source, [(
+                "k6", 3, "technique", "Generic public lesson.", "Lesson", "general", "understand",
+                json.dumps({"base_confidence": 0.9, "cross_validation": 1.0}),
+                "active", json.dumps(["public"]), "2026-07-15",
+            )])
+            scan(source, gate)
+            candidate = list_candidates(gate)[0]
+            reviewed = Path(td) / "reviewed.md"
+            reviewed.write_text("# Reviewed lesson", encoding="utf-8")
+            approve(gate, candidate["candidate_id"], "reviewer", reviewed, "public")
+            db = connect_gate(gate)
+            db.execute(
+                "UPDATE promotion_candidates SET reviewed_content='tampered' WHERE candidate_id=?",
+                (candidate["candidate_id"],),
+            )
+            db.commit()
+            db.close()
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                promote(gate, candidate["candidate_id"], wiki)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,35 @@ SENSITIVE_TERMS = {
 }
 DISCLOSURE_TAGS = {"public", "published", "disclosed", "fixed-and-public", "公开", "已披露"}
 
+# Concrete leakable identifiers / secrets / PII — a "must redact" HARD block
+# until removed.
+MUST_REDACT_HITS = {"domain_or_url", "email", "credential_or_dsn", "local_path",
+                    "internal_endpoint", "ip_address"}
+# Inherent to a security knowledge base (topic, not a leak). These proceed to
+# validation + disclosure + human approval instead of being auto-blocked.
+TOPIC_HITS = {"security_exploit_detail", "vulnerability_record", "attack_intent"}
+# Distinguish real hostnames from code/file names ("main.py", "config.json")
+# that merely look like domains.
+_CODE_EXTENSIONS = {
+    "py", "js", "ts", "tsx", "jsx", "json", "md", "sql", "sh", "bash", "zsh",
+    "yaml", "yml", "toml", "ini", "cfg", "conf", "lock", "txt", "go", "rs", "rb",
+    "php", "c", "h", "cpp", "cc", "hpp", "java", "kt", "cs", "css", "scss", "html",
+    "htm", "xml", "csv", "tsv", "png", "jpg", "jpeg", "gif", "svg", "webp", "pdf",
+    "log", "env", "bak", "tmp", "db", "sqlite", "zip", "tar", "gz",
+}
+
+
+def _has_live_hostname(text: str) -> bool:
+    for match in DOMAIN_RE.finditer(text):
+        if match.group(0).lower().startswith("http"):
+            return True
+        last_label = match.group(1).rsplit(".", 1)[-1].lower()
+        if last_label in _CODE_EXTENSIONS:
+            continue
+        if last_label.isalpha() and 2 <= len(last_label) <= 24:
+            return True
+    return False
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -93,7 +122,7 @@ def _trust(value: Any) -> Dict[str, float]:
 def sensitivity_hits(text: str) -> list[str]:
     hits: list[str] = []
     lowered = text.lower()
-    if DOMAIN_RE.search(text):
+    if _has_live_hostname(text):
         hits.append("domain_or_url")
     if EMAIL_RE.search(text):
         hits.append("email")
@@ -113,6 +142,11 @@ def sensitivity_hits(text: str) -> list[str]:
     if any(term in lowered for term in SENSITIVE_TERMS):
         hits.append("security_exploit_detail")
     return sorted(set(hits))
+
+
+def must_redact_hits(text: str) -> list[str]:
+    """Concrete leaks that must be removed before promotion (excludes topic-only)."""
+    return [hit for hit in sensitivity_hits(text) if hit in MUST_REDACT_HITS]
 
 
 def sanitize_preview(text: str, limit: int = 600) -> str:
@@ -141,16 +175,22 @@ def assess(entry: sqlite3.Row) -> Dict[str, Any]:
     if str(entry["knowledge_intent"] or "").lower() == "attack":
         hits.append("attack_intent")
     hits = sorted(set(hits))
+    must_redact = [hit for hit in hits if hit in MUST_REDACT_HITS]
+    topic = [hit for hit in hits if hit in TOPIC_HITS]
     tags = _tags(entry["tags"])
     disclosure = "public" if tags & DISCLOSURE_TAGS else "unknown"
     reasons: list[str] = []
+    if must_redact:
+        reasons.append("must-redact leaks: " + ", ".join(must_redact))
+    if topic:
+        reasons.append("security topic (needs review, not auto-blocked): " + ", ".join(topic))
     if not validated:
         reasons.append("knowledge has not passed validation threshold")
-    if hits:
-        reasons.append("sensitive indicators: " + ", ".join(hits))
     if disclosure != "public":
         reasons.append("public disclosure/fix status is not proven")
-    if hits:
+    # Only concrete leaks hard-block. Security-topic entries flow to validation,
+    # disclosure and human approval — so the pipeline is actually usable.
+    if must_redact:
         status = "blocked_sensitive"
     elif not validated:
         status = "needs_validation"
@@ -158,9 +198,10 @@ def assess(entry: sqlite3.Row) -> Dict[str, Any]:
         status = "needs_disclosure"
     else:
         status = "pending_approval"
+    sensitivity_status = "blocked" if must_redact else "topic_needs_review" if topic else "passed"
     return {
         "validation_status": "passed" if validated else "failed",
-        "sensitivity_status": "blocked" if hits else "passed",
+        "sensitivity_status": sensitivity_status,
         "disclosure_status": disclosure,
         "status": status,
         "reasons": reasons,
@@ -227,9 +268,9 @@ def approve(
     content = reviewed_file.read_text(encoding="utf-8").strip()
     if disclosure_status != "public":
         raise ValueError("company Wiki promotion requires proven public disclosure/fix status")
-    hits = sensitivity_hits(content)
-    if hits:
-        raise ValueError("reviewed content still contains sensitive indicators: " + ", ".join(hits))
+    leaks = must_redact_hits(content)
+    if leaks:
+        raise ValueError("reviewed content still contains must-redact leaks: " + ", ".join(leaks))
     db = connect_gate(gate_db)
     try:
         row = db.execute("SELECT * FROM promotion_candidates WHERE candidate_id=?", (candidate_id,)).fetchone()
@@ -258,6 +299,14 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
             raise ValueError("candidate not found")
         if row["status"] != "approved" or not row["reviewed_content"]:
             raise ValueError("candidate requires explicit human approval and reviewed content")
+        content = str(row["reviewed_content"])
+        # Re-verify at promote time: the row could have been mutated between
+        # approve and promote (concurrent process, bug, direct DB write).
+        if hashlib.sha256(content.encode()).hexdigest() != str(row["content_sha256"] or ""):
+            raise ValueError("reviewed content hash mismatch — refusing to promote tampered content")
+        leaks = must_redact_hits(content)
+        if leaks:
+            raise ValueError("reviewed content contains must-redact leaks: " + ", ".join(leaks))
         wiki_dir.mkdir(parents=True, exist_ok=True)
         path = wiki_dir / f"knowledge-{candidate_id[:8]}.md"
         body = (
@@ -267,7 +316,7 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
             f"approved_by: {row['approved_by']}\n"
             f"approved_at: {row['approved_at']}\n"
             "---\n\n"
-            f"{row['reviewed_content'].strip()}\n"
+            f"{content.strip()}\n"
         )
         path.write_text(body, encoding="utf-8")
         now = utc_now()

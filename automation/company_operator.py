@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -448,7 +449,6 @@ def select_executable(
     now: Optional[datetime] = None,
 ) -> list[Dict[str, Any]]:
     allowed_risks = {str(value) for value in config.get("auto_execute_risk_levels", ["low"])}
-    max_items = max(0, int(limit if limit is not None else config.get("max_actions_per_cycle", 1)))
     minimum = float(config.get("minimum_score", 0))
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -473,7 +473,36 @@ def select_executable(
             item["effective_score"] = float(row["score"]) + min(age_boost_cap, age_days * age_boost_per_day)
             eligible.append(item)
         eligible.sort(key=lambda item: (-item["effective_score"], item["created_at"]))
-        return eligible[:max_items]
+        if limit is not None:
+            max_items = max(0, int(limit))
+        else:
+            base = max(0, int(config.get("base_actions_per_cycle", 1)))
+            cap = max(base, int(config.get("max_actions_per_cycle", base)))
+            queue_per_action = max(1, int(config.get("queue_items_per_action", 2)))
+            # Scale the cycle budget with executable inflow/backlog while retaining
+            # a hard operator-controlled ceiling.
+            scaled = base + max(0, len(eligible) - base) // queue_per_action
+            max_items = min(cap, scaled)
+
+        # Fair round-robin across sources prevents a hot market/mission feed from
+        # monopolising the whole budget. A lone source may still use spare slots.
+        groups: Dict[str, list[Dict[str, Any]]] = {}
+        for item in eligible:
+            groups.setdefault(str(item.get("source_type") or "unknown"), []).append(item)
+        source_order = sorted(
+            groups,
+            key=lambda source: (-groups[source][0]["effective_score"], source),
+        )
+        selected: list[Dict[str, Any]] = []
+        while len(selected) < max_items:
+            progressed = False
+            for source in source_order:
+                if groups[source] and len(selected) < max_items:
+                    selected.append(groups[source].pop(0))
+                    progressed = True
+            if not progressed:
+                break
+        return selected
     finally:
         db.close()
 
@@ -881,10 +910,32 @@ def run_cycle(
 
     discovery = discover_opportunities(db_path, config, now=now)
     selected = select_executable(db_path, config, now=now) if execute and config.get("enabled", True) else []
-    executions = []
-    for opportunity in selected:
-        result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
-        executions.append({"title": opportunity["title"], "opportunity_id": opportunity["opportunity_id"], **result})
+    executions: list[Dict[str, Any]] = []
+    parallelism = min(len(selected), max(1, int(config.get("max_parallel_workers", 1))))
+    if parallelism <= 1:
+        for opportunity in selected:
+            result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
+            executions.append({"title": opportunity["title"], "opportunity_id": opportunity["opportunity_id"], **result})
+    else:
+        ordered: list[Optional[Dict[str, Any]]] = [None] * len(selected)
+        with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="company-operator") as pool:
+            futures = {
+                pool.submit(execute_opportunity, db_path, run_root, cycle_id, opportunity, config, worker=worker): index
+                for index, opportunity in enumerate(selected)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                opportunity = selected[index]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
+                ordered[index] = {
+                    "title": opportunity["title"],
+                    "opportunity_id": opportunity["opportunity_id"],
+                    **result,
+                }
+        executions = [item for item in ordered if item is not None]
     approvals = pending_approval_items(db_path, int(config.get("approval_digest_items", 3)))
     summary = {
         "cycle_id": cycle_id,
@@ -903,7 +954,25 @@ def run_cycle(
     if config.get("proactive_delivery", True) and origin.get("platform") and origin.get("chat_id"):
         allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
         if allowed and origin["platform"].lower() not in allowed:
-            delivery_error = f"delivery platform not allowlisted: {origin['platform']}"
+            try:
+                try:
+                    from .company_result_notifier import record_terminal_delivery
+                except ImportError:
+                    from company_result_notifier import record_terminal_delivery
+                fallback = record_terminal_delivery(
+                    config,
+                    kind="autonomy-cycle",
+                    identifier=cycle_id,
+                    origin=origin,
+                    message=message,
+                    reason=f"delivery platform not allowlisted: {origin['platform']}",
+                )
+                delivery_error = (
+                    f"terminal: delivery platform not allowlisted: {origin['platform']}; "
+                    f"fallback={fallback}"
+                )
+            except OSError as exc:
+                delivery_error = f"terminal fallback write failed: {exc}"
         else:
             delivered, delivery_error = chosen_deliverer(config, origin, message)
     elif config.get("proactive_delivery", True):

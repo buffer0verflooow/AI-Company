@@ -14,8 +14,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -532,14 +534,78 @@ def build_worker_prompt(opportunity: Dict[str, Any], run_dir: Path) -> str:
 """
 
 
+# ── Isolated-worker hardening ─────────────────────────────────────────────
+# The worker's model access comes from ~/.hermes/config.yaml, not from these
+# env vars, so scrubbing external-service credentials does not break the run.
+SECRET_ENV_RE = re.compile(
+    r"(SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|API[_-]?KEY|_KEY$|_TOKEN$|^TOKEN$|BEARER|COOKIE)",
+    re.I,
+)
+SECRET_ENV_EXTRA = {
+    "WEIXIN_APP_ID", "WEIXIN_APP_SECRET", "WEIXIN_TOKEN", "QQ_APP_ID", "QQ_CLIENT_SECRET",
+    "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+}
+# Company surfaces the autonomy boundary declares read-only; a worker that
+# writes here (code / config / ledgers) has escaped its sandbox.
+_AUDIT_CODE_DIRS = ("automation", "scripts")
+_AUDIT_DBS = (
+    "operations/runtime/operations_control.db",
+    "finance/finance_ledger.db",
+    "operations/runtime/knowledge_promotion.db",
+)
+
+
+def scrub_worker_env(base: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], list]:
+    """Drop external-service credentials from the env handed to an isolated worker."""
+    source = dict(os.environ) if base is None else dict(base)
+    env: Dict[str, str] = {}
+    dropped: list = []
+    for key, value in source.items():
+        if key in SECRET_ENV_EXTRA or SECRET_ENV_RE.search(key):
+            dropped.append(key)
+            continue
+        env[key] = value
+    return env, sorted(dropped)
+
+
+def audit_sandbox_writes(run_dir: Path, since: float, company_root: Path = COMPANY_ROOT) -> list:
+    """Return read-only company files a worker mutated during its run (sandbox escapes)."""
+    run_prefix = str(run_dir.resolve())
+    violations: set = set()
+    for rel in _AUDIT_CODE_DIRS:
+        base = company_root / rel
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            try:
+                if path.stat().st_mtime > since and not str(path.resolve()).startswith(run_prefix):
+                    violations.add(str(path))
+            except OSError:
+                continue
+    for rel in _AUDIT_DBS:
+        path = company_root / rel
+        try:
+            if path.is_file() and path.stat().st_mtime > since:
+                violations.add(str(path))
+        except OSError:
+            continue
+    return sorted(violations)[:50]
+
+
 def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     prompt = build_worker_prompt(opportunity, run_dir)
+    worker_env, dropped_env = scrub_worker_env()
     (run_dir / "request.json").write_text(json.dumps({
         "opportunity": opportunity,
         "prompt": prompt,
+        "scrubbed_env_vars": dropped_env,
         "created_at": utc_now(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    sandbox_baseline = time.time()
     try:
         proc = subprocess.run(
             [
@@ -548,7 +614,7 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
                 "--pass-session-id",
             ],
             cwd=str(run_dir),
-            env=dict(os.environ),
+            env=worker_env,
             capture_output=True,
             text=True,
             timeout=int(config.get("operator_timeout_seconds", 1200)),
@@ -556,6 +622,15 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
         )
     except Exception as exc:
         return {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
+    # Enforce the write boundary by detection: a worker that mutated read-only
+    # company code/config/ledgers has escaped its sandbox — fail the run loudly.
+    violations = audit_sandbox_writes(run_dir, sandbox_baseline)
+    if violations:
+        return {
+            "status": "failed",
+            "error": "sandbox violation: worker wrote read-only company files: " + ", ".join(violations),
+            "summary": "", "next_action": "", "metrics": {}, "sandbox_violations": violations,
+        }
     if proc.returncode != 0:
         error = proc.stderr.strip()[-4000:] or proc.stdout.strip()[-4000:] or f"Hermes exited {proc.returncode}"
         return {"status": "failed", "error": error, "summary": "", "next_action": "", "metrics": {}}

@@ -203,6 +203,45 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual(row["proactive_delivered"], 1)
             state.close()
 
+    def test_non_allowlisted_content_job_is_terminal_and_recoverable(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "router.db")
+            job_root = Path(td) / "content-jobs"
+            fallback = Path(td) / "dead-letters.jsonl"
+            state = RouterState(db_path)
+            decision = classify_message("写一篇 Agent 工程公众号文章")
+            event_id = state.insert(
+                "session-article-qq", "qq", "hash-article-qq", "写文章", decision,
+                origin={"platform": "qq", "chat_id": "chat-article", "user_id": "user-article"},
+            )
+            state.update(event_id, run_id="article-qq", status="running")
+            state.close()
+            job_dir = job_root / "article-qq"
+            job_dir.mkdir(parents=True)
+            (job_dir / "status.json").write_text(json.dumps({
+                "status": "completed", "result": "文章完成", "artifacts": [],
+            }), encoding="utf-8")
+            config = self._config(td, db_path)
+            config["content_job_dir"] = str(job_root)
+            config["delivery_fallback_path"] = str(fallback)
+            calls = []
+
+            summary = process_once(
+                config,
+                deliverer=lambda *_args: (calls.append(1) or True, ""),
+                mirror=lambda _origin, _message: True,
+            )
+
+            self.assertEqual(summary["terminal"], 1)
+            self.assertEqual(calls, [])
+            record = list_terminal_deliveries(config, 1)[0]
+            self.assertEqual(record["kind"], "content")
+            self.assertEqual(record["identifier"], "article-qq")
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(row["delivery_attempts"], config["max_delivery_attempts"])
+            state.close()
+
     def test_completed_company_job_is_delivered(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = str(Path(td) / "router.db")
@@ -300,6 +339,46 @@ class NotifierTests(unittest.TestCase):
             self.assertLessEqual(len(delivered[0][1]), 1000)
             db = connect_operations(operations_db)
             self.assertEqual(db.execute("SELECT delivered FROM tvcr_reviews WHERE review_id=?", (review_id,)).fetchone()[0], 1)
+            db.close()
+
+    def test_non_allowlisted_tvcr_is_terminal_and_recoverable(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "router.db")
+            RouterState(db_path).close()
+            operations_db = Path(td) / "operations.db"
+            fallback = Path(td) / "dead-letters.jsonl"
+            start, end = business_period(date(2026, 7, 15))
+            review_id = create_review(
+                operations_db, review_day=date(2026, 7, 15), period_start=start, period_end=end,
+                origin={"platform": "qq", "chat_id": "chat-tvcr", "user_id": "user-tvcr"},
+            )
+            import_proposals(operations_db, review_id, {
+                "executive_summary": "需要经营决策。",
+                "proposals": [{
+                    "product_line": "company", "priority": "P1", "title": "改进",
+                    "problem_statement": "结果需要复核", "recommended_action": "执行内部实验",
+                }],
+            })
+            config = self._config(td, db_path)
+            config["operations_db"] = str(operations_db)
+            config["delivery_fallback_path"] = str(fallback)
+            calls = []
+
+            summary = process_once(
+                config,
+                deliverer=lambda *_args: (calls.append(1) or True, ""),
+                mirror=lambda _origin, _message: True,
+            )
+
+            self.assertEqual(summary["terminal"], 1)
+            self.assertEqual(calls, [])
+            record = list_terminal_deliveries(config, 1)[0]
+            self.assertEqual(record["kind"], "tvcr")
+            self.assertEqual(record["identifier"], review_id)
+            db = connect_operations(operations_db)
+            row = db.execute("SELECT * FROM tvcr_reviews WHERE review_id=?", (review_id,)).fetchone()
+            self.assertEqual(row["delivery_attempts"], config["max_delivery_attempts"])
+            self.assertIn("terminal:", row["delivery_error"])
             db.close()
 
 

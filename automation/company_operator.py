@@ -576,13 +576,17 @@ SECRET_ENV_EXTRA = {
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
 }
 # Company surfaces the autonomy boundary declares read-only; a worker that
-# writes here (code / config / ledgers) has escaped its sandbox.
+# writes here (code / config) has escaped its sandbox.
+# operations_control.db is explicitly excluded because workers legitimately
+# record run metrics and outcomes to the operations ledger
+# (see _record_operational_run). Concurrent cron (notifier) also modifies it.
 _AUDIT_CODE_DIRS = ("automation", "scripts")
-_AUDIT_DBS = (
+_AUDIT_DBS = ("finance/finance_ledger.db", "operations/runtime/knowledge_promotion.db")
+# List of DBs whose mtime is NOT audited (legitimate concurrent access).
+_AUDIT_DB_SKIP = frozenset([
     "operations/runtime/operations_control.db",
-    "finance/finance_ledger.db",
-    "operations/runtime/knowledge_promotion.db",
-)
+    "operations/runtime/company_router.db",
+])
 
 
 def scrub_worker_env(base: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], list]:

@@ -53,10 +53,10 @@ VIDEO_TERMS = {"视频", "pixelle", "b站", "分镜", "配音", "tts", "字幕",
 COMPANY_TERMS = {"公司", "战略", "财务", "销售", "运营", "产品", "流程", "知识库", "仪表盘"}
 MANAGEMENT_TERMS = {"状态", "进度", "流程", "路由", "架构", "能力", "管理", "如何", "怎么", "是否", "当前"}
 COMPANY_EXECUTION_TERMS = {
-    "开始", "执行", "修改", "实现", "开发", "修复", "完善", "更新", "新增", "接入",
-    "搭建", "创建", "生成", "整理", "迁移", "重构", "测试", "验证", "落地", "推进",
-    "调查", "调研", "分析", "审计", "检查", "排查", "制定", "编写", "补充", "删除",
-    "implement", "build", "fix", "update", "create", "refactor", "test", "audit",
+    "开始", "执行", "修改", "实现", "开发", "完善", "更新", "新增", "接入",
+    "搭建", "创建", "生成", "整理", "迁移", "重构", "验证", "落地", "推进",
+    "调研", "排查", "制定", "编写", "补充", "删除",
+    "implement", "build", "update", "create", "refactor",
 }
 
 ACTIVE_SECURITY_TERMS = {
@@ -828,6 +828,52 @@ def _pre_evaluate_task(
     pre_eval_enabled = bool(config.get("pre_evaluation_enabled", True))
     if not pre_eval_enabled:
         return "proceed"
+
+    # Status notifications: messages that are purely reporting status/progress,
+    # NOT requesting security analysis. These should never dispatch swarm.
+    lowered = message.lower()
+    status_markers = ("已发表", "已发布", "已完成", "已推送", "已更新",
+                      "以下文章", "以下是",
+                      "[async delegation", "[importan")
+    if decision.action == "dispatch_swarm":
+        if any(marker in lowered for marker in status_markers):
+            return "skip"
+
+    # Conversation vs. task disambiguation for security-classified messages.
+    # A message that was keyword-scored as security but reads like a conversation
+    # (long text, meta-discourse, past-tense references) should not dispatch swarm.
+    # Real security tasks are short, imperative, and reference a specific target.
+    # Conversational signals — skip if strong indicators present
+    # Common to all actions
+    conversation_markers = (
+        "我认为", "我觉得", "你可以", "能不能", "是不是", "应该是",
+        "我认为是", "废弃", "如果", "可以寻找", "我来", "我想",
+    )
+    if decision.action in {"dispatch_swarm", "dispatch_company"}:
+        conv_hits = sum(1 for m in conversation_markers if m in lowered)
+        if conv_hits >= 2:
+            return "skip"
+        # Long meandering text (3+ sentences without a clear target) is likely chat
+        sentence_count = len(re.split(r'[。！？\\n]', message))
+        words = len(message.split())
+        if sentence_count >= 3 and words >= 15 and conv_hits >= 1:
+            return "skip"
+
+    # Company-specific disambiguation: "给我一个方案", "建议", "你觉得怎么样"
+    # are requests for the main agent to design/propose, not execution commands.
+    if decision.action == "dispatch_company":
+        company_conv_markers = (
+            "给我", "给我一个", "给我一份", "给我列出", "给我总结", "给我说",
+            "你觉得", "你有什么建议", "有什么想法", "方案", "建议",
+        )
+        if any(m in lowered for m in company_conv_markers):
+            return "skip"
+
+    # Confidence gate: baseline confidence (0.45, no terms matched) should
+    # never trigger an auto-dispatch — the classification was a fallback.
+    # Fall back to main_agent so the conversation continues naturally.
+    if decision.confidence < 0.5 and decision.action in {"dispatch_company", "dispatch_article", "dispatch_video"}:
+        return "skip"
 
     # Skill review: check for actual conversation content to review
     if decision.action == "dispatch_company" and SKILL_REVIEW_MARKER in message.lower():

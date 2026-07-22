@@ -27,6 +27,13 @@ updated: 2026-07-15
 - [[projects/wechat-publisher/README|微信公众号发布工具]] — ✅ 可用
 - [[projects/security-exploration/README|安全探索产品线]] — 🟢 已部署
 
+## 资源
+
+- [[raw/README|📥 原始资料]] — 不可变的源材料
+- [[reports/README|📋 报告存档]] — 一次性分析报告
+- [[scripts/README|🔧 共享脚本]] — 跨项目工具脚本
+- [[automation/README|⚡ 自动化路由]] — 公司自动路由与自治运行
+
 ## 导航
 
 - [[DASHBOARD|📊 仪表盘]] — 项目进度一览

@@ -23,6 +23,12 @@ updated: 2026-07-15
   - [[operations/agent-roster|🤖 AI 代理池]] — 233 个专家代理
 - [[strategy/README|战略部]]
 
+## 资源
+
+- [[raw/README|原始资料]] — 不可变的源材料
+- [[reports/README|报告存档]] — 一次性分析报告
+- [[scripts/README|共享脚本]] — 跨项目工具脚本
+
 ## 项目
 
 - [[projects/README|所有项目]]
@@ -48,6 +54,7 @@ updated: 2026-07-15
 
 | 页面 | 摘要 |
 |------|------|
+| [[wiki/README|通用 Wiki]] — 公司级通用知识页面
 | [[wiki/llm-wiki-methodology|LLM Wiki 方法论]] | Karpathy 的持久化知识库方法论 |
 | [[DASHBOARD|📊 公司仪表盘]] | 项目进度全景 |
 | [[log|操作日志]] | 知识库变更记录 |

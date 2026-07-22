@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+try:
+    from ._safe_io import locked_atomic_write_text, sqlite_connection
+except ImportError:  # direct script execution
+    from _safe_io import locked_atomic_write_text, sqlite_connection
+
 
 WORKSPACE = Path("/home/pwn/workspace")
 COMPANY = WORKSPACE / "company"
@@ -26,9 +31,10 @@ def utc_now() -> str:
 
 def write_status(job_dir: Path, payload: Dict[str, Any]) -> None:
     payload = {**payload, "updated_at": utc_now()}
-    tmp = job_dir / "status.json.tmp"
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(job_dir / "status.json")
+    locked_atomic_write_text(
+        job_dir / "status.json",
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
 
 
 def pixelle_runtime_ready() -> bool:
@@ -40,23 +46,20 @@ def worker_usage(job_dir: Path, hermes_db: Path = HERMES_DB) -> Dict[str, Any]:
     """Resolve the isolated Hermes session and its measured token counters."""
     if not hermes_db.is_file():
         return {}
-    db = sqlite3.connect(hermes_db)
-    db.row_factory = sqlite3.Row
     try:
-        row = db.execute(
-            """SELECT s.id,s.model,s.input_tokens,s.output_tokens,s.cache_read_tokens,
-                      s.cache_write_tokens,s.reasoning_tokens,s.tool_call_count,
-                      s.estimated_cost_usd,s.actual_cost_usd,s.cost_status
-               FROM messages m JOIN sessions s ON s.id=m.session_id
-               WHERE m.role='user' AND m.content LIKE ?
-               ORDER BY m.timestamp DESC LIMIT 1""",
-            (f"%产物目录：{job_dir}%",),
-        ).fetchone()
-        return dict(row) if row else {}
-    except sqlite3.Error:
+        with sqlite_connection(hermes_db, read_only=True) as db:
+            row = db.execute(
+                """SELECT s.id,s.model,s.input_tokens,s.output_tokens,s.cache_read_tokens,
+                          s.cache_write_tokens,s.reasoning_tokens,s.tool_call_count,
+                          s.estimated_cost_usd,s.actual_cost_usd,s.cost_status
+                   FROM messages m JOIN sessions s ON s.id=m.session_id
+                   WHERE m.role='user' AND m.content LIKE ?
+                   ORDER BY m.timestamp DESC LIMIT 1""",
+                (f"%产物目录：{job_dir}%",),
+            ).fetchone()
+            return dict(row) if row else {}
+    except (OSError, sqlite3.Error):
         return {}
-    finally:
-        db.close()
 
 
 def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]]:
@@ -92,13 +95,21 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
    - 标题必须有钩子+具体事实，不能是教科书式陈述
 3. **生成封面**：运行 `python3 {COMPANY / 'scripts/generate_cover.py'} <篇号> "<文章标题>" "<副标题>" {job_dir / 'cover.jpg'}`。篇号从 TRACKING.md 获取，标题用 humanized 后的版本。
 4. `{job_dir / 'qa-report.md'}`：Gate 1 事实核查、Gate 2 内容审校、Gate 3 主编终审，逐项给证据和结论。**QA 对象是 draft-humanized.md**，不是 draft.md。
-5. 若任务包含「公众号/排版」，生成 `{job_dir / 'draft-formatted.md'}` 用于微信推送。**关键**：必须在正文顶部内联 `<style>` 代码块，CSS 模板见 `{COMPANY / 'projects/wechat-publisher/assets/wechat-article.css'}`。要求：
+5. **微信预览检查（新 Gate 4）**：生成 `{job_dir / 'draft-formatted.md'}` 后，转为 HTML 预览文件 `{job_dir / 'wechat-preview.html'}`，然后逐项检查：
+   - CSS 样式整体注入到 `<body>` 元素的 inline `style=` 属性中
+   - CSS 属性值中没有未转义的双引号（`font-family: "xxx"` → 会截断 HTML style 属性）
+   - 代码块使用 `<pre>` 标签且 `white-space: pre` 或 `white-space: pre-wrap`
+   - 所有图片有正确的 `src` 和 `alt` 属性
+   - 无破损的嵌套标签/未闭合标签
+   - 以上检查结果写入 qa-report.md 的「Gate 4 微信预览检查」章节，附 HTML 片段证据
+6. 若任务包含「公众号/排版」，生成 `{job_dir / 'draft-formatted.md'}` 用于微信推送。**关键**：必须在正文顶部内联 `<style>` 代码块，CSS 模板见 `{COMPANY / 'projects/wechat-publisher/assets/wechat-article.css'}`。要求：
    - 代码框用 ```python 围栏（不能用缩进），`white-space: pre`
    - 公式单独占行，前后留空行，不混在正文
    - `<style>` 写在 YAML frontmatter 之后、正文之前
    - 不使用 emoji 标题、不使用 `word-break: break-all`
 
 约束：
+- 需要外部资料时优先使用 agentkey skill 的 `execute_tool(name="agentkey_search", params={{"query": "...", "num": 5}})` 搜索，其次才是内置 web_search/web_extract。agentkey 覆盖 Web/知乎/X/Reddit/公众号等渠道。
 - 不执行公众号推送、草稿箱写入或公开发布；这些外部动作必须人工审批。
 - 不编造链接、数据、测试或已完成动作；无法核验的内容明确标注。
 - 不修改公司已有正式文章，只在本任务产物目录写文件。
@@ -126,6 +137,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 2. `{job_dir / 'result.json'}`：严格 JSON 对象，字段为 `status`（completed/needs_approval/failed）、`department`、`summary`、`changed_files`（数组）、`tests`（数组）、`next_action`。
 
 边界：
+- 需要外部资料时优先使用 agentkey skill 的 `execute_tool(name="agentkey_search", params={{"query": "...", "num": 5}})` 搜索，其次才是内置 web_search/web_extract。agentkey 覆盖 Web/知乎/X/Reddit/公众号等渠道。
 - 不执行公开发布、上传、付款、外部消息、删除数据、不可逆操作或未明确授权的外部安全测试。
 - 如任务必须越过边界，将 status 设为 needs_approval，生成 `{job_dir / 'approval-request.md'}` 后停止。
 - 不编造完成结果、测试、数据或文件修改；无法验证的内容明确标注。
@@ -209,7 +221,18 @@ def main() -> int:
         })
         return 0
 
-    artifacts = [str(path) for path in sorted(job_dir.iterdir()) if path.is_file() and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log"}]
+    try:
+        artifacts = [
+            str(path) for path in sorted(job_dir.iterdir())
+            if path.is_file() and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log"}
+        ]
+    except OSError as exc:
+        write_status(job_dir, {
+            "status": "failed", "route": request["route"],
+            "run_id": request.get("run_id"), "error": f"artifact scan failed: {exc}",
+            "artifacts": [],
+        })
+        return 0
     usage = worker_usage(job_dir)
     missing = [name for name in expected if not (job_dir / name).is_file()]
     content = proc.stdout.strip()[-12000:]

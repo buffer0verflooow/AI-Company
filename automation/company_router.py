@@ -514,16 +514,20 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
         "--json",
     ]
     log_fh = log_path.open("a", encoding="utf-8")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=config["swarm_repo"],
-        stdin=subprocess.DEVNULL,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-        env=dict(os.environ),
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=config["swarm_repo"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=dict(os.environ),
+        )
+    except BaseException:
+        log_fh.close()
+        raise
     log_fh.close()
     return proc.pid
 
@@ -558,16 +562,20 @@ def launch_content_job(
 
     log_path = job_dir / "executor.log"
     log_fh = log_path.open("a", encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, config["content_executor"], "--job-dir", str(job_dir)],
-        cwd=str(HERE.parent),
-        stdin=subprocess.DEVNULL,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-        env=dict(os.environ),
-    )
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, config["content_executor"], "--job-dir", str(job_dir)],
+            cwd=str(HERE.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=dict(os.environ),
+        )
+    except BaseException:
+        log_fh.close()
+        raise
     log_fh.close()
     return proc.pid
 
@@ -632,6 +640,7 @@ def refresh_session_runs(config: Dict[str, Any], state: RouterState, session_id:
                     )
                     state.update(row["route_event_id"], quality_status=quality)
                 except Exception:
+                    # Best-effort quality classification — must not block result notification
                     pass
         elif status in {"running", "submitted"}:
             task_counts = result.get("tasks") or {}

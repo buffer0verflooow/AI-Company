@@ -365,7 +365,7 @@ def discover_opportunities(
                 previous = evaluated_by_theme.get(str(pulse["theme"]))
                 if previous:
                     age_hours = max(0.0, (current - previous[0]).total_seconds() / 3600)
-                    if age_hours < cooldown_hours and float(pulse["score"]) < previous[1] + material_delta:
+                    if age_hours < cooldown_hours and float(pulse["score"] or 0) < previous[1] + material_delta:
                         cooldown_pulses.append(str(pulse["pulse_id"]))
                         continue
                 source_domains = _parse_json(pulse["source_domains_json"], [])
@@ -470,7 +470,7 @@ def select_executable(
             item = dict(row)
             created = _parse_dt(str(row["created_at"])) or current
             age_days = max(0.0, (current - created).total_seconds() / 86400)
-            item["effective_score"] = float(row["score"]) + min(age_boost_cap, age_days * age_boost_per_day)
+            item["effective_score"] = float(row["score"] or 0) + min(age_boost_cap, age_days * age_boost_per_day)
             eligible.append(item)
         eligible.sort(key=lambda item: (-item["effective_score"], item["created_at"]))
         if limit is not None:

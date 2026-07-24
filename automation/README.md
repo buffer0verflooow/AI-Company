@@ -24,7 +24,8 @@ updated: 2026-07-15
 | `hermes_company_operator.py` | 每日公司自治经营 Cron 入口 |
 | `company_operator_config.json` | 自治边界、单周期预算和长期经营任务 |
 | `market_radar.py` | 采集公开外部信号、清洗去重、多来源佐证并生成市场脉冲 |
-| `hermes_market_radar.py` | 每日市场雷达 Cron 入口 |
+| `agentkey_radar_probe.py` | AgentKey 二次探测：主雷达跑完后并行抓取额外数据源 |
+| `hermes_market_radar.py` | 每日市场雷达 Cron 入口（主雷达 + AgentKey 探测） |
 | `market_radar_config.json` | 公开查询白名单、AnySearch 固定来源、资格门和评分规则 |
 | `router_config.json` | 正式路径、并发上限、自动执行开关 |
 | `tests/` | 分类、审批、幂等和真实 Swarm 客户端契约测试 |

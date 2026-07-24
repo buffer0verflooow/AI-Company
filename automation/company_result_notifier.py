@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +25,7 @@ try:
         swarm_command,
         utc_now,
     )
+    from ._safe_io import locked_append_text
 except ImportError:  # Direct execution from automation/.
     from company_router import (
         DEFAULT_CONFIG,
@@ -40,6 +40,7 @@ except ImportError:  # Direct execution from automation/.
         swarm_command,
         utc_now,
     )
+    from _safe_io import locked_append_text
 
 
 DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
@@ -200,8 +201,7 @@ def record_terminal_delivery(
         "reason": reason,
         "message": message,
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    locked_append_text(path, json.dumps(record, ensure_ascii=False) + "\n")
     return str(path)
 
 

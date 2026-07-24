@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 
 AUTOMATION_DIR = "/home/pwn/workspace/company/automation"
 if AUTOMATION_DIR not in sys.path:

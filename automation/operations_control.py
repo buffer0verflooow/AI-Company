@@ -13,11 +13,15 @@ import argparse
 import json
 import re
 import sqlite3
-import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
+
+try:
+    from ._safe_io import file_lock, quote_identifier, sqlite_uri
+except ImportError:  # direct ``python automation/operations_control.py`` invocation
+    from _safe_io import file_lock, quote_identifier, sqlite_uri
 
 try:
     from . import pricing
@@ -41,7 +45,7 @@ DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_know
 DEFAULT_LOG_DIR = COMPANY_ROOT / "operations/runtime/logs"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
-APPROVE_RE = re.compile(r"(?:批准|同意|确认执行|采纳|通过)", re.I)
+APPROVE_RE = re.compile(r"(?<!不)(?:批准|同意|确认执行|采纳|通过)", re.I)
 REJECT_RE = re.compile(r"(?:拒绝|不批准|不采纳|驳回|暂不执行)", re.I)
 PROPOSAL_ID_RE = re.compile(r"TVCR-P-\d{8}-\d{2}", re.I)
 ITEM_NO_RE = re.compile(r"第?\s*(\d{1,2})\s*(?:项|条)")
@@ -53,12 +57,17 @@ def utc_now() -> str:
 
 def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    db.executescript(
-        """
+    db: Optional[sqlite3.Connection] = None
+    try:
+        # Protect schema creation/migrations; normal transactions still use
+        # SQLite's WAL/busy-timeout for concurrent readers and writers.
+        with file_lock(path):
+            db = sqlite3.connect(path, timeout=5.0)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA busy_timeout=5000")
+            db.executescript(
+                """
         CREATE TABLE IF NOT EXISTS operational_runs (
             run_id TEXT PRIMARY KEY,
             route_event_id TEXT DEFAULT '',
@@ -178,24 +187,40 @@ def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
             updated_at TEXT NOT NULL
         );
         """
-    )
-    proposal_columns = {row[1] for row in db.execute("PRAGMA table_info(improvement_proposals)")}
-    if "product_line" not in proposal_columns:
-        db.execute("ALTER TABLE improvement_proposals ADD COLUMN product_line TEXT NOT NULL DEFAULT 'company'")
-    run_columns = {row[1] for row in db.execute("PRAGMA table_info(operational_runs)")}
-    for column in ("result_delivered", "proactive_delivered"):
-        if column not in run_columns:
-            db.execute(f"ALTER TABLE operational_runs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
-    if "estimated_cost_native" not in run_columns:
-        db.execute("ALTER TABLE operational_runs ADD COLUMN estimated_cost_native REAL")
-    if "estimated_cost_currency" not in run_columns:
-        db.execute("ALTER TABLE operational_runs ADD COLUMN estimated_cost_currency TEXT NOT NULL DEFAULT ''")
-    db.commit()
-    return db
+            )
+            proposal_columns = {row[1] for row in db.execute("PRAGMA table_info(improvement_proposals)")}
+            if "product_line" not in proposal_columns:
+                db.execute("ALTER TABLE improvement_proposals ADD COLUMN product_line TEXT NOT NULL DEFAULT 'company'")
+            run_columns = {row[1] for row in db.execute("PRAGMA table_info(operational_runs)")}
+            migrations = {
+                "result_delivered": "INTEGER NOT NULL DEFAULT 0",
+                "proactive_delivered": "INTEGER NOT NULL DEFAULT 0",
+                "estimated_cost_native": "REAL",
+                "estimated_cost_currency": "TEXT NOT NULL DEFAULT ''",
+            }
+            for column, definition in migrations.items():
+                if column not in run_columns:
+                    safe_column = quote_identifier(column, allowed=migrations)
+                    db.execute(f"ALTER TABLE operational_runs ADD COLUMN {safe_column} {definition}")
+            db.commit()
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sql_assignments(fields: Dict[str, Any], allowed: set[str]) -> str:
+    """Return a parameterized ``SET`` clause for a trusted column allow-list."""
+
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"unsupported SQL columns: {sorted(unknown)!r}")
+    return ",".join(f"{quote_identifier(key, allowed=allowed)}=?" for key in fields)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:

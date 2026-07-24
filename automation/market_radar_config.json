@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "agentkey_probe_enabled": true,
   "endpoint": "https://api.anysearch.com/mcp",
   "market_db": "/home/pwn/workspace/company/marketing/market_signals.db",
   "run_root": "/home/pwn/workspace/company/marketing/runtime/market-radar",

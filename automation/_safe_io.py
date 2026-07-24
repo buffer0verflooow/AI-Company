@@ -15,7 +15,8 @@ import sqlite3
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Collection, Iterator, Optional
+from urllib.parse import quote
 
 try:  # pragma: no cover - Windows is not the deployment platform
     import fcntl
@@ -26,7 +27,7 @@ except ImportError:  # pragma: no cover
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def quote_identifier(identifier: str, *, allowed: Optional[set[str]] = None) -> str:
+def quote_identifier(identifier: str, *, allowed: Optional[Collection[str]] = None) -> str:
     """Validate and quote a SQL identifier.
 
     SQLite parameters cannot represent table/column names.  Callers that need
@@ -40,6 +41,22 @@ def quote_identifier(identifier: str, *, allowed: Optional[set[str]] = None) -> 
     if not IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"invalid SQL identifier: {value!r}")
     return '"' + value.replace('"', '""') + '"'
+
+
+def sqlite_uri(path: Path, *, mode: str = "ro") -> str:
+    """Build a SQLite URI for *path* without letting path text alter options.
+
+    A raw ``f"file:{path}?mode=ro"`` is subtly unsafe for paths containing
+    ``?``, ``#`` or percent escapes: SQLite can interpret part of the filename
+    as URI options.  Percent-encoding the path keeps it a filename while still
+    allowing the caller to select read-only mode.
+    """
+
+    if mode not in {"ro", "rw", "rwc", "memory"}:
+        raise ValueError(f"unsupported SQLite URI mode: {mode!r}")
+    resolved = Path(path).expanduser().resolve()
+    encoded = quote(str(resolved), safe="/")
+    return f"file:{encoded}?mode={mode}"
 
 
 @contextmanager
@@ -99,6 +116,25 @@ def locked_atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") 
         atomic_write_text(Path(path), text, encoding=encoding)
 
 
+def locked_append_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Append text while serializing writers and forcing it to disk.
+
+    Appending a JSONL record with a plain ``open(..., "a")`` is not atomic
+    across processes: two cron workers can interleave bytes or one can observe
+    a half-written record.  The sibling lock covers the whole write and the
+    flush/fsync makes a successful return durable enough for the caller to
+    record the delivery state.
+    """
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(path):
+        with path.open("a", encoding=encoding) as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
 @contextmanager
 def sqlite_connection(
     path: Path,
@@ -120,7 +156,7 @@ def sqlite_connection(
             path.parent.mkdir(parents=True, exist_ok=True)
             db = sqlite3.connect(path, timeout=timeout)
         else:
-            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
+            db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True, timeout=timeout)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=5000")
         if not read_only:
@@ -140,4 +176,3 @@ def sqlite_connection(
     finally:
         if db is not None:
             db.close()
-

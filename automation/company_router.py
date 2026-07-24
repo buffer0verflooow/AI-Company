@@ -25,6 +25,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+try:
+    from ._safe_io import file_lock, locked_atomic_write_text, quote_identifier, sqlite_uri
+except ImportError:  # direct ``python automation/company_router.py`` invocation
+    from _safe_io import file_lock, locked_atomic_write_text, quote_identifier, sqlite_uri
+
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "router_config.json"
@@ -32,6 +37,10 @@ INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
 TVCR_INTERNAL_PREFIX = "[COMPANY_TVCR_INTERNAL]"
 OPERATOR_INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
 INTERNAL_MESSAGE_PREFIXES = (INTERNAL_WORKER_PREFIX, TVCR_INTERNAL_PREFIX, OPERATOR_INTERNAL_PREFIX)
+INTERNAL_MESSAGE_PREFIX_RE = re.compile(
+    rf"^(?:\s*(?:{'|'.join(re.escape(prefix) for prefix in INTERNAL_MESSAGE_PREFIXES)})\s*)+",
+    re.I,
+)
 
 EXPLICIT_NEW_SWARM_RE = re.compile(
     r"(?:new|fresh|another)\s+swarm|(?:新的?|新建|另开|再开|重新(?:提交|分发|启动))[^，。；\n]{0,8}(?:蜂群|swarm)",
@@ -150,22 +159,124 @@ def _has_external_action(text: str) -> bool:
     return _contains_any(cleaned, EXTERNAL_ACTION_TERMS)
 
 
-def extract_target(message: str) -> tuple[str, str]:
-    apk = APK_RE.search(message)
-    if apk:
-        return "apk", apk.group(1)
+def _internal_metadata_value(value: Any) -> bool:
+    if value is True or value == 1:
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in {
+        "1", "true", "yes", "internal", "internal_call", "internal-routing",
+        "internal_routing", "routing",
+    }
 
-    for raw in IP_RE.findall(message):
+
+def _is_internal_hermes_hook(payload: Dict[str, Any], extra: Dict[str, Any]) -> bool:
+    """Trust internal prefixes only when hook provenance explicitly says so."""
+    source_present = "source" in payload or "source" in extra
+    source = payload.get("source") if "source" in payload else extra.get("source")
+    if source_present and str(source or "").strip().lower() != "hook":
+        return False
+
+    metadata: list[Dict[str, Any]] = []
+    for container in (payload, extra):
+        for key in ("hook_metadata", "metadata"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                metadata.append(value)
+
+    flag_keys = {
+        "internal", "is_internal", "internal_call", "is_internal_call",
+        "internal_routing_event", "is_internal_routing_event", "router_internal",
+    }
+    type_keys = {"call_type", "event_type", "routing_event", "origin"}
+    internal_marker_present = bool(metadata)
+    for container in (payload, extra, *metadata):
+        internal_marker_present = internal_marker_present or any(
+            key in container for key in flag_keys | type_keys
+        )
+        if any(_internal_metadata_value(container.get(key)) for key in flag_keys):
+            return True
+        if any(_internal_metadata_value(container.get(key)) for key in type_keys):
+            return True
+
+    # Hermes workers are launched with ``--source tool``. The shell hook
+    # inherits that trusted process-local source even on Hermes versions that
+    # do not yet include source metadata in the JSON payload.
+    if (
+        not source_present
+        and str(payload.get("hook_event_name") or "").lower() == "pre_llm_call"
+        and not internal_marker_present
+        and os.getenv("HERMES_SESSION_SOURCE", "").strip().lower() == "tool"
+    ):
+        return True
+
+    # Preserve compatibility for legacy in-process worker calls that predate
+    # the shell-hook envelope. Real Hermes hook payloads include an event name.
+    return (
+        not source_present
+        and "hook_event_name" not in payload
+        and not internal_marker_present
+        and str(payload.get("session_id") or "") == "worker"
+    )
+
+
+def _strip_internal_message_prefixes(message: str) -> str:
+    return INTERNAL_MESSAGE_PREFIX_RE.sub("", message or "", count=1).lstrip()
+
+
+def extract_target(message: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[int, int, int, str, str]] = []
+
+    for match in APK_RE.finditer(message or ""):
+        candidates.append((match.start(1), match.end(1), 0, "apk", match.group(1)))
+
+    for match in IP_RE.finditer(message or ""):
+        raw = match.group(0)
         try:
             ipaddress.ip_address(raw)
-            return "ip", raw
+            candidates.append((match.start(), match.end(), 0, "ip", raw))
         except ValueError:
             continue
 
-    domain = DOMAIN_RE.search(message)
-    if domain:
-        return "domain", domain.group(1).lower()
-    return "unknown", ""
+    for match in DOMAIN_RE.finditer(message or ""):
+        candidates.append((match.start(1), match.end(1), 1, "domain", match.group(1).lower()))
+
+    targets: list[tuple[str, str]] = []
+    accepted_spans: list[tuple[int, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for start, end, _priority, target_type, target in sorted(candidates):
+        if any(start < accepted_end and end > accepted_start for accepted_start, accepted_end in accepted_spans):
+            continue
+        accepted_spans.append((start, end))
+        key = (target_type, target.lower())
+        if key in seen:
+            continue
+        targets.append((target_type, target))
+        seen.add(key)
+    return targets
+
+
+def _normalize_target(target_type: str, target: str) -> tuple[str, str]:
+    normalized_type = str(target_type or "unknown").strip().lower()
+    normalized_target = str(target or "").strip().lower()
+    if normalized_type == "domain":
+        normalized_target = normalized_target.rstrip(".")
+    elif normalized_type == "ip":
+        try:
+            normalized_target = str(ipaddress.ip_address(normalized_target))
+        except ValueError:
+            pass
+    return normalized_type, normalized_target
+
+
+def _build_dedup_key(session_id: str, targets: Iterable[tuple[str, str]], intent: str) -> str:
+    normalized_targets = sorted({
+        _normalize_target(target_type, target)
+        for target_type, target in targets
+        if str(target or "").strip()
+    })
+    target_key = ",".join(f"{target_type}:{target}" for target_type, target in normalized_targets)
+    return f"{session_id}|{target_key or 'no-target'}|{str(intent or 'custom').strip().lower()}"
 
 
 def _is_internal_target(target_type: str, target: str) -> bool:
@@ -233,7 +344,8 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
             external_action=external_action,
         )
 
-    target_type, target = extract_target(text)
+    targets = extract_target(text)
+    target_type, target = targets[0] if targets else ("unknown", "")
     if any(term in lowered for term in ("生成报告", "写报告", "整理报告", "输出报告", "出报告", "write report", "writeup")):
         intent = "report"
     elif any(term in lowered for term in ("利用", "exploit", "poc")):
@@ -248,8 +360,12 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     # Authorization comes from a trusted scope allowlist (config), NEVER from
     # in-band user text like "已授权". Internal/local targets need no scope.
     allow = {str(item).strip().lower() for item in authorized_targets if str(item).strip()}
-    authorized = bool(target) and target.lower() in allow
-    authorization_required = bool(active and target and not (authorized or _is_internal_target(target_type, target)))
+    unauthorized_targets = [
+        (candidate_type, candidate)
+        for candidate_type, candidate in targets
+        if candidate.lower() not in allow and not _is_internal_target(candidate_type, candidate)
+    ]
+    authorization_required = bool(active and unauthorized_targets)
 
     profile = "breadth" if intent == "recon" else "depth" if intent in {"analyze", "exploit"} else "balanced"
     action = "approval_required" if authorization_required or external_action else "dispatch_swarm"
@@ -272,12 +388,17 @@ class RouterState:
     def __init__(self, path: str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=5000")
-        self.db.executescript(
-            """
+        self.db: Optional[sqlite3.Connection] = None
+        try:
+            # Schema creation/migrations are writes too; serialize first
+            # startup so concurrent hooks cannot race on ALTER TABLE/indices.
+            with file_lock(self.path):
+                self.db = sqlite3.connect(self.path, timeout=5.0)
+                self.db.row_factory = sqlite3.Row
+                self.db.execute("PRAGMA journal_mode=WAL")
+                self.db.execute("PRAGMA busy_timeout=5000")
+                self.db.executescript(
+                    """
             CREATE TABLE IF NOT EXISTS route_events (
                 route_event_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -286,6 +407,7 @@ class RouterState:
                 message_excerpt TEXT DEFAULT '',
                 route TEXT NOT NULL,
                 action TEXT NOT NULL,
+                dedup_key TEXT DEFAULT '',
                 decision_json TEXT NOT NULL,
                 run_id TEXT DEFAULT '',
                 request_id TEXT DEFAULT '',
@@ -300,27 +422,41 @@ class RouterState:
             CREATE INDEX IF NOT EXISTS idx_route_events_session
             ON route_events(session_id, created_at DESC);
             """
-        )
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(route_events)")}
-        migrations = {
-            "delivery_platform": "TEXT DEFAULT ''",
-            "delivery_chat_id": "TEXT DEFAULT ''",
-            "delivery_thread_id": "TEXT DEFAULT ''",
-            "delivery_user_id": "TEXT DEFAULT ''",
-            "proactive_delivered": "INTEGER DEFAULT 0",
-            "delivery_attempts": "INTEGER DEFAULT 0",
-            "delivery_error": "TEXT DEFAULT ''",
-            "last_delivery_at": "TEXT DEFAULT ''",
-            "runner_restarts": "INTEGER DEFAULT 0",
-            "quality_status": "TEXT DEFAULT ''",
-        }
-        for column, definition in migrations.items():
-            if column not in columns:
-                self.db.execute(f"ALTER TABLE route_events ADD COLUMN {column} {definition}")
-        self.db.commit()
+                )
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(route_events)")}
+                migrations = {
+                    "delivery_platform": "TEXT DEFAULT ''",
+                    "delivery_chat_id": "TEXT DEFAULT ''",
+                    "delivery_thread_id": "TEXT DEFAULT ''",
+                    "delivery_user_id": "TEXT DEFAULT ''",
+                    "proactive_delivered": "INTEGER DEFAULT 0",
+                    "delivery_attempts": "INTEGER DEFAULT 0",
+                    "delivery_error": "TEXT DEFAULT ''",
+                    "last_delivery_at": "TEXT DEFAULT ''",
+                    "runner_restarts": "INTEGER DEFAULT 0",
+                    "quality_status": "TEXT DEFAULT ''",
+                    "dedup_key": "TEXT DEFAULT ''",
+                }
+                for column, definition in migrations.items():
+                    if column not in columns:
+                        safe_column = quote_identifier(column, allowed=migrations)
+                        self.db.execute(
+                            f"ALTER TABLE route_events ADD COLUMN {safe_column} {definition}"
+                        )
+                self.db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_route_events_dedup ON route_events(dedup_key, created_at DESC)"
+                )
+                self.db.commit()
+        except BaseException:
+            if self.db is not None:
+                self.db.close()
+                self.db = None
+            raise
 
     def close(self) -> None:
-        self.db.close()
+        if self.db is not None:
+            self.db.close()
+            self.db = None
 
     def __del__(self) -> None:
         try:
@@ -351,6 +487,7 @@ class RouterState:
         *,
         completed_only: bool = False,
         message_marker: str = "",
+        dedup_key: str = "",
     ) -> Optional[sqlite3.Row]:
         conditions = ["session_id=?", "action=?", "run_id<>''", "created_at>=?"]
         params: list[Any] = [session_id, action, since.isoformat(timespec="seconds")]
@@ -361,11 +498,40 @@ class RouterState:
         if message_marker:
             conditions.append("LOWER(message_excerpt) LIKE ?")
             params.append(f"%{message_marker.lower()}%")
-        return self.db.execute(
+        if dedup_key:
+            conditions.append("(dedup_key=? OR dedup_key='')")
+            params.append(dedup_key)
+        rows = self.db.execute(
             f"SELECT * FROM route_events WHERE {' AND '.join(conditions)} "
-            "ORDER BY created_at DESC LIMIT 1",
+            "ORDER BY created_at DESC",
             params,
-        ).fetchone()
+        ).fetchall()
+        if not dedup_key:
+            return rows[0] if rows else None
+        for row in rows:
+            stored_key = str(row["dedup_key"] or "")
+            if stored_key == dedup_key:
+                return row
+            if stored_key:
+                continue
+            try:
+                stored_decision = json.loads(row["decision_json"])
+            except (TypeError, json.JSONDecodeError):
+                stored_decision = {}
+            stored_targets = extract_target(str(row["message_excerpt"] or ""))
+            if not stored_targets and stored_decision.get("target"):
+                stored_targets = [(
+                    str(stored_decision.get("target_type") or "unknown"),
+                    str(stored_decision.get("target") or ""),
+                )]
+            candidate_key = _build_dedup_key(
+                str(row["session_id"] or ""),
+                stored_targets,
+                str(stored_decision.get("intent") or "custom"),
+            )
+            if candidate_key == dedup_key:
+                return row
+        return None
 
     def insert(
         self,
@@ -375,25 +541,45 @@ class RouterState:
         message: str,
         decision: RouteDecision,
         origin: Optional[Dict[str, str]] = None,
+        dedup_key: str = "",
     ) -> str:
         event_id = str(uuid.uuid4())
         now = utc_now()
         origin = origin or {}
-        self.db.execute(
-            """INSERT INTO route_events
-               (route_event_id,session_id,platform,message_hash,message_excerpt,route,action,
-                decision_json,delivery_platform,delivery_chat_id,delivery_thread_id,
-                delivery_user_id,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                event_id, session_id, platform, message_hash, message[:500], decision.route,
-                decision.action, json.dumps(asdict(decision), ensure_ascii=False),
-                str(origin.get("platform") or ""), str(origin.get("chat_id") or ""),
-                str(origin.get("thread_id") or ""), str(origin.get("user_id") or ""),
-                now, now,
-            ),
+        if not dedup_key:
+            targets = extract_target(message)
+            if not targets and decision.target:
+                targets = [(decision.target_type, decision.target)]
+            dedup_key = _build_dedup_key(session_id, targets, decision.intent)
+        values = (
+            event_id, session_id, platform, message_hash, message[:500], decision.route,
+            decision.action, dedup_key, json.dumps(asdict(decision), ensure_ascii=False),
+            str(origin.get("platform") or ""), str(origin.get("chat_id") or ""),
+            str(origin.get("thread_id") or ""), str(origin.get("user_id") or ""),
+            now, now,
         )
-        self.db.commit()
+        with file_lock(self.path):
+            try:
+                self.db.execute(
+                    """INSERT INTO route_events
+                       (route_event_id,session_id,platform,message_hash,message_excerpt,route,action,dedup_key,
+                        decision_json,delivery_platform,delivery_chat_id,delivery_thread_id,
+                        delivery_user_id,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    values,
+                )
+                self.db.commit()
+            except sqlite3.IntegrityError:
+                # A concurrent hook may have inserted the same session/hash.
+                # Reuse that event so only one downstream run is created.
+                existing = self.db.execute(
+                    "SELECT route_event_id FROM route_events WHERE session_id=? AND message_hash=?",
+                    (session_id, message_hash),
+                ).fetchone()
+                self.db.rollback()
+                if existing:
+                    return str(existing["route_event_id"])
+                raise
         return event_id
 
     def update(self, event_id: str, **fields: Any) -> None:
@@ -409,9 +595,15 @@ class RouterState:
         }
         if set(fields) - allowed:
             raise ValueError("unsupported route state field")
-        sql = ", ".join(f"{key}=?" for key in fields)
-        self.db.execute(f"UPDATE route_events SET {sql} WHERE route_event_id=?", (*fields.values(), event_id))
-        self.db.commit()
+        assignments = ", ".join(
+            f"{quote_identifier(key, allowed=allowed)}=?" for key in fields
+        )
+        with file_lock(self.path):
+            self.db.execute(
+                f"UPDATE route_events SET {assignments} WHERE route_event_id=?",
+                (*fields.values(), event_id),
+            )
+            self.db.commit()
 
     def pending_notifications(self, max_attempts: int = 10) -> list[sqlite3.Row]:
         return list(self.db.execute(
@@ -549,14 +741,17 @@ def launch_content_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     request_path = job_dir / "request.json"
     if route and message:
-        request_path.write_text(json.dumps({
-            "run_id": run_id,
-            "route": route,
-            "message": message,
-            "session_id": session_id,
-            "platform": platform,
-            "created_at": utc_now(),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        locked_atomic_write_text(
+            request_path,
+            json.dumps({
+                "run_id": run_id,
+                "route": route,
+                "message": message,
+                "session_id": session_id,
+                "platform": platform,
+                "created_at": utc_now(),
+            }, ensure_ascii=False, indent=2),
+        )
     if not request_path.exists():
         raise RuntimeError(f"content job request missing: {request_path}")
 
@@ -908,8 +1103,14 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
     message = str(extra.get("user_message") or "").strip()
     if not message:
         return {}
-    if os.getenv("COMPANY_ROUTER_BYPASS") == "1" or message.startswith(INTERNAL_MESSAGE_PREFIXES):
+    if os.getenv("COMPANY_ROUTER_BYPASS") == "1":
         return {}
+    if INTERNAL_MESSAGE_PREFIX_RE.match(message):
+        if _is_internal_hermes_hook(payload, extra):
+            return {}
+        message = _strip_internal_message_prefixes(message)
+        if not message:
+            return {}
     session_id = str(payload.get("session_id") or "unknown-session")
     platform = str(extra.get("platform") or "unknown")
     decision_context = handle_tvcr_decision(message, config, actor=f"{platform}:{session_id}")
@@ -930,13 +1131,16 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
             status_updates=updates,
         )}
 
+    targets = extract_target(message)
     decision = classify_message(message, config.get("authorized_targets") or [])
+    dedup_key = _build_dedup_key(session_id, targets, decision.intent)
     if decision.action == "dispatch_swarm" and not EXPLICIT_NEW_SWARM_RE.search(message):
         dedup_minutes = int(config.get("swarm_dedup_window_minutes", 10))
         recent = state.recent_for_session(
             session_id,
             decision.action,
             datetime.now(timezone.utc) - timedelta(minutes=dedup_minutes),
+            dedup_key=dedup_key,
         )
         if recent:
             state.update(
@@ -973,7 +1177,15 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
             )}
 
     origin = resolve_session_origin(str(config.get("gateway_sessions_index") or ""), session_id)
-    event_id = state.insert(session_id, platform, message_hash, message, decision, origin=origin)
+    event_id = state.insert(
+        session_id,
+        platform,
+        message_hash,
+        message,
+        decision,
+        origin=origin,
+        dedup_key=dedup_key,
+    )
     run: Optional[Dict[str, Any]] = None
 
     # Pre-evaluation gate: check task value BEFORE dispatch

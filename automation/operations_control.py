@@ -567,7 +567,10 @@ def sync_operational_runs(
                 "updated_at": now,
             }
             if values["input_tokens"] == 0 and values["output_tokens"] == 0 and output_bytes == 0:
-                values["status"] = "empty_run"
+                # Keep the execution outcome from the source of truth (for
+                # example ``failed``).  Empty output is a quality signal, not
+                # a replacement for the run's lifecycle status.
+                values["quality_status"] = "empty_output"
             # Join measured tokens to evidence-backed prices.  Never overwrites a
             # provider-confirmed cost; an unmatched model stays explicitly
             # ``unpriced`` (not $0); non-USD keeps its native amount, no FX guess.

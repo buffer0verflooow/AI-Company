@@ -48,19 +48,21 @@ def fetch_top_entries(db_path: Path) -> list[dict]:
     """Fetch L3/L4 active knowledge entries from Swarm KB."""
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
-    rows = db.execute(
-        """
-        SELECT level, knowledge_type, title, content, source_agent, tags,
-               trust_vector, created_at, id
-        FROM knowledge_entries
-        WHERE level >= 3 AND status = 'active'
-          AND (trust_vector IS NULL OR trust_vector >= ?)
-        ORDER BY level DESC, trust_vector DESC NULLS LAST
-        LIMIT 30
-        """,
-        (MIN_TRUST,),
-    ).fetchall()
-    db.close()
+    try:
+        rows = db.execute(
+            """
+            SELECT level, knowledge_type, title, content, source_agent, tags,
+                   trust_vector, created_at, id
+            FROM knowledge_entries
+            WHERE level >= 3 AND status = 'active'
+              AND (trust_vector IS NULL OR trust_vector >= ?)
+            ORDER BY level DESC, trust_vector DESC NULLS LAST
+            LIMIT 30
+            """,
+            (MIN_TRUST,),
+        ).fetchall()
+    finally:
+        db.close()
 
     result = []
     for r in rows:

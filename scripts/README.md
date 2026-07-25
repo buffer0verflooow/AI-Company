@@ -13,14 +13,12 @@ updated: 2026-07-19
 | 脚本 | 用途 | 关联项目 |
 |------|------|----------|
 | `generate_cover.py` | AI 文章封面图生成（PIL + Playwright） | ai-edu-series、article-curation |
-| `wechat_css_inline.py` | 微信公众号 CSS 内联（premailer + pygments） | 所有公众号发布 |
-| `wechat_push.py` | 微信公众号草稿箱推送 | 所有公众号发布 |
+| `wechat_push.py` | 微信公众号草稿箱推送（内置 CSS 内联） | 所有公众号发布 |
 
 ## 使用方式
 
 ```bash
 cd /home/pwn/workspace/company
 python3 scripts/generate_cover.py --help
-python3 scripts/wechat_css_inline.py --help
 python3 scripts/wechat_push.py --help
 ```

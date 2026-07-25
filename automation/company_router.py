@@ -58,6 +58,8 @@ SECURITY_TERMS = {
     "swarm", "poc", "idor", "xss", "sqli", "ssrf", "jwt", "cors",
 }
 ARTICLE_TERMS = {"文章", "公众号", "写稿", "排版", "选题", "草稿箱", "润色", "发布文章"}
+# 当消息含这些词时，即使匹配 ARTICLE_TERMS 也不应走文章产线
+ARTICLE_BLOCKING_TERMS = {"研究", "调研", "分析报告", "codex", "研究报告", "蜂群", "swarm"}
 VIDEO_TERMS = {"视频", "pixelle", "b站", "分镜", "配音", "tts", "字幕", "剪辑"}
 COMPANY_TERMS = {"公司", "战略", "财务", "销售", "运营", "产品", "流程", "知识库", "仪表盘"}
 MANAGEMENT_TERMS = {"状态", "进度", "流程", "路由", "架构", "能力", "管理", "如何", "怎么", "是否", "当前"}
@@ -322,6 +324,9 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     if not explicit and top == 0:
         route = "company"
     elif not explicit and scores["company"] > 0 and _contains_any(text, MANAGEMENT_TERMS):
+        route = "company"
+    # 阻止误走文章产线：若命中 blocking terms 且非显式标注 /article
+    if not explicit and route == "article" and _contains_any(text, ARTICLE_BLOCKING_TERMS):
         route = "company"
 
     confidence = 0.99 if explicit else min(0.95, 0.45 + 0.12 * top)

@@ -1,7 +1,7 @@
 ---
 tags: [index, meta]
 created: 2026-07-04
-updated: 2026-07-15
+updated: 2026-07-19
 ---
 
 # 知识库索引
@@ -46,6 +46,7 @@ updated: 2026-07-15
 | [[strategy/video-production-strategy|视频产线规划调研]] | 市场、成本、竞争、盈利、路线图 | 2026-07-05 |
 | [[strategy/okx-ai-profitability-analysis|OKX AI 盈利模式分析]] | 行业盈利模式对标研究 | 2026-07-05 |
 | [[strategy/upwork-profitability-analysis|Upwork 盈利能力分析]] | 自由职业平台可行性分析 | 2026-07-05 |
+| [[strategy/market-demand-analysis|市场需求分析：AI+安全赛道]] | AI+安全内容赛道市场需求分析 | 2026-07-10 |
 | [[projects/ai-edu-series/strategy/content-strategy|AI工程 · 内容策略]] | 20 篇连载整体策略 | 2026-07-04 |
 | [[projects/ai-edu-series/strategy/distribution-plan|AI工程 · 分发计划]] | 6 平台分发与流量互导 | 2026-07-04 |
 | [[projects/article-curation/strategy/content-strategy|文章精选 · 内容策略]] | 编译工作流与质量标准 | 2026-07-05 |

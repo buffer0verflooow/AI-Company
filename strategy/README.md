@@ -1,7 +1,7 @@
 ---
 tags: [department, strategy]
 created: 2026-07-04
-updated: 2026-07-05
+updated: 2026-07-19
 ---
 
 # 🧠 战略部
@@ -15,6 +15,7 @@ updated: 2026-07-05
 - [[video-production-strategy|视频产线规划调研]] — 市场、成本、竞争、盈利、路线图（2026-07-05）
 - [[okx-ai-profitability-analysis|OKX AI 盈利模式分析]] — 行业盈利模式对标
 - [[upwork-profitability-analysis|Upwork 盈利能力分析]] — 自由职业平台可行性
+- [[market-demand-analysis|市场需求分析：AI+安全内容赛道]] — AI+安全内容赛道市场需求分析（2026-07-10）
 
 ## 关联项目策略
 

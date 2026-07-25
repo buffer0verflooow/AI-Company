@@ -1027,7 +1027,7 @@ def _pre_evaluate_task(
 ) -> str:
     """Determines if a task should proceed, be skipped, or require approval BEFORE dispatch.
 
-    Returns one of: 'proceed', 'skip', 'needs_approval'
+    Returns one of: 'proceed', 'skip', 'skip_low_confidence', 'needs_approval'
     """
     pre_eval_enabled = bool(config.get("pre_evaluation_enabled", True))
     if not pre_eval_enabled:
@@ -1077,7 +1077,7 @@ def _pre_evaluate_task(
     # never trigger an auto-dispatch — the classification was a fallback.
     # Fall back to main_agent so the conversation continues naturally.
     if decision.confidence < 0.5 and decision.action in {"dispatch_company", "dispatch_article", "dispatch_video"}:
-        return "skip"
+        return "skip_low_confidence"
 
     # Skill review: check for actual conversation content to review
     if decision.action == "dispatch_company" and SKILL_REVIEW_MARKER in message.lower():
@@ -1124,11 +1124,25 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
     existing = state.existing(session_id, message_hash)
     if existing:
         decision = RouteDecision(**json.loads(existing["decision_json"]))
+        existing_updates = updates
+        if (
+            str(existing["status"] or "") == "skipped"
+            and "低置信度分发" in str(existing["error"] or "")
+        ):
+            decision = RouteDecision(**{
+                **asdict(decision),
+                "action": "main_agent",
+                "reason": "低置信度分发",
+            })
+            existing_updates = updates + [
+                f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
+                "未生成 run_id，已交由公司主 Agent 继续处理。"
+            ]
         return {"context": build_context(
             decision,
             existing_run_id=existing["run_id"],
             existing_status=existing["status"],
-            status_updates=updates,
+            status_updates=existing_updates,
         )}
 
     targets = extract_target(message)
@@ -1196,6 +1210,20 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
             decision,
             status_updates=updates + [
                 f"- [预评估] 任务已跳过：当前会话无足够的对话历史可供分析。任务未派发，无 Token 消耗。"
+            ],
+        )}
+    elif pre_eval == "skip_low_confidence":
+        state.update(event_id, status="skipped", error="pre-evaluation: 低置信度分发")
+        fallback_decision = RouteDecision(**{
+            **asdict(decision),
+            "action": "main_agent",
+            "reason": "低置信度分发",
+        })
+        return {"context": build_context(
+            fallback_decision,
+            status_updates=updates + [
+                f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
+                "未生成 run_id，已交由公司主 Agent 继续处理。"
             ],
         )}
     elif pre_eval == "needs_approval":

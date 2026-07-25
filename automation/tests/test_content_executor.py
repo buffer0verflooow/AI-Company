@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.content_hermes_executor import build_prompt, worker_usage
+from automation.content_hermes_executor import build_prompt, build_worker_invocation, worker_usage
 import sqlite3
 
 
@@ -37,6 +37,37 @@ class ContentPromptTests(unittest.TestCase):
             self.assertEqual(expected, ["video-script.md", "storyboard.md", "production-plan.md"])
             self.assertIn("严禁声称视频已渲染", prompt)
             self.assertIn("不上传 B站", prompt)
+
+    def test_article_worker_has_no_terminal_and_only_job_write_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = Path(td) / "job"
+            job_dir.mkdir()
+            command, cwd, env = build_worker_invocation(
+                {"route": "article"}, job_dir, "worker prompt"
+            )
+            self.assertEqual(cwd, job_dir.resolve())
+            self.assertEqual(env["HERMES_WRITE_SAFE_ROOT"], str(job_dir.resolve()))
+            self.assertEqual(env["TERMINAL_CWD"], str(job_dir.resolve()))
+            self.assertEqual(env["COMPANY_ROUTER_BYPASS"], "1")
+            self.assertEqual(env["HERMES_SESSION_SOURCE"], "tool")
+            toolsets = command[command.index("--toolsets") + 1].split(",")
+            self.assertNotIn("terminal", toolsets)
+            self.assertNotIn("process", toolsets)
+            self.assertNotIn("code_execution", toolsets)
+            self.assertNotIn("skills", toolsets)
+            self.assertIn("file", toolsets)
+            self.assertEqual(command[command.index("--skills") + 1], "humanizer")
+
+    def test_company_worker_keeps_authorized_company_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = Path(td) / "job"
+            job_dir.mkdir()
+            command, cwd, env = build_worker_invocation(
+                {"route": "company"}, job_dir, "worker prompt"
+            )
+            self.assertEqual(cwd, Path("/home/pwn/workspace/company"))
+            self.assertEqual(env["HERMES_WRITE_SAFE_ROOT"], "/home/pwn/workspace/company")
+            self.assertNotIn("--toolsets", command)
 
     def test_worker_usage_resolves_session_by_job_directory(self):
         with tempfile.TemporaryDirectory() as td:

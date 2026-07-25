@@ -23,6 +23,7 @@ WORKSPACE = Path("/home/pwn/workspace")
 COMPANY = WORKSPACE / "company"
 HERMES_DB = Path("/home/pwn/.hermes/state.db")
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
+CONTENT_ONLY_TOOLSETS = ("file", "web", "image_gen", "vision")
 
 
 def utc_now() -> str:
@@ -79,7 +80,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 
 强制交付（按顺序）：
 1. `{job_dir / 'draft.md'}`：完整的技术文章初稿。写完初稿后**不要**继续——先停下来，做下一步。
-2. **去 AI 味**：用 skill_view(name='humanizer') 加载 humanizer 技能，严格按 34 条模式逐一检查 draft.md，然后生成 `{job_dir / 'draft-humanized.md'}`。要求：
+2. **去 AI 味**：humanizer 技能已由 Runner 预加载，严格按 34 条模式逐一检查 draft.md，然后生成 `{job_dir / 'draft-humanized.md'}`。要求：
    - 彻底去掉 AI 词汇（"值得注意的是"、"此外"、"总而言之"、"至关重要"、"在当今时代"等）
    - 去掉教科书结构（"挑战与展望"、"综上所述"等章节模板）
    - 去掉 emoji 标题（🚀💡✅ 等）
@@ -93,7 +94,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
    - 禁止 "## 结语"、"## 🔥"、"## 总结"、"📚系列下一篇"
    - 禁止教学序词："下面让我们..."、"首先..."、"接下来..."、"值得注意的是"
    - 标题必须有钩子+具体事实，不能是教科书式陈述
-3. **生成封面**：运行 `python3 {COMPANY / 'scripts/generate_cover.py'} <篇号> "<文章标题>" "<副标题>" {job_dir / 'cover.jpg'}`。篇号从 TRACKING.md 获取，标题用 humanized 后的版本。
+3. **生成封面**：如果当前工具集中提供 `image_generate`，在 `{job_dir / 'cover.jpg'}` 生成封面；否则明确记录封面未生成。此隔离 Worker 不提供 terminal/execute_code，不得通过 shell 绕过任务目录限制。
 4. `{job_dir / 'qa-report.md'}`：Gate 1 事实核查、Gate 2 内容审校、Gate 3 主编终审，逐项给证据和结论。**QA 对象是 draft-humanized.md**，不是 draft.md。
 5. **微信预览检查（新 Gate 4）**：生成 `{job_dir / 'draft-formatted.md'}` 后，转为 HTML 预览文件 `{job_dir / 'wechat-preview.html'}`，然后逐项检查：
    - CSS 样式整体注入到 `<body>` 元素的 inline `style=` 属性中
@@ -109,10 +110,11 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
    - 不使用 emoji 标题、不使用 `word-break: break-all`
 
 约束：
-- 需要外部资料时优先使用 agentkey skill 的 `execute_tool(name="agentkey_search", params={{"query": "...", "num": 5}})` 搜索，其次才是内置 web_search/web_extract。agentkey 覆盖 Web/知乎/X/Reddit/公众号等渠道。
+- 需要外部资料时，若当前隔离环境提供 agentkey_search 能力则优先使用；否则使用当前工具集中的 web_search/web_extract。不得臆造不可用工具或结果。
 - 不执行公众号推送、草稿箱写入或公开发布；这些外部动作必须人工审批。
 - 不编造链接、数据、测试或已完成动作；无法核验的内容明确标注。
 - 不修改公司已有正式文章，只在本任务产物目录写文件。
+- 只能使用当前隔离工具集；不得调用 terminal、process、execute_code 或 delegate_task。
 - 最终回复只总结完成情况、质量门结果、产物绝对路径和仍需人工决定的事项。
 """
         return prompt, expected
@@ -137,7 +139,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 2. `{job_dir / 'result.json'}`：严格 JSON 对象，字段为 `status`（completed/needs_approval/failed）、`department`、`summary`、`changed_files`（数组）、`tests`（数组）、`next_action`。
 
 边界：
-- 需要外部资料时优先使用 agentkey skill 的 `execute_tool(name="agentkey_search", params={{"query": "...", "num": 5}})` 搜索，其次才是内置 web_search/web_extract。agentkey 覆盖 Web/知乎/X/Reddit/公众号等渠道。
+- 需要外部资料时，若当前隔离环境提供 agentkey_search 能力则优先使用；否则使用当前工具集中的 web_search/web_extract。不得臆造不可用工具或结果。
 - 不执行公开发布、上传、付款、外部消息、删除数据、不可逆操作或未明确授权的外部安全测试。
 - 如任务必须越过边界，将 status 设为 needs_approval，生成 `{job_dir / 'approval-request.md'}` 后停止。
 - 不编造完成结果、测试、数据或文件修改；无法验证的内容明确标注。
@@ -170,9 +172,58 @@ Pixelle-Video 运行时：{runtime}
 - 不上传 B站、小红书、抖音或任何外部平台；上传/发布必须人工审批。
 - 不下载未授权素材，不编造生成结果。
 - 不修改公司已有正式内容，只在本任务产物目录写文件。
+- 此隔离 Worker 不提供 terminal/execute_code；只交付文案、分镜和制作计划，不声称已渲染 MP4。
 - 最终回复只总结完成情况、产物绝对路径、渲染状态和仍需人工决定的事项。
 """
     return prompt, expected
+
+
+def build_worker_invocation(
+    request: Dict[str, Any],
+    job_dir: Path,
+    prompt: str,
+) -> tuple[list[str], Path, Dict[str, str]]:
+    """Build a least-privilege Hermes invocation for one content job.
+
+    Article/video workers only need file, web, skill, and image tools.  In
+    particular, omitting the terminal/process/code-execution toolsets closes
+    the route by which a prompt-injected content worker previously edited the
+    main repository with shell commands.  Company execution is intentionally
+    different: it is an explicitly authorized code-changing worker and is
+    confined to the company repository as its working/safe root.
+    """
+    route = str(request.get("route") or "")
+    if route not in {"company", "article", "video"}:
+        raise ValueError(f"unsupported content route: {route!r}")
+
+    job_dir = Path(job_dir).resolve()
+    if route in {"article", "video"}:
+        cwd = job_dir
+        safe_root = job_dir
+    else:
+        cwd = COMPANY
+        safe_root = COMPANY
+
+    command = [
+        "hermes", "chat", "-q", prompt, "-Q",
+        "--source", "tool", "--max-turns", "60", "--pass-session-id",
+    ]
+    if route in {"article", "video"}:
+        command.extend(["--toolsets", ",".join(CONTENT_ONLY_TOOLSETS)])
+    if route == "article":
+        # Preload the read-only humanizer skill instead of exposing the
+        # ``skills`` toolset (which also contains global skill mutation APIs).
+        command.extend(["--skills", "humanizer"])
+
+    env = dict(os.environ)
+    # The router hook is global and runs inside this process too.  These two
+    # markers make the ownership boundary explicit even on older Hermes builds
+    # that do not persist a session source in the hook envelope.
+    env["COMPANY_ROUTER_BYPASS"] = "1"
+    env["HERMES_SESSION_SOURCE"] = "tool"
+    env["HERMES_WRITE_SAFE_ROOT"] = str(safe_root)
+    env["TERMINAL_CWD"] = str(cwd)
+    return command, cwd, env
 
 
 def main() -> int:
@@ -197,14 +248,11 @@ def main() -> int:
         "started_at": utc_now(),
         "artifacts": [],
     })
-    env = dict(os.environ)
+    command, worker_cwd, env = build_worker_invocation(request, job_dir, prompt)
     try:
         proc = subprocess.run(
-            [
-                "hermes", "chat", "-q", prompt, "-Q",
-                "--source", "tool", "--max-turns", "60", "--pass-session-id",
-            ],
-            cwd=str(WORKSPACE),
+            command,
+            cwd=str(worker_cwd),
             env=env,
             capture_output=True,
             text=True,

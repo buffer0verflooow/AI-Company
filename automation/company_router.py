@@ -41,6 +41,29 @@ INTERNAL_MESSAGE_PREFIX_RE = re.compile(
     rf"^(?:\s*(?:{'|'.join(re.escape(prefix) for prefix in INTERNAL_MESSAGE_PREFIXES)})\s*)+",
     re.I,
 )
+NON_USER_SESSION_SOURCES = {"tool", "cron", "subagent"}
+SYNTHETIC_MESSAGE_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"\[(?:IMPORTANT:\s*)?Background process\b"
+    r"|\[Async Delegation\b"
+    r"|\[ASYNC DELEGATION BATCH COMPLETE\b"
+    r"|\[AGENTKEY_RADAR_PROBE\]"
+    r"|\[CONTEXT COMPACTION\b"
+    r"|\[公司\s+Research\s+完成通知\]"
+    r"|\[公司\s+TVCR\s+经营复盘\]"
+    r"|\[IMPORTANT:\s*"
+    r"|\[IMPORTANT:\s*The user has invoked the .* skill\b"
+    r"|\[The user sent an image but I couldn't quite see it\b"
+    r"|\[(?:cron|定时任务)(?:\s|:|：|\])"
+    r"|Review the conversation above and (?:update the skill library|consider saving to memory)"
+    r"|\[(?:image|图片)[^\]\n]{0,32}(?:fallback|降级)[^\]\n]*\]"
+    r")",
+    re.I,
+)
+MODEL_SWITCH_NOTICE_RE = re.compile(
+    r"^\s*\[Note:\s*model was just switched[^\]]*\]\s*",
+    re.I,
+)
 
 EXPLICIT_NEW_SWARM_RE = re.compile(
     r"(?:new|fresh|another)\s+swarm|(?:新的?|新建|另开|再开|重新(?:提交|分发|启动))[^，。；\n]{0,8}(?:蜂群|swarm)",
@@ -58,17 +81,86 @@ SECURITY_TERMS = {
     "swarm", "poc", "idor", "xss", "sqli", "ssrf", "jwt", "cors",
 }
 ARTICLE_TERMS = {"文章", "公众号", "写稿", "排版", "选题", "草稿箱", "润色", "发布文章"}
-# 当消息含这些词时，即使匹配 ARTICLE_TERMS 也不应走文章产线
+# Compatibility export for existing operators/tests.  The classifier no
+# longer treats these words as a blanket veto; it uses the action/object gates
+# below so a real research article request is not discarded accidentally.
 ARTICLE_BLOCKING_TERMS = {"研究", "调研", "分析报告", "codex", "研究报告", "蜂群", "swarm"}
+# 检测用户抱怨、纠错或清理误生成文章的元模式（非文章生产请求）。
+ARTICLE_NEGATION_PATTERNS = re.compile(
+    r"(?:怎么|为什么|为何)又?[^。；\n]{0,24}(?:文章产线|写(?:了|成)?[^。；\n]{0,4}文章|生成[^。；\n]{0,4}文章)"
+    r"|我(?:有|什么时候)?让你[^。；\n]{0,12}(?:写文章|写稿|发文章|生成文章)"
+    r"|(?:检讨|反省|误判|误触发|误分类|误分发|误路由)[^。；\n]{0,12}文章"
+    r"|文章[^。；\n]{0,12}(?:误判|误触发|误分发|误路由)"
+    r"|(?:这|那|刚才)[^。；\n]{0,4}(?:篇)?文章[^。；\n]{0,16}(?:清除|删掉|删除|不是我想要|根本不是|不需要)",
+    re.I,
+)
+ARTICLE_TOOL_OPERATION_RE = re.compile(
+    r"(?:mineru|ocr|提取|解析|识别|读取|抽取)[^。；\n]{0,24}(?:文章|稿件|文档|报告)"
+    r"|(?:文章|稿件|文档|报告)[^。；\n]{0,24}(?:mineru|ocr|提取|解析|识别|读取|抽取)",
+    re.I,
+)
+ARTICLE_OBJECT_PATTERN = r"(?:公众号(?:文章)?|技术文章|文章|稿件|稿子|写稿|草稿)"
+ARTICLE_DIRECT_REQUEST_RE = re.compile(
+    rf"(?:写(?:一篇|篇)?|撰写|创作|改写|润色|排版|发布|推送)[^。；\n]{{0,24}}{ARTICLE_OBJECT_PATTERN}"
+    rf"|{ARTICLE_OBJECT_PATTERN}[^。；\n]{{0,16}}(?:改写|润色|排版|发布|推送)",
+    re.I,
+)
+ARTICLE_DESTINATION_RE = re.compile(
+    rf"(?:改|整理|转换|转化|加工)[^。；\n]{{0,8}}(?:成|为)[^。；\n]{{0,8}}{ARTICLE_OBJECT_PATTERN}",
+    re.I,
+)
 VIDEO_TERMS = {"视频", "pixelle", "b站", "分镜", "配音", "tts", "字幕", "剪辑"}
+VIDEO_DATA_CONTEXT_RE = re.compile(
+    r"音视频(?:数据|流|内容|传输)?|视频(?:数据|流|传输|通话|会议|联网)",
+    re.I,
+)
+VIDEO_OBJECT_PATTERN = r"(?:视频|短片|短视频|成片|分镜|口播稿|配音|字幕|剪辑|mp4|pixelle)"
+VIDEO_REQUEST_RE = re.compile(
+    rf"(?:生成|制作|创作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)[^。；\n]{{0,24}}{VIDEO_OBJECT_PATTERN}"
+    rf"|{VIDEO_OBJECT_PATTERN}[^。；\n]{{0,16}}(?:制作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)",
+    re.I,
+)
 COMPANY_TERMS = {"公司", "战略", "财务", "销售", "运营", "产品", "流程", "知识库", "仪表盘"}
 MANAGEMENT_TERMS = {"状态", "进度", "流程", "路由", "架构", "能力", "管理", "如何", "怎么", "是否", "当前"}
 COMPANY_EXECUTION_TERMS = {
     "开始", "执行", "修改", "实现", "开发", "完善", "更新", "新增", "接入",
     "搭建", "创建", "生成", "整理", "迁移", "重构", "验证", "落地", "推进",
-    "调研", "排查", "制定", "编写", "补充", "删除",
+    "调研", "排查", "修复", "诊断", "制定", "编写", "补充", "删除",
     "implement", "build", "update", "create", "refactor",
 }
+COMPANY_TASK_TERMS = COMPANY_TERMS | {
+    "项目", "任务", "路由", "代码", "测试", "仓库", "配置", "系统", "文件",
+    "文档", "竞品", "市场", "需求", "方案", "计划", "bug", "问题", "错误",
+    "模型", "会话", "hermes", "codex", "sandbox", "规则", "分支", "自动化",
+}
+COMPANY_EXECUTION_PATTERN = "|".join(
+    re.escape(term) for term in sorted(COMPANY_EXECUTION_TERMS, key=len, reverse=True)
+)
+COMPANY_DIRECTIVE_RE = re.compile(
+    rf"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|继续|先|着手|需要你|让你|让(?:codex|code|你|它))\s*)*"
+    rf"(?:开始\s*)?(?:{COMPANY_EXECUTION_PATTERN})",
+    re.I,
+)
+COMPANY_OBJECT_FIRST_RE = re.compile(
+    r"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|先)\s*)*(?:把|将)",
+    re.I,
+)
+COMPANY_CONTEXTUAL_EXECUTION_RE = re.compile(
+    r"^\s*(?:开始|继续|直接|立即)\s*(?:修改|执行|实现|开发|完善|更新|重构|排查|修复|验证)(?:吧|了|一下)?\s*$",
+    re.I,
+)
+QUESTION_RE = re.compile(
+    r"[?？]|为什么|为何|怎么(?:样)?|如何|是否|能否|可否|有没有|有无|什么|哪些?|哪(?:个|些)|借鉴意义|支持吗|下载吗",
+    re.I,
+)
+SECURITY_ANALYSIS_RE = re.compile(
+    r"(?:分析|审计|逆向|检查|评估|研究|排查|测试|验证|复现|定位)",
+    re.I,
+)
+SECURITY_REPORT_RE = re.compile(
+    r"(?:生成|写|整理|输出|出)[^。；\n]{0,8}(?:安全|漏洞|渗透|赏金|逆向)[^。；\n]{0,8}报告",
+    re.I,
+)
 
 ACTIVE_SECURITY_TERMS = {
     "扫描", "探测", "枚举", "爆破", "利用", "攻击", "绕过", "验证漏洞",
@@ -161,6 +253,56 @@ def _has_external_action(text: str) -> bool:
     return _contains_any(cleaned, EXTERNAL_ACTION_TERMS)
 
 
+def _looks_like_question(text: str) -> bool:
+    return bool(QUESTION_RE.search(text or ""))
+
+
+def _is_article_request(text: str) -> bool:
+    return bool(ARTICLE_DIRECT_REQUEST_RE.search(text) or ARTICLE_DESTINATION_RE.search(text))
+
+
+def _is_video_request(text: str) -> bool:
+    production_text = VIDEO_DATA_CONTEXT_RE.sub("", text or "")
+    return bool(VIDEO_REQUEST_RE.search(production_text))
+
+
+def _is_security_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    has_security_context = _contains_any(text, SECURITY_TERMS) or bool(extract_target(text))
+    if _contains_any(text, ACTIVE_SECURITY_TERMS):
+        return True
+    if re.search(r"\b(?:poc|exploit|recon|scan|probe|fuzz)\b", lowered):
+        return True
+    if SECURITY_REPORT_RE.search(text):
+        return True
+    return bool(has_security_context and SECURITY_ANALYSIS_RE.search(text))
+
+
+def _is_company_execution_request(text: str) -> bool:
+    if COMPANY_CONTEXTUAL_EXECUTION_RE.fullmatch(text or ""):
+        return True
+    if not _contains_any(text, COMPANY_EXECUTION_TERMS):
+        return False
+    if not _contains_any(text, COMPANY_TASK_TERMS):
+        return False
+    return bool(COMPANY_DIRECTIVE_RE.search(text) or COMPANY_OBJECT_FIRST_RE.search(text))
+
+
+def _main_agent_decision(
+    reason: str,
+    *,
+    external_action: bool = False,
+    confidence: float = 0.72,
+) -> RouteDecision:
+    return RouteDecision(
+        route="company",
+        confidence=confidence,
+        action="approval_required" if external_action else "main_agent",
+        reason=reason,
+        external_action=external_action,
+    )
+
+
 def _internal_metadata_value(value: Any) -> bool:
     if value is True or value == 1:
         return True
@@ -224,6 +366,36 @@ def _is_internal_hermes_hook(payload: Dict[str, Any], extra: Dict[str, Any]) -> 
 
 def _strip_internal_message_prefixes(message: str) -> str:
     return INTERNAL_MESSAGE_PREFIX_RE.sub("", message or "", count=1).lstrip()
+
+
+def _is_non_user_hermes_session(
+    payload: Dict[str, Any],
+    extra: Dict[str, Any],
+    session_id: str,
+    *,
+    hermes_db_path: Path = HERMES_STATE_DB,
+) -> bool:
+    """Return True for worker/cron/subagent turns that must never auto-route."""
+    candidates = [
+        payload.get("session_source"), payload.get("source"),
+        extra.get("session_source"), extra.get("source"),
+        os.getenv("HERMES_SESSION_SOURCE"),
+    ]
+    if any(str(value or "").strip().lower() in NON_USER_SESSION_SOURCES for value in candidates):
+        return True
+    if str(session_id or "").lower().startswith("cron_"):
+        return True
+    if not session_id or not hermes_db_path.is_file():
+        return False
+    try:
+        db = sqlite3.connect(sqlite_uri(hermes_db_path), uri=True, timeout=0.2)
+        try:
+            row = db.execute("SELECT source FROM sessions WHERE id=?", (session_id,)).fetchone()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error):
+        return False
+    return bool(row and str(row[0] or "").strip().lower() in NON_USER_SESSION_SOURCES)
 
 
 def extract_target(message: str) -> list[tuple[str, str]]:
@@ -299,6 +471,15 @@ def _is_internal_target(target_type: str, target: str) -> bool:
 
 def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> RouteDecision:
     text = " ".join((message or "").split())
+
+    # Keep the pure classifier safe when it is used for replay/CLI diagnostics
+    # without going through handle_hook's envelope gate.
+    while MODEL_SWITCH_NOTICE_RE.match(text):
+        text = MODEL_SWITCH_NOTICE_RE.sub("", text, count=1).lstrip()
+    if not text:
+        return _main_agent_decision("空消息，不自动派发。", confidence=0.0)
+    if SYNTHETIC_MESSAGE_PREFIX_RE.match(text):
+        return _main_agent_decision("Hermes 合成通知，不作为用户任务派发。", confidence=0.0)
     lowered = text.lower()
 
     explicit = ""
@@ -313,31 +494,69 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
             explicit = route
             break
 
-    scores = {
-        "security": _score(text, SECURITY_TERMS),
-        "article": _score(text, ARTICLE_TERMS),
-        "video": _score(text, VIDEO_TERMS),
-        "company": _score(text, COMPANY_TERMS),
-    }
-    route = explicit or max(scores, key=scores.get)
-    top = scores[route]
-    if not explicit and top == 0:
-        route = "company"
-    elif not explicit and scores["company"] > 0 and _contains_any(text, MANAGEMENT_TERMS):
-        route = "company"
-    # 阻止误走文章产线：若命中 blocking terms 且非显式标注 /article
-    if not explicit and route == "article" and _contains_any(text, ARTICLE_BLOCKING_TERMS):
-        route = "company"
-
-    confidence = 0.99 if explicit else min(0.95, 0.45 + 0.12 * top)
     external_action = _has_external_action(text)
+
+    # Synthetic/background turns must be handled by their owner.  They are
+    # deliberately fail-closed here: even if a notification contains words
+    # such as "文章" or "扫描", it is not a new user task.
+    if not explicit and (ARTICLE_NEGATION_PATTERNS.search(text) or ARTICLE_TOOL_OPERATION_RE.search(text)):
+        return _main_agent_decision(
+            "用户正在纠正、清理或提取既有内容，而不是请求文章生产。",
+            external_action=external_action,
+        )
+    # Questions and capability/information requests are not sufficient evidence
+    # for an autonomous production or security run.  A user can still opt in
+    # with /article, /video, /security, etc. via the explicit prefixes above.
+    if not explicit and _looks_like_question(text):
+        return _main_agent_decision(
+            "信息查询或反问，交由公司主 Agent 先回答，不自动派发产线。",
+            external_action=external_action,
+        )
+
+    if explicit:
+        route = explicit
+        confidence = 0.99
+    elif _is_article_request(text):
+        # Article production wins over a security adjective (for example,
+        # "写一篇关于 JWT 安全的公众号文章").
+        route = "article"
+        confidence = 0.86
+    elif _is_video_request(text):
+        route = "video"
+        confidence = 0.86
+    elif _is_security_request(text):
+        route = "security"
+        confidence = 0.86
+    elif _is_company_execution_request(text):
+        route = "company"
+        confidence = 0.84
+    else:
+        return _main_agent_decision(
+            "未识别到明确的生产/执行动作，交由公司主 Agent 判断。",
+            external_action=external_action,
+            confidence=0.45,
+        )
+
+    # Management questions that happen not to contain a question mark remain
+    # with the main agent unless they also contain a clear execution directive.
+    if (
+        not explicit
+        and route == "company"
+        and _contains_any(text, COMPANY_TERMS)
+        and _contains_any(text, MANAGEMENT_TERMS)
+        and not _is_company_execution_request(text)
+    ):
+        return _main_agent_decision(
+            "公司状态/流程管理问题，交由公司主 Agent 处理。",
+            external_action=external_action,
+        )
 
     if route != "security":
         action = {
             "article": "dispatch_article",
             "video": "dispatch_video",
         }.get(route, "main_agent")
-        if route == "company" and _contains_any(text, COMPANY_EXECUTION_TERMS):
+        if route == "company" and _is_company_execution_request(text):
             action = "dispatch_company"
         if external_action:
             action = "approval_required"
@@ -1110,13 +1329,31 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
         return {}
     if os.getenv("COMPANY_ROUTER_BYPASS") == "1":
         return {}
+    session_id = str(payload.get("session_id") or "unknown-session")
+    hermes_db = Path(str(config.get("hermes_state_db", HERMES_STATE_DB)) or HERMES_STATE_DB)
+    # The global pre_llm_call hook also runs inside Hermes workers, cron jobs,
+    # and delegated subagents.  Those turns are already owned by another
+    # executor; routing them again is the source of recursive/duplicate jobs.
+    if _is_non_user_hermes_session(payload, extra, session_id, hermes_db_path=hermes_db):
+        return {}
     if INTERNAL_MESSAGE_PREFIX_RE.match(message):
         if _is_internal_hermes_hook(payload, extra):
             return {}
         message = _strip_internal_message_prefixes(message)
         if not message:
             return {}
-    session_id = str(payload.get("session_id") or "unknown-session")
+    # Model-switch notices are prepended by some gateways to a real user
+    # message. Strip all consecutive notices, but retain the user text that
+    # follows them for normal routing.
+    while MODEL_SWITCH_NOTICE_RE.match(message):
+        message = MODEL_SWITCH_NOTICE_RE.sub("", message, count=1).lstrip()
+    if not message:
+        return {}
+    # Completion notices, background-process diagnostics, compaction handoffs,
+    # and radar probes are synthetic user-shaped messages.  They may contain
+    # strong routing vocabulary, so reject them before any state is created.
+    if SYNTHETIC_MESSAGE_PREFIX_RE.match(message):
+        return {}
     platform = str(extra.get("platform") or "unknown")
     decision_context = handle_tvcr_decision(message, config, actor=f"{platform}:{session_id}")
     if decision_context is not None:

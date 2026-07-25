@@ -89,6 +89,48 @@ class ClassificationTests(unittest.TestCase):
         decision = classify_message("这篇文章不要忘记发布到公众号")
         self.assertEqual(decision.action, "approval_required")
 
+    def test_information_query_about_audio_video_is_not_video_production(self):
+        decision = classify_message("检查是否支持眼镜直接联网传输音视频数据")
+        self.assertEqual(decision.route, "company")
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_mineru_extraction_is_not_article_production(self):
+        decision = classify_message("让 MinerU 提取刚才的文章")
+        self.assertEqual(decision.route, "company")
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_company_glasses_question_is_not_execution(self):
+        decision = classify_message("对于公司的 AI 眼镜项目，Rokid 眼镜实现有什么借鉴意义")
+        self.assertEqual(decision.route, "company")
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_apk_download_question_is_not_security_swarm(self):
+        decision = classify_message("瞳者 AI 眼镜有公开的 APK 下载吗")
+        self.assertEqual(decision.route, "company")
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_security_article_prefers_article_production(self):
+        decision = classify_message("写一篇关于 JWT 安全的公众号文章")
+        self.assertEqual(decision.route, "article")
+        self.assertEqual(decision.action, "dispatch_article")
+
+    def test_article_pipeline_complaints_are_not_article_production(self):
+        messages = (
+            "为什么写了篇文章？现在不是在调研研究吗？",
+            "怎么又到文章产线了！？我让你写文章了吗？",
+            "这篇文章要清除掉，根本不是我想要的",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertNotEqual(decision.action, "dispatch_article")
+                self.assertEqual(decision.route, "company")
+
+    def test_classifier_replay_also_rejects_synthetic_notification(self):
+        decision = classify_message("[公司 Research 完成通知] 文章产线任务已完成 Run: run-1")
+        self.assertEqual(decision.action, "main_agent")
+        self.assertEqual(decision.confidence, 0.0)
+
 
 class HookTests(unittest.TestCase):
     def test_article_message_is_submitted_to_content_executor(self):
@@ -175,6 +217,77 @@ class HookTests(unittest.TestCase):
         config = {"enabled": True, "state_db": "/should/not/be/created"}
         payload = {"session_id": "worker", "extra": {"user_message": "[COMPANY_OPERATOR_INTERNAL]\n主动经营", "platform": "tool"}}
         self.assertEqual(handle_hook(payload, config), {})
+
+    def test_synthetic_hermes_messages_bypass_router(self):
+        messages = (
+            "[IMPORTANT: Background process proc_x exited (exit code 1). Command: codex exec '写一篇文章']",
+            "[AGENTKEY_RADAR_PROBE] 任务主题：AI agent security",
+            "[公司 Research 完成通知] 文章产线任务已完成 Run: run-1",
+            "[公司 TVCR 经营复盘] 公司日报｜三条产线状态",
+            "[ASYNC DELEGATION BATCH COMPLETE — deleg_123] 后台子代理结果",
+            "[The user sent an image but I couldn't quite see it this time (>_<)]",
+            "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted",
+            "Review the conversation above and update the skill library",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            config = {"enabled": True, "state_db": str(Path(td) / "router.db")}
+            for message in messages:
+                with self.subTest(message=message):
+                    payload = {"session_id": "human-session", "extra": {"user_message": message, "platform": "cli"}}
+                    self.assertEqual(handle_hook(payload, config), {})
+            self.assertFalse(Path(config["state_db"]).exists())
+
+    def test_tool_source_session_bypasses_router_even_without_internal_prefix(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = {"enabled": True, "state_db": str(Path(td) / "router.db")}
+            payload = {
+                "session_id": "tool-session",
+                "extra": {"user_message": "写一篇 Agent 文章", "platform": "cli", "source": "tool"},
+            }
+            self.assertEqual(handle_hook(payload, config), {})
+            self.assertFalse(Path(config["state_db"]).exists())
+
+    def test_model_switch_notice_is_stripped_before_routing_real_user_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = {
+                "enabled": True,
+                "dispatch_security": False,
+                "auto_run_article": True,
+                "state_db": str(Path(td) / "router.db"),
+                "content_job_dir": str(Path(td) / "content-jobs"),
+                "max_active_content_jobs_per_session": 2,
+            }
+            payload = {
+                "session_id": "model-switch-session",
+                "extra": {
+                    "user_message": "[Note: model was just switched from a to b via gateway.] 写一篇 Agent 文章",
+                    "platform": "cli",
+                },
+            }
+            with patch("automation.company_router.launch_content_job", return_value=4321):
+                result = handle_hook(payload, config)
+            self.assertIn("文章产线", result["context"])
+
+    def test_hermes_state_source_gate_skips_tool_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            hermes_db = root / "hermes.db"
+            db = sqlite3.connect(hermes_db)
+            db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+            db.execute("INSERT INTO sessions VALUES (?, ?)", ("tool-session", "tool"))
+            db.commit()
+            db.close()
+            config = {
+                "enabled": True,
+                "state_db": str(root / "router.db"),
+                "hermes_state_db": str(hermes_db),
+            }
+            payload = {
+                "session_id": "tool-session",
+                "extra": {"user_message": "写一篇 Agent 文章", "platform": "cli"},
+            }
+            self.assertEqual(handle_hook(payload, config), {})
+            self.assertFalse(Path(config["state_db"]).exists())
 
     def test_tvcr_approval_creates_experiment_context(self):
         with tempfile.TemporaryDirectory() as td:

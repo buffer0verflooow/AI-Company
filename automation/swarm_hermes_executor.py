@@ -33,7 +33,7 @@ def build_prompt(payload: Dict[str, Any]) -> str:
 执行约束：
 1. 只处理任务说明中明确授权的目标与范围，不扩大 Scope。
 2. 未明确授权的外部主动探测必须停止并报告缺少授权。
-3. 需要外部资料时优先使用 agentkey skill 搜索（`execute_tool(name="agentkey_search", params={"query": "...", "num": 5})`），其次才是内置 web_search/web_extract。
+3. 需要外部资料时优先使用 agentkey skill 搜索（`execute_tool(name="agentkey_search", params={{"query": "...", "num": 5}})`），其次才是内置 web_search/web_extract。
 4. 优先读取本机已有文件、知识库和证据；不要重复已经完成的测试。
 5. 对任何“已写文件、已验证、已发现”声明给出可核验依据。
 6. 不执行外部发布、HackerOne 提交、付款、删除或不可逆操作。

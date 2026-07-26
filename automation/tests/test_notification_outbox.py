@@ -23,22 +23,28 @@ class NotificationOutboxTests(unittest.TestCase):
             first = enqueue(
                 db_path,
                 dedup_key="digest:2026-07-26",
-                kind="digest",
-                source_id="2026-07-26",
+                kind="cron_recovery",
+                source_id="cron-job",
                 origin=origin,
                 message="旧摘要",
+                metadata={"legacy": True},
             )
             second = enqueue(
                 db_path,
                 dedup_key="digest:2026-07-26",
-                kind="digest",
-                source_id="2026-07-26",
+                kind="tvcr_cron",
+                source_id="TVCR-R-20260726",
                 origin=origin,
                 message="新摘要",
+                metadata={"review_id": "TVCR-R-20260726"},
             )
             self.assertEqual(first, second)
             self.assertEqual(len(pending(db_path)), 1)
-            self.assertEqual(get(db_path, first)["message"], "新摘要")
+            refreshed = get(db_path, first)
+            self.assertEqual(refreshed["message"], "新摘要")
+            self.assertEqual(refreshed["kind"], "tvcr_cron")
+            self.assertEqual(refreshed["source_id"], "TVCR-R-20260726")
+            self.assertIn("TVCR-R-20260726", refreshed["metadata_json"])
 
     def test_failed_attempts_backoff_then_dead_letter(self):
         with tempfile.TemporaryDirectory() as td:

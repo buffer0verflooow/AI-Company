@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -401,7 +402,7 @@ def _extract_cron_response(path: Path) -> str:
     # Agent-driven jobs save the prompt and final answer under this marker.
     marker = "\n## Response\n"
     if marker in text:
-        text = text.rsplit(marker, 1)[1]
+        text = text.rsplit(marker, 1)[1].lstrip()
         if text.startswith("---"):
             text = text[3:]
     else:
@@ -410,6 +411,156 @@ def _extract_cron_response(path: Path) -> str:
         if len(parts) == 2:
             text = parts[1]
     return text.strip()
+
+
+def _extract_cron_json(path: Path) -> Dict[str, Any]:
+    """Parse a no-agent Cron script's JSON response, if present."""
+    response = _extract_cron_response(path)
+    try:
+        value = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _cron_recovery_payload(
+    config: Dict[str, Any],
+    job: Dict[str, Any],
+    output: Path,
+    fallback_origin: Dict[str, str],
+) -> tuple[Dict[str, str], str, str, Dict[str, Any]]:
+    """Return (origin, message, kind, metadata) for a saved Cron output."""
+    name = str(job.get("name") or job.get("id") or "cron")
+    # TVCR's no-agent output contains a stable review ID.  Format the concise
+    # governance message from the operations DB instead of forwarding raw JSON.
+    if name == "company-tvcr-daily-review":
+        payload = _extract_cron_json(output)
+        review_id = str(payload.get("review_id") or "")
+        operations_db = _operations_db_path(config)
+        if review_id and operations_db is not None:
+            try:
+                from .operations_control import format_review_message
+            except ImportError:
+                from operations_control import format_review_message
+            db = sqlite3.connect(operations_db)
+            db.row_factory = sqlite3.Row
+            try:
+                row = db.execute(
+                    "SELECT delivery_platform,delivery_chat_id,delivery_thread_id,delivery_user_id "
+                    "FROM tvcr_reviews WHERE review_id=?",
+                    (review_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            finally:
+                db.close()
+            origin = dict(fallback_origin)
+            if row:
+                stored = {
+                    "platform": str(row["delivery_platform"] or ""),
+                    "chat_id": str(row["delivery_chat_id"] or ""),
+                    "thread_id": str(row["delivery_thread_id"] or ""),
+                    "user_id": str(row["delivery_user_id"] or ""),
+                }
+                if stored["platform"] and stored["chat_id"]:
+                    origin = stored
+            limit = int((config.get("tvcr_delivery_chars_by_platform") or {}).get(
+                origin.get("platform", ""), config.get("tvcr_delivery_default_chars", 1000)
+            ))
+            return (
+                origin,
+                format_review_message(operations_db, review_id, limit=limit),
+                "tvcr_cron",
+                {"review_id": review_id},
+            )
+    response = _extract_cron_response(output)
+    return (
+        fallback_origin,
+        f"【补发】{name}\n运行时间：{job.get('last_run_at', '')}\n\n{response}",
+        "cron_recovery",
+        {},
+    )
+
+
+def _outbox_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = row.get("metadata_json")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(str(raw or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _sync_tvcr_review_from_outbox(config: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """Project a TVCR outbox state back into its review delivery fields."""
+    if str(row.get("kind") or "") != "tvcr_cron":
+        return
+    review_id = str(_outbox_metadata(row).get("review_id") or "")
+    db_path = _operations_db_path(config)
+    if not review_id or db_path is None:
+        return
+    db = sqlite3.connect(db_path)
+    try:
+        current = db.execute(
+            "SELECT delivered,delivery_attempts FROM tvcr_reviews WHERE review_id=?",
+            (review_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        current = None
+    finally:
+        db.close()
+    if current is None:
+        return
+
+    state = str(row.get("state") or "")
+    outbox_attempts = int(row.get("attempts") or 0)
+    attempts = max(int(current[1] or 0), outbox_attempts)
+    fields: Dict[str, Any]
+    if state == "delivered":
+        fields = {
+            "delivered": 1,
+            "delivery_attempts": max(1, attempts),
+            "delivery_error": "",
+            "last_delivery_at": str(row.get("delivered_at") or row.get("updated_at") or utc_now()),
+        }
+    elif state == "dead_letter":
+        if int(current[0] or 0):
+            return
+        reason = str(row.get("last_error") or "delivery failed")
+        fields = {
+            "delivered": 0,
+            "delivery_attempts": max(1, attempts),
+            "delivery_error": (
+                f"terminal: outbox delivery failed: {reason}; "
+                f"notification_id={row.get('notification_id', '')}; "
+                f"fallback={_delivery_fallback_path(config)}"
+            ),
+            "last_delivery_at": str(
+                row.get("dead_lettered_at") or row.get("last_attempt_at")
+                or row.get("updated_at") or utc_now()
+            ),
+        }
+    elif state == "pending" and outbox_attempts > 0:
+        if int(current[0] or 0):
+            return
+        fields = {
+            "delivered": 0,
+            "delivery_attempts": attempts,
+            "delivery_error": str(row.get("last_error") or "delivery failed"),
+            "last_delivery_at": str(row.get("last_attempt_at") or row.get("updated_at") or utc_now()),
+        }
+    else:
+        return
+
+    try:
+        _, _, update_review = _operations_api()
+        update_review(db_path, review_id, **fields)
+    except (OSError, sqlite3.Error, ValueError):
+        # The durable outbox remains the source of truth and the next recovery
+        # scan will retry this projection without resending a delivered row.
+        return
 
 
 def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
@@ -425,13 +576,13 @@ def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
     allow = config.get("cron_delivery_recovery_jobs") or ["company-daily-auto-fix"]
     allowed = {str(item) for item in allow}
     origin = _management_origin(config)
-    if not origin.get("platform") or not origin.get("chat_id"):
-        return 0
     queued = 0
     for job in _read_cron_jobs(config):
         job_id = str(job.get("id") or "")
         name = str(job.get("name") or job_id)
-        if (job_id not in allowed and name not in allowed) or not job.get("last_delivery_error"):
+        is_allowed = job_id in allowed or name in allowed
+        local_recovery = str(job.get("deliver") or "").lower() == "local"
+        if not is_allowed or (not local_recovery and not job.get("last_delivery_error")):
             continue
         last_run = str(job.get("last_run_at") or "")
         if not last_run:
@@ -439,29 +590,40 @@ def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
         output = _find_cron_output(config, job_id, last_run)
         if output is None:
             continue
-        response = _extract_cron_response(output)
-        if not response:
+        origin_for_job, message, kind, source_metadata = _cron_recovery_payload(
+            config, job, output, origin,
+        )
+        if not message.strip() or not origin_for_job.get("platform") or not origin_for_job.get("chat_id"):
             continue
-        message = f"【补发】{name}\n运行时间：{last_run}\n\n{response}"
-        message = _fit_delivery_message(config, origin, message)
+        message = _fit_delivery_message(config, origin_for_job, message)
         dedup_key = f"cron-delivery:{job_id}:{last_run}"
-        if get_outbox_by_dedup_key(db_path, dedup_key) is not None:
-            continue
+        existing = get_outbox_by_dedup_key(db_path, dedup_key)
         enqueue_outbox(
             db_path,
             dedup_key=dedup_key,
-            kind="cron_recovery",
+            kind=kind,
             source_id=f"{job_id}:{last_run}",
-            origin=origin,
+            origin=origin_for_job,
             message=message,
             metadata={
                 "job_id": job_id,
                 "job_name": name,
                 "output_path": str(output),
                 "delivery_error": str(job.get("last_delivery_error") or ""),
+                **source_metadata,
             },
         )
-        queued += 1
+        current = get_outbox_by_dedup_key(db_path, dedup_key)
+        if current is not None and kind == "tvcr_cron":
+            # Also heals rows created before TVCR metadata projection existed.
+            sync_row = dict(current)
+            sync_row["kind"] = kind
+            metadata = _outbox_metadata(sync_row)
+            metadata.update(source_metadata)
+            sync_row["metadata_json"] = metadata
+            _sync_tvcr_review_from_outbox(config, sync_row)
+        if existing is None:
+            queued += 1
     return queued
 
 
@@ -499,6 +661,7 @@ def process_outbox(
         if terminal_reason:
             dead = force_outbox_dead_letter(db_path, notification_id, terminal_reason) or row
             append_outbox_dead_letter(fallback, dead, reason=terminal_reason)
+            _sync_tvcr_review_from_outbox(config, dead)
             result["dead_letter"] += 1
             continue
         try:
@@ -507,8 +670,13 @@ def process_outbox(
             ok, error = False, f"{exc.__class__.__name__}: {exc}"
         if ok:
             mark_outbox_delivered(db_path, notification_id)
+            delivered_row = get_outbox_by_dedup_key(db_path, str(row.get("dedup_key") or "")) or row
+            _sync_tvcr_review_from_outbox(config, delivered_row)
             if mirror is None:
-                mirror_management_message(config, origin, message)
+                if str(row.get("kind") or "") == "tvcr_cron":
+                    mirror_tvcr_message(config, origin, message)
+                else:
+                    mirror_management_message(config, origin, message)
             else:
                 mirror(origin, message)
             result["delivered"] += 1
@@ -523,8 +691,10 @@ def process_outbox(
         )
         if updated.get("state") == "dead_letter":
             append_outbox_dead_letter(fallback, updated, reason=str(error or "delivery failed"))
+            _sync_tvcr_review_from_outbox(config, updated)
             result["dead_letter"] += 1
         else:
+            _sync_tvcr_review_from_outbox(config, updated)
             result["failed"] += 1
     return result
 
@@ -845,7 +1015,7 @@ def process_once(
         state.close()
 
     operations_db = str(config.get("operations_db") or "").strip()
-    if operations_db:
+    if operations_db and not config.get("tvcr_delivery_via_outbox", False):
         format_review_message, pending_review_deliveries, update_review = _operations_api()
         review_rows = pending_review_deliveries(
             Path(operations_db), int(config.get("max_delivery_attempts", 10))

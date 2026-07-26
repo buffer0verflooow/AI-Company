@@ -121,6 +121,10 @@ def enqueue(
                 user_id,message,metadata_json,state,created_at,updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?,?)
                ON CONFLICT(dedup_key) DO UPDATE SET
+                 kind=CASE WHEN notification_outbox.state='pending'
+                           THEN excluded.kind ELSE notification_outbox.kind END,
+                 source_id=CASE WHEN notification_outbox.state='pending'
+                                THEN excluded.source_id ELSE notification_outbox.source_id END,
                  message=CASE WHEN notification_outbox.state='pending'
                               THEN excluded.message ELSE notification_outbox.message END,
                  platform=CASE WHEN notification_outbox.state='pending'

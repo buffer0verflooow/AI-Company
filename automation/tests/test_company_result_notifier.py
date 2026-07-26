@@ -17,6 +17,7 @@ from automation.company_result_notifier import (
 from automation.company_router import RouterState, classify_message, resolve_session_origin
 from automation.notification_outbox import pending as pending_outbox
 from automation.notification_outbox import enqueue as enqueue_outbox
+from automation.notification_outbox import get as get_outbox
 from automation.operations_control import business_period, connect as connect_operations, create_review, import_proposals
 
 
@@ -204,6 +205,206 @@ class NotifierTests(unittest.TestCase):
             )
             self.assertEqual(summary["outbox_dead_letter"], 1)
             self.assertIn("必须保留的日报", (root / "dead-letters.jsonl").read_text(encoding="utf-8"))
+
+    def test_local_tvcr_cron_output_is_queued_as_formatted_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = str(root / "router.db")
+            state = RouterState(router_db)
+            state.insert(
+                "session-1", "weixin", "hash-tvcr-cron", "公司复盘",
+                classify_message("公司复盘"),
+                origin={"platform": "weixin", "chat_id": "chat-1", "user_id": "user-1"},
+            )
+            state.close()
+            operations_db = root / "operations.db"
+            start, end = business_period(date(2026, 7, 25))
+            review_id = create_review(
+                operations_db,
+                review_day=date(2026, 7, 25),
+                period_start=start,
+                period_end=end,
+                origin={"platform": "weixin", "chat_id": "chat-1", "user_id": "user-1"},
+            )
+            import_proposals(operations_db, review_id, {
+                "executive_summary": "通知链路需要修复。",
+                "proposals": [{
+                    "priority": "P0", "title": "可靠通知",
+                    "problem_statement": "消息丢失", "recommended_action": "使用发件箱",
+                }],
+            })
+            last_run = "2026-07-26T00:33:57+08:00"
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps({"jobs": [{
+                "id": "tvcr-job",
+                "name": "company-tvcr-daily-review",
+                "deliver": "local",
+                "last_run_at": last_run,
+                "last_delivery_error": None,
+            }]}), encoding="utf-8")
+            output_dir = root / "output" / "tvcr-job"
+            output_dir.mkdir(parents=True)
+            output = output_dir / "2026-07-26_00-33-57.md"
+            output.write_text(
+                "# Cron Job\n\n---\n\n" + json.dumps({"review_id": review_id}),
+                encoding="utf-8",
+            )
+            stamp = datetime.fromisoformat(last_run).timestamp()
+            os.utime(output, (stamp, stamp))
+            config = self._config(td, router_db)
+            config.update({
+                "operations_db": str(operations_db),
+                "router_db": router_db,
+                "cron_jobs_path": str(jobs_path),
+                "cron_output_root": str(root / "output"),
+                "cron_delivery_recovery_jobs": ["company-tvcr-daily-review"],
+                "tvcr_delivery_default_chars": 1000,
+            })
+            self.assertEqual(recover_failed_cron_deliveries(config), 1)
+            rows = pending_outbox(operations_db)
+            self.assertEqual(rows[0]["kind"], "tvcr_cron")
+            self.assertEqual(json.loads(rows[0]["metadata_json"])["review_id"], review_id)
+            self.assertIn("公司日报｜2026-07-25", rows[0]["message"])
+            self.assertIn("通知链路需要修复", rows[0]["message"])
+
+    def test_tvcr_outbox_success_marks_review_and_skips_legacy_delivery(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = str(root / "router.db")
+            RouterState(router_db).close()
+            operations_db = root / "operations.db"
+            start, end = business_period(date(2026, 7, 25))
+            review_id = create_review(
+                operations_db,
+                review_day=date(2026, 7, 25),
+                period_start=start,
+                period_end=end,
+                origin={"platform": "weixin", "chat_id": "chat-1", "user_id": "user-1"},
+            )
+            import_proposals(operations_db, review_id, {
+                "executive_summary": "统一由发件箱投递。",
+                "proposals": [{
+                    "priority": "P0", "title": "单一发送者",
+                    "problem_statement": "重复投递", "recommended_action": "停用旧循环",
+                }],
+            })
+            last_run = "2026-07-26T00:33:57+08:00"
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps({"jobs": [{
+                "id": "tvcr-job", "name": "company-tvcr-daily-review",
+                "deliver": "local", "last_run_at": last_run,
+            }]}), encoding="utf-8")
+            output_dir = root / "output" / "tvcr-job"
+            output_dir.mkdir(parents=True)
+            output = output_dir / "2026-07-26_00-33-57.md"
+            output.write_text(
+                "# Cron Job\n\n---\n\n" + json.dumps({"review_id": review_id}),
+                encoding="utf-8",
+            )
+            stamp = datetime.fromisoformat(last_run).timestamp()
+            os.utime(output, (stamp, stamp))
+            config = self._config(td, router_db)
+            config.update({
+                "operations_db": str(operations_db),
+                "router_db": router_db,
+                "cron_jobs_path": str(jobs_path),
+                "cron_output_root": str(root / "output"),
+                "cron_delivery_recovery_jobs": ["company-tvcr-daily-review"],
+                "tvcr_delivery_via_outbox": True,
+            })
+            delivered = []
+            first = process_once(
+                config,
+                deliverer=lambda _cfg, origin, message: (delivered.append((origin, message)) or True, ""),
+                mirror=lambda _origin, _message: True,
+            )
+            second = process_once(
+                config,
+                deliverer=lambda _cfg, origin, message: (delivered.append((origin, message)) or True, ""),
+                mirror=lambda _origin, _message: True,
+            )
+            self.assertEqual(first["outbox_delivered"], 1)
+            self.assertEqual(first["delivered"], 0)
+            self.assertEqual(second["outbox_checked"], 0)
+            self.assertEqual(len(delivered), 1)
+            db = connect_operations(operations_db)
+            review = db.execute(
+                "SELECT delivered,delivery_attempts,delivery_error FROM tvcr_reviews WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            outbox = db.execute(
+                "SELECT notification_id FROM notification_outbox WHERE kind='tvcr_cron'",
+            ).fetchone()
+            db.close()
+            self.assertEqual(review["delivered"], 1)
+            self.assertGreaterEqual(review["delivery_attempts"], 1)
+            self.assertEqual(review["delivery_error"], "")
+            self.assertEqual(get_outbox(operations_db, outbox["notification_id"])["state"], "delivered")
+
+    def test_tvcr_outbox_dead_letter_updates_review_terminal_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = str(root / "router.db")
+            RouterState(router_db).close()
+            operations_db = root / "operations.db"
+            start, end = business_period(date(2026, 7, 25))
+            review_id = create_review(
+                operations_db,
+                review_day=date(2026, 7, 25),
+                period_start=start,
+                period_end=end,
+                origin={"platform": "weixin", "chat_id": "chat-1", "user_id": "user-1"},
+            )
+            import_proposals(operations_db, review_id, {
+                "executive_summary": "终态也必须可追踪。",
+                "proposals": [{
+                    "priority": "P0", "title": "死信同步",
+                    "problem_statement": "状态分裂", "recommended_action": "同步终态",
+                }],
+            })
+            last_run = "2026-07-26T00:33:57+08:00"
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps({"jobs": [{
+                "id": "tvcr-job", "name": "company-tvcr-daily-review",
+                "deliver": "local", "last_run_at": last_run,
+            }]}), encoding="utf-8")
+            output_dir = root / "output" / "tvcr-job"
+            output_dir.mkdir(parents=True)
+            output = output_dir / "2026-07-26_00-33-57.md"
+            output.write_text(
+                "# Cron Job\n\n---\n\n" + json.dumps({"review_id": review_id}),
+                encoding="utf-8",
+            )
+            stamp = datetime.fromisoformat(last_run).timestamp()
+            os.utime(output, (stamp, stamp))
+            fallback = root / "dead-letters.jsonl"
+            config = self._config(td, router_db)
+            config.update({
+                "operations_db": str(operations_db),
+                "router_db": router_db,
+                "cron_jobs_path": str(jobs_path),
+                "cron_output_root": str(root / "output"),
+                "cron_delivery_recovery_jobs": ["company-tvcr-daily-review"],
+                "tvcr_delivery_via_outbox": True,
+                "outbox_max_attempts": 1,
+                "delivery_fallback_path": str(fallback),
+            })
+            summary = process_once(
+                config,
+                deliverer=lambda *_args: (False, "rate limited"),
+                mirror=lambda *_args: True,
+            )
+            self.assertEqual(summary["outbox_dead_letter"], 1)
+            db = connect_operations(operations_db)
+            review = db.execute(
+                "SELECT delivered,delivery_attempts,delivery_error FROM tvcr_reviews WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            db.close()
+            self.assertEqual(review["delivered"], 0)
+            self.assertEqual(review["delivery_attempts"], 1)
+            self.assertIn("terminal: outbox delivery failed: rate limited", review["delivery_error"])
+            self.assertIn("tvcr_cron", fallback.read_text(encoding="utf-8"))
 
     def test_non_allowlisted_platform_becomes_terminal_with_local_fallback(self):
         with tempfile.TemporaryDirectory() as td:

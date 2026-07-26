@@ -35,6 +35,7 @@
   "proactive_delivery_chars_by_platform": {"weixin": 1800},
   "tvcr_delivery_default_chars": 1000,
   "tvcr_delivery_chars_by_platform": {"weixin": 800},
+  "tvcr_delivery_via_outbox": true,
   "max_delivery_attempts": 50,
   "delivery_retry_base_seconds": 60,
   "delivery_retry_max_seconds": 3600,
@@ -42,7 +43,7 @@
   "outbox_batch_size": 20,
   "cron_jobs_path": "/home/pwn/.hermes/cron/jobs.json",
   "cron_output_root": "/home/pwn/.hermes/cron/output",
-  "cron_delivery_recovery_jobs": ["company-daily-auto-fix"],
+  "cron_delivery_recovery_jobs": ["company-daily-auto-fix", "company-tvcr-daily-review"],
   "stale_run_minutes": 15,
   "max_runner_restarts": 2,
   "security": {

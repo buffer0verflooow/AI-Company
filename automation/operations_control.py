@@ -432,10 +432,14 @@ def _quality_status(route: str, job_dir: Path) -> str:
 
 def _upsert_run(db: sqlite3.Connection, values: Dict[str, Any]) -> None:
     columns = list(values)
+    safe_columns = [quote_identifier(key) for key in columns]
     placeholders = ",".join("?" for _ in columns)
-    updates = ",".join(f"{column}=excluded.{column}" for column in columns if column not in {"run_id", "created_at"})
+    updates = ",".join(
+        f"{quote_identifier(key)}=excluded.{quote_identifier(key)}"
+        for key in columns if key not in {"run_id", "created_at"}
+    )
     db.execute(
-        f"INSERT INTO operational_runs ({','.join(columns)}) VALUES ({placeholders}) "
+        f"INSERT INTO operational_runs ({','.join(safe_columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT(run_id) DO UPDATE SET {updates}",
         [values[column] for column in columns],
     )

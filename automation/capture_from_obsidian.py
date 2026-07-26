@@ -128,10 +128,12 @@ def load_tracking() -> dict:
 
 def save_tracking(tracking: dict) -> None:
     TRACKING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TRACKING_FILE.write_text(
-        json.dumps(tracking, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    from _safe_io import file_lock
+    with file_lock(TRACKING_FILE):
+        TRACKING_FILE.write_text(
+            json.dumps(tracking, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
 def get_title_from_note(text: str, path: Path) -> str:

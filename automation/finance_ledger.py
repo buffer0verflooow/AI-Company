@@ -29,11 +29,13 @@ def utc_now() -> str:
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.executescript(
-        """
+    db: Optional[sqlite3.Connection] = None
+    try:
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.executescript(
+            """
         CREATE TABLE IF NOT EXISTS actual_transactions (
             transaction_id TEXT PRIMARY KEY,
             occurred_at TEXT NOT NULL,
@@ -92,10 +94,14 @@ def connect(path: Path) -> sqlite3.Connection:
             notes TEXT NOT NULL DEFAULT '',
             UNIQUE(provider, model_slug, currency, source_url)
         );
-        """
-    )
-    db.commit()
-    return db
+            """
+        )
+        db.commit()
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def sha256_file(path: Path) -> str:

@@ -184,7 +184,9 @@ def update_wiki(md_section: str) -> bool:
             f"{md_section}"
         )
 
-    WIKI_PATH.write_text(new_content, encoding="utf-8")
+    from _safe_io import file_lock
+    with file_lock(WIKI_PATH):
+        WIKI_PATH.write_text(new_content, encoding="utf-8")
     return True
 
 

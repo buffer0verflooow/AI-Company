@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from automation.company_result_notifier import _fit_delivery_message, list_terminal_deliveries, process_once
+from automation.company_result_notifier import (
+    _fit_delivery_message,
+    list_terminal_deliveries,
+    process_once,
+    recover_failed_cron_deliveries,
+)
 from automation.company_router import RouterState, classify_message, resolve_session_origin
+from automation.notification_outbox import pending as pending_outbox
+from automation.notification_outbox import enqueue as enqueue_outbox
 from automation.operations_control import business_period, connect as connect_operations, create_review, import_proposals
-from datetime import date
 
 
 class OriginResolutionTests(unittest.TestCase):
@@ -124,6 +132,78 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual(row["delivery_attempts"], 1)
             self.assertEqual(row["delivery_error"], "network down")
             state.close()
+
+    def test_failed_cron_delivery_is_recovered_by_job_name_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = str(root / "router.db")
+            state = RouterState(router_db)
+            state.insert(
+                "session-1", "weixin", "hash-cron-recovery", "公司状态",
+                classify_message("公司状态"),
+                origin={"platform": "weixin", "chat_id": "chat-1", "user_id": "user-1"},
+            )
+            state.close()
+            last_run = "2026-07-26T04:10:51+08:00"
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps({"jobs": [{
+                    "id": "job-1",
+                    "name": "company-daily-auto-fix",
+                    "last_run_at": last_run,
+                    "last_delivery_error": "rate limited",
+                }]}), encoding="utf-8")
+            output_dir = root / "output" / "job-1"
+            output_dir.mkdir(parents=True)
+            output = output_dir / "2026-07-26_04-10-51.md"
+            output.write_text(
+                "# Cron Job\n\n## Response\n---\n\n自动修复完成，测试通过。\n",
+                encoding="utf-8",
+            )
+            stamp = datetime.fromisoformat(last_run).timestamp()
+            os.utime(output, (stamp, stamp))
+            config = self._config(td, router_db)
+            config.update({
+                "operations_db": str(root / "operations.db"),
+                "router_db": router_db,
+                "cron_jobs_path": str(jobs_path),
+                "cron_output_root": str(root / "output"),
+                "cron_delivery_recovery_jobs": ["company-daily-auto-fix"],
+            })
+            self.assertEqual(recover_failed_cron_deliveries(config), 1)
+            self.assertEqual(recover_failed_cron_deliveries(config), 0)
+            rows = pending_outbox(root / "operations.db")
+            self.assertEqual(len(rows), 1)
+            self.assertIn("自动修复完成", rows[0]["message"])
+
+    def test_outbox_exhaustion_writes_recoverable_dead_letter(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = root / "router.db"
+            operations_db = root / "operations.db"
+            RouterState(str(router_db)).close()
+            enqueue_outbox(
+                operations_db,
+                dedup_key="failed:1",
+                kind="daily_digest",
+                source_id="failed:1",
+                origin={"platform": "weixin", "chat_id": "chat-1"},
+                message="必须保留的日报",
+            )
+            config = self._config(td, str(router_db))
+            config.update({
+                "operations_db": str(operations_db),
+                "router_db": str(router_db),
+                "outbox_max_attempts": 1,
+                "delivery_fallback_path": str(root / "dead-letters.jsonl"),
+                "cron_jobs_path": str(root / "missing-jobs.json"),
+            })
+            summary = process_once(
+                config,
+                deliverer=lambda *_args: (False, "rate limited"),
+                mirror=lambda *_args: True,
+            )
+            self.assertEqual(summary["outbox_dead_letter"], 1)
+            self.assertIn("必须保留的日报", (root / "dead-letters.jsonl").read_text(encoding="utf-8"))
 
     def test_non_allowlisted_platform_becomes_terminal_with_local_fallback(self):
         with tempfile.TemporaryDirectory() as td:

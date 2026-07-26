@@ -1,7 +1,7 @@
 ---
 tags: [automation, router, hermes, swarm]
 created: 2026-07-15
-updated: 2026-07-15
+updated: 2026-07-26
 ---
 
 # 公司自动路由
@@ -15,6 +15,9 @@ updated: 2026-07-15
 | `content_hermes_executor.py` | 公司通用执行、文章和视频独立 Worker，强制产出文件、结构化结果与质量门结果 |
 | `company_result_notifier.py` | 轮询 Run、恢复失效 Runner、把终态结果主动回传原会话 |
 | `hermes_company_result_notifier.py` | 部署到 Hermes scripts 目录的 Cron 入口 |
+| `notification_outbox.py` | 持久化管理通知、退避重试、死信和 Cron 漏报恢复 |
+| `company_daily_digest.py` | 与自动经营解耦的只读公司日报生成器 |
+| `hermes_company_daily_digest.py` | 只读日报 Cron 入口 |
 | `knowledge_promotion_gateway.py` | Swarm 知识进入 Wiki 前的验证、脱敏、披露与人工审批门禁 |
 | `finance_ledger.py` | 实际收支、赏金预测、模型成本和完成 Run 的证据化分账 |
 | `operations_control.py` | 产品线经营账本、TVCR 提案审批和运营实验状态机 |
@@ -53,6 +56,12 @@ Hermes Cron 任务 `company-product-result-notifier` 每分钟运行一次，无
 4. 完成或失败后，仅向配置允许的平台投递；
 5. 投递得到明确成功响应后，才写入 `proactive_delivered=1`；
 6. 同时把通知镜像到 Hermes 会话记录，后续对话能够看到该结果。
+
+管理日报和 Hermes Cron 的 origin 投递会先写入 `operations_control.db` 的
+`notification_outbox`，由同一个 notifier 进程串行发送。限流/网络错误使用指数退避
+和小幅抖动，达到上限后写入 `delivery-dead-letters.jsonl`，不会静默丢失。只读日报
+`company-daily-digest` 每天 09:00 运行，即使 `company-daily-operator` 暂停也会继续汇报，
+不会启动 Worker。
 
 当前正式配置只允许主动投递到 `weixin`。可重试的网络失败保留错误、尝试次数并按退避策略重试；来源平台不在白名单时会立即进入 `terminal`，不再空耗 50 次重试，同时把完整通知写入 `operations/runtime/delivery-dead-letters.jsonl`，供管理者恢复或改道投递。
 
@@ -132,7 +141,7 @@ python3 automation/company_operator.py --queue
 5. 至少两个独立来源佐证后生成 `market_pulse`；
 6. 公司经营者打开至少两个源文，区分正文核验、元数据核验、仅可达和搜索记录级信号，再形成验证实验。
 
-市场雷达每天 `08:30` 运行，公司经营者每天 `09:00` 消费脉冲。联系人/邮箱搜索、自动注册、外部联系和表单提交默认禁用。
+市场雷达每天 `08:30` 运行；只读公司日报每天 `09:00` 汇总经营账本和市场脉冲。自动经营执行器目前按用户决策暂停，恢复前不会启动 Worker。联系人/邮箱搜索、自动注册、外部联系和表单提交默认禁用。
 
 ```bash
 python3 automation/market_radar.py
@@ -185,7 +194,7 @@ Hermes pre_llm_call
 - Research Run `db6bcc86-9572-4639-a02e-fa122d44c00a`：3/3 completed，Runner 自愈 1 次，微信主动回传成功并镜像会话。
 - 文章 Run `3dc43b1c-22e7-4901-ac05-ebd6164080f5`：生成 `draft.md`、`qa-report.md`，24/24 当时测试全绿，三道 Gate 通过。
 - 视频预生产 `video-e2e-20260715`：生成 `video-script.md`、`storyboard.md`、`production-plan.md`；明确 Pixelle 未激活，未生成或虚报 MP4。
-- 自治经营 `AUTO-RUN-1ec362301fc4`：无用户任务输入时主动选择模型成本盲区，生成成本映射、核验报告、会话明细和待审批应用包；Worker 用量与产物已写回经营账本。正式 Cron `company-daily-operator` 每日 09:00 运行。
+- 自治经营 `AUTO-RUN-1ec362301fc4`：无用户任务输入时主动选择模型成本盲区，生成成本映射、核验报告、会话明细和待审批应用包；Worker 用量与产物已写回经营账本。`company-daily-operator` 当前暂停；`company-daily-digest` 独立每日 09:00 运行，只读生成管理摘要。
 - 市场发现 `MKT-RUN-832f3c788415 → AUTO-RUN-aa6d4405550a`：39 条公开结果经过资格门形成 3 个多来源脉冲；经营者验证最高优先级内容需求，打开 2 个独立正文并形成市场机会 Brief、反证、成功指标与停止条件。正式 Cron `company-market-radar` 每日 08:30 运行。
 - 相邻市场发现 `MKT-RUN-8bb98f9b66e8 → AUTO-RUN-066cbbf59084`：48 条公开结果形成 4 个多来源脉冲；经营者跨出预设 AI 安全主题，发现 Agent 可观测性、评估、工作流、成本与治理机会。证据审计后记录为 2 个正文核验、1 个元数据核验、1 个仅可达和 1 个搜索记录级信号。
 

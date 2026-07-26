@@ -26,6 +26,15 @@ try:
         utc_now,
     )
     from ._safe_io import locked_append_text
+    from .notification_outbox import (
+        append_dead_letter as append_outbox_dead_letter,
+        enqueue as enqueue_outbox,
+        force_dead_letter as force_outbox_dead_letter,
+        get_by_dedup_key as get_outbox_by_dedup_key,
+        mark_delivered as mark_outbox_delivered,
+        pending as pending_outbox,
+        record_failure as record_outbox_failure,
+    )
 except ImportError:  # Direct execution from automation/.
     from company_router import (
         DEFAULT_CONFIG,
@@ -41,6 +50,15 @@ except ImportError:  # Direct execution from automation/.
         utc_now,
     )
     from _safe_io import locked_append_text
+    from notification_outbox import (
+        append_dead_letter as append_outbox_dead_letter,
+        enqueue as enqueue_outbox,
+        force_dead_letter as force_outbox_dead_letter,
+        get_by_dedup_key as get_outbox_by_dedup_key,
+        mark_delivered as mark_outbox_delivered,
+        pending as pending_outbox,
+        record_failure as record_outbox_failure,
+    )
 
 
 DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
@@ -286,6 +304,252 @@ def _fit_delivery_message(config: Dict[str, Any], origin: Dict[str, str], messag
     return message[:max(0, limit - len(suffix))].rstrip() + suffix
 
 
+def mirror_management_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> bool:
+    """Mirror a recovered management notification into the chat transcript."""
+    _ensure_hermes_imports(config)
+    try:
+        from gateway.mirror import mirror_to_session
+
+        return bool(mirror_to_session(
+            origin["platform"],
+            origin["chat_id"],
+            f"[公司主动通知]\n{message}",
+            source_label="company-notification-outbox",
+            thread_id=origin.get("thread_id") or None,
+            user_id=origin.get("user_id") or None,
+            role="user",
+        ))
+    except Exception:
+        return False
+
+
+def _operations_db_path(config: Dict[str, Any]) -> Optional[Path]:
+    value = str(config.get("operations_db") or "").strip()
+    return Path(value) if value else None
+
+
+def _management_origin(config: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve the latest known management conversation without guessing."""
+    try:
+        from .operations_control import latest_origin
+    except ImportError:
+        from operations_control import latest_origin
+    router_db = Path(str(config.get("router_db") or config.get("state_db") or ""))
+    try:
+        return latest_origin(router_db)
+    except (OSError, ValueError):
+        return {}
+
+
+def _cron_output_root(config: Dict[str, Any]) -> Path:
+    configured = str(config.get("cron_output_root") or "").strip()
+    if configured:
+        return Path(configured)
+    return Path("/home/pwn/.hermes/cron/output")
+
+
+def _read_cron_jobs(config: Dict[str, Any]) -> list[Dict[str, Any]]:
+    configured = str(config.get("cron_jobs_path") or "").strip()
+    path = Path(configured) if configured else Path("/home/pwn/.hermes/cron/jobs.json")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("jobs")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _cron_run_datetime(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _find_cron_output(config: Dict[str, Any], job_id: str, last_run_at: str) -> Optional[Path]:
+    root = _cron_output_root(config) / job_id
+    if not root.is_dir():
+        return None
+    run_at = _cron_run_datetime(last_run_at)
+    candidates = sorted(root.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    if not candidates:
+        return None
+    if run_at is None:
+        return candidates[0]
+    target = run_at.timestamp()
+    for candidate in candidates:
+        try:
+            if abs(candidate.stat().st_mtime - target) <= 15 * 60:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _extract_cron_response(path: Path) -> str:
+    """Extract the report portion from Hermes' saved cron transcript."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # Agent-driven jobs save the prompt and final answer under this marker.
+    marker = "\n## Response\n"
+    if marker in text:
+        text = text.rsplit(marker, 1)[1]
+        if text.startswith("---"):
+            text = text[3:]
+    else:
+        # no-agent scripts generally contain a short header followed by JSON.
+        parts = text.split("\n---\n", 1)
+        if len(parts) == 2:
+            text = parts[1]
+    return text.strip()
+
+
+def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
+    """Queue failed origin deliveries from selected Cron jobs.
+
+    Hermes records a Cron agent as successful even when the final message
+    cannot be sent.  The saved output is still durable, so import it once into
+    the company outbox and let the normal notifier own retries/dead letters.
+    """
+    db_path = _operations_db_path(config)
+    if db_path is None:
+        return 0
+    allow = config.get("cron_delivery_recovery_jobs") or ["company-daily-auto-fix"]
+    allowed = {str(item) for item in allow}
+    origin = _management_origin(config)
+    if not origin.get("platform") or not origin.get("chat_id"):
+        return 0
+    queued = 0
+    for job in _read_cron_jobs(config):
+        job_id = str(job.get("id") or "")
+        name = str(job.get("name") or job_id)
+        if (job_id not in allowed and name not in allowed) or not job.get("last_delivery_error"):
+            continue
+        last_run = str(job.get("last_run_at") or "")
+        if not last_run:
+            continue
+        output = _find_cron_output(config, job_id, last_run)
+        if output is None:
+            continue
+        response = _extract_cron_response(output)
+        if not response:
+            continue
+        message = f"【补发】{name}\n运行时间：{last_run}\n\n{response}"
+        message = _fit_delivery_message(config, origin, message)
+        dedup_key = f"cron-delivery:{job_id}:{last_run}"
+        if get_outbox_by_dedup_key(db_path, dedup_key) is not None:
+            continue
+        enqueue_outbox(
+            db_path,
+            dedup_key=dedup_key,
+            kind="cron_recovery",
+            source_id=f"{job_id}:{last_run}",
+            origin=origin,
+            message=message,
+            metadata={
+                "job_id": job_id,
+                "job_name": name,
+                "output_path": str(output),
+                "delivery_error": str(job.get("last_delivery_error") or ""),
+            },
+        )
+        queued += 1
+    return queued
+
+
+def process_outbox(
+    config: Dict[str, Any],
+    *,
+    deliverer: DeliveryFn,
+    mirror: Optional[MirrorFn] = None,
+) -> Dict[str, int]:
+    """Deliver ready outbox rows with bounded retry and dead-lettering."""
+    result = {"checked": 0, "delivered": 0, "failed": 0, "dead_letter": 0}
+    db_path = _operations_db_path(config)
+    if db_path is None:
+        return result
+    fallback = _delivery_fallback_path(config)
+    rows = pending_outbox(
+        db_path,
+        limit=int(config.get("outbox_batch_size", 20)),
+    )
+    for row in rows:
+        result["checked"] += 1
+        notification_id = str(row["notification_id"])
+        origin = {
+            "platform": str(row.get("platform") or ""),
+            "chat_id": str(row.get("chat_id") or ""),
+            "thread_id": str(row.get("thread_id") or ""),
+            "user_id": str(row.get("user_id") or ""),
+        }
+        message = _fit_delivery_message(config, origin, str(row.get("message") or ""))
+        terminal_reason = ""
+        if not origin["platform"] or not origin["chat_id"]:
+            terminal_reason = "outbox notification has no delivery target"
+        else:
+            terminal_reason = _terminal_reason(config, origin)
+        if terminal_reason:
+            dead = force_outbox_dead_letter(db_path, notification_id, terminal_reason) or row
+            append_outbox_dead_letter(fallback, dead, reason=terminal_reason)
+            result["dead_letter"] += 1
+            continue
+        try:
+            ok, error = deliverer(config, origin, message)
+        except Exception as exc:  # sender plugins must not stop the batch
+            ok, error = False, f"{exc.__class__.__name__}: {exc}"
+        if ok:
+            mark_outbox_delivered(db_path, notification_id)
+            if mirror is None:
+                mirror_management_message(config, origin, message)
+            else:
+                mirror(origin, message)
+            result["delivered"] += 1
+            continue
+        updated = record_outbox_failure(
+            db_path,
+            notification_id,
+            error,
+            max_attempts=int(config.get("outbox_max_attempts", 12)),
+            retry_base_seconds=int(config.get("delivery_retry_base_seconds", 60)),
+            retry_max_seconds=int(config.get("delivery_retry_max_seconds", 3600)),
+        )
+        if updated.get("state") == "dead_letter":
+            append_outbox_dead_letter(fallback, updated, reason=str(error or "delivery failed"))
+            result["dead_letter"] += 1
+        else:
+            result["failed"] += 1
+    return result
+
+
+def _record_retry_exhaustion(
+    config: Dict[str, Any],
+    *,
+    kind: str,
+    identifier: str,
+    origin: Dict[str, str],
+    message: str,
+    error: str,
+) -> str:
+    """Move a repeatedly failing legacy row to the same recoverable dead letter."""
+    fallback = record_terminal_delivery(
+        config,
+        kind=kind,
+        identifier=identifier,
+        origin=origin,
+        message=message,
+        reason=f"retry exhausted: {error}",
+    )
+    return f"terminal: retry exhausted: {error}; fallback={fallback}"
+
+
 def process_once(
     config: Dict[str, Any],
     *,
@@ -296,9 +560,22 @@ def process_once(
     summary = {
         "checked": 0, "running": 0, "restarted": 0, "delivered": 0,
         "failed": 0, "waiting_target": 0, "terminal": 0,
+        "outbox_enqueued": 0, "outbox_checked": 0,
+        "outbox_delivered": 0, "outbox_failed": 0, "outbox_dead_letter": 0,
     }
     if not config.get("proactive_delivery", True):
         return summary
+
+    # Import failed Hermes-origin deliveries before polling normal worker
+    # results.  The outbox sender is deliberately single-owner (this cron job)
+    # so a live-adapter failure cannot race a second recovery sender.
+    if _operations_db_path(config) is not None:
+        summary["outbox_enqueued"] = recover_failed_cron_deliveries(config)
+        outbox_result = process_outbox(config, deliverer=deliverer, mirror=mirror)
+        summary["outbox_checked"] = outbox_result["checked"]
+        summary["outbox_delivered"] = outbox_result["delivered"]
+        summary["outbox_failed"] = outbox_result["failed"]
+        summary["outbox_dead_letter"] = outbox_result["dead_letter"]
 
     state = RouterState(config["state_db"])
     try:
@@ -343,13 +620,31 @@ def process_once(
             origin = _origin_for_row(config, row)
             attempts = int(row["delivery_attempts"] or 0) + 1
             if not origin:
-                state.update(
-                    event_id,
-                    delivery_attempts=attempts,
-                    delivery_error="could not resolve original conversation",
-                    last_delivery_at=utc_now(),
-                )
-                summary["waiting_target"] += 1
+                missing_target = "could not resolve original conversation"
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="swarm",
+                        identifier=run_id,
+                        origin=origin,
+                        message=f"Research Run {run_id} 已完成，但无法解析原始会话。",
+                        error=missing_target,
+                    )
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=missing_target,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["waiting_target"] += 1
                 continue
 
             message = _format_terminal_message(config, row, result)
@@ -392,13 +687,30 @@ def process_once(
                     mirror(origin, message)
                 summary["delivered"] += 1
             else:
-                state.update(
-                    event_id,
-                    delivery_attempts=attempts,
-                    delivery_error=error,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="swarm",
+                        identifier=run_id,
+                        origin=origin,
+                        message=message,
+                        error=error,
+                    )
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
         content_rows = state.pending_content_notifications(int(config.get("max_delivery_attempts", 10)))
         for row in content_rows:
             summary["checked"] += 1
@@ -440,13 +752,31 @@ def process_once(
             origin = _origin_for_row(config, row)
             attempts = int(row["delivery_attempts"] or 0) + 1
             if not origin:
-                state.update(
-                    event_id,
-                    delivery_attempts=attempts,
-                    delivery_error="could not resolve original conversation",
-                    last_delivery_at=utc_now(),
-                )
-                summary["waiting_target"] += 1
+                missing_target = "could not resolve original conversation"
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="content",
+                        identifier=run_id,
+                        origin=origin,
+                        message=f"公司 Run {run_id} 已完成，但无法解析原始会话。",
+                        error=missing_target,
+                    )
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=missing_target,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["waiting_target"] += 1
                 continue
             message = _format_content_message(row, payload)
             message = _fit_delivery_message(config, origin, message)
@@ -487,13 +817,30 @@ def process_once(
                     mirror(origin, message)
                 summary["delivered"] += 1
             else:
-                state.update(
-                    event_id,
-                    delivery_attempts=attempts,
-                    delivery_error=error,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="content",
+                        identifier=run_id,
+                        origin=origin,
+                        message=message,
+                        error=error,
+                    )
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        delivery_attempts=attempts,
+                        delivery_error=error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
     finally:
         state.close()
 
@@ -516,13 +863,35 @@ def process_once(
                 "user_id": str(row["delivery_user_id"] or ""),
             }
             if not origin["platform"] or not origin["chat_id"]:
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=attempts,
-                    delivery_error="TVCR review has no delivery target",
-                    last_delivery_at=utc_now(),
-                )
-                summary["waiting_target"] += 1
+                missing_target = "TVCR review has no delivery target"
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    missing_message = format_review_message(
+                        Path(operations_db), review_id,
+                        limit=int(config.get("tvcr_delivery_default_chars", 1000)),
+                    )
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="tvcr",
+                        identifier=review_id,
+                        origin=origin,
+                        message=missing_message,
+                        error=missing_target,
+                    )
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivery_attempts=attempts,
+                        delivery_error=missing_target,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["waiting_target"] += 1
                 continue
             message = format_review_message(
                 Path(operations_db), review_id,
@@ -559,13 +928,30 @@ def process_once(
                     mirror(origin, message)
                 summary["delivered"] += 1
             else:
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=attempts,
-                    delivery_error=error,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="tvcr",
+                        identifier=review_id,
+                        origin=origin,
+                        message=message,
+                        error=error,
+                    )
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivery_attempts=attempts,
+                        delivery_error=error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
     return summary
 
 

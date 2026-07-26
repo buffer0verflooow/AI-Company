@@ -84,4 +84,4 @@ python3 automation/company_operator.py
 python3 automation/company_operator.py --queue
 ```
 
-正式计划为每天 `09:00` 运行，单周期最多自动执行一项任务。调整长期任务、风险级别或单周期上限应修改配置并运行自动化测试。
+自动经营执行器曾计划每天 `09:00` 运行，当前已按用户决策暂停，改为手动触发；只读公司日报由独立的 `company-daily-digest` 每天 `09:00` 生成，不会启动 Worker。调整长期任务、风险级别或单周期上限应修改配置并运行自动化测试。

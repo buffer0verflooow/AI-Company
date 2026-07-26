@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "timezone": "Asia/Shanghai",
   "dispatch_security": true,
   "auto_run_security": true,
   "authorized_targets": [],
@@ -7,6 +8,7 @@
   "swarm_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db",
   "state_db": "/home/pwn/workspace/company/operations/runtime/company_router.db",
   "operations_db": "/home/pwn/workspace/company/operations/runtime/operations_control.db",
+  "market_signals_db": "/home/pwn/workspace/company/marketing/market_signals.db",
   "log_dir": "/home/pwn/workspace/company/operations/runtime/logs",
   "executor": "/home/pwn/workspace/company/automation/swarm_hermes_executor.py",
   "content_executor": "/home/pwn/workspace/company/automation/content_hermes_executor.py",
@@ -36,6 +38,11 @@
   "max_delivery_attempts": 50,
   "delivery_retry_base_seconds": 60,
   "delivery_retry_max_seconds": 3600,
+  "outbox_max_attempts": 12,
+  "outbox_batch_size": 20,
+  "cron_jobs_path": "/home/pwn/.hermes/cron/jobs.json",
+  "cron_output_root": "/home/pwn/.hermes/cron/output",
+  "cron_delivery_recovery_jobs": ["company-daily-auto-fix"],
   "stale_run_minutes": 15,
   "max_runner_restarts": 2,
   "security": {

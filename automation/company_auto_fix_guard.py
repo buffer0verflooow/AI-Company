@@ -10,7 +10,6 @@ changes" wording from swallowing unrelated knowledge-base edits.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import tempfile
 from datetime import datetime, timezone

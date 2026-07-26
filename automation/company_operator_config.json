@@ -23,6 +23,7 @@
   "outcome_followup_after_hours": 24,
   "approval_digest_items": 3,
   "proactive_delivery": true,
+  "notification_outbox_enabled": true,
   "proactive_delivery_platforms": ["weixin"],
   "delivery_fallback_path": "/home/pwn/workspace/company/operations/runtime/delivery-dead-letters.jsonl",
   "operator_delivery_chars": 1400,

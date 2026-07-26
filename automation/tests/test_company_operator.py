@@ -25,6 +25,7 @@ from automation.operations_control import (
     create_review,
     import_proposals,
 )
+from automation.notification_outbox import pending as pending_outbox
 from automation.market_radar import connect as connect_market
 
 
@@ -496,6 +497,34 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertEqual(delivered[0][0]["chat_id"], "chat-1")
             self.assertIn("公司自驱日报", delivered[0][1])
             self.assertIn("主动完成", delivered[0][1])
+
+    def test_operator_queues_default_delivery_in_notification_outbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["proactive_delivery"] = True
+            config["proactive_delivery_platforms"] = ["weixin"]
+            router = sqlite3.connect(config["router_db"])
+            router.execute(
+                """CREATE TABLE route_events (
+                   delivery_platform TEXT,delivery_chat_id TEXT,delivery_thread_id TEXT,
+                   delivery_user_id TEXT,updated_at TEXT)"""
+            )
+            router.execute(
+                "INSERT INTO route_events VALUES ('weixin','chat-1','','user-1','2026-07-15T00:00:00+00:00')"
+            )
+            router.commit()
+            router.close()
+
+            result = run_cycle(config, worker=lambda *_args: {
+                "status": "completed", "summary": "已排队", "next_action": "", "metrics": {}, "error": "",
+            })
+
+            self.assertFalse(result["delivered"])
+            self.assertEqual(result["delivery_error"], "queued in notification outbox")
+            rows = pending_outbox(Path(config["operations_db"]))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["kind"], "autonomy_cycle")
 
     def test_operator_surfaces_non_allowlisted_delivery_in_fallback(self):
         with tempfile.TemporaryDirectory() as td:

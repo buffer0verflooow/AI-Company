@@ -978,7 +978,28 @@ def run_cycle(
             except OSError as exc:
                 delivery_error = f"terminal fallback write failed: {exc}"
         else:
-            delivered, delivery_error = chosen_deliverer(config, origin, message)
+            if deliverer is None and config.get("notification_outbox_enabled", True):
+                try:
+                    try:
+                        from .notification_outbox import enqueue as enqueue_outbox
+                    except ImportError:
+                        from notification_outbox import enqueue as enqueue_outbox
+                    enqueue_outbox(
+                        db_path,
+                        dedup_key=f"autonomy-cycle:{cycle_id}",
+                        kind="autonomy_cycle",
+                        source_id=cycle_id,
+                        origin=origin,
+                        message=message,
+                        metadata={"cycle_id": cycle_id},
+                    )
+                    delivered = False
+                    delivery_error = "queued in notification outbox"
+                except (OSError, sqlite3.Error, ValueError) as exc:
+                    delivered = False
+                    delivery_error = f"notification outbox enqueue failed: {exc}"
+            else:
+                delivered, delivery_error = chosen_deliverer(config, origin, message)
     elif config.get("proactive_delivery", True):
         delivery_error = "no management delivery target"
     completed = utc_now()

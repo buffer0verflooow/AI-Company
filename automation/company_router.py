@@ -1451,7 +1451,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
         return {"context": build_context(
             decision,
             status_updates=updates + [
-                f"- [预评估] 任务已跳过：当前会话无足够的对话历史可供分析。任务未派发，无 Token 消耗。"
+                "- [预评估] 任务已跳过：当前会话无足够的对话历史可供分析。任务未派发，无 Token 消耗。"
             ],
         )}
     elif pre_eval == "skip_low_confidence":

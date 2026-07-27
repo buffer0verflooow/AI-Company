@@ -19,9 +19,9 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 try:
-    from ._safe_io import file_lock, quote_identifier, sqlite_uri
+    from ._safe_io import file_lock, quote_identifier
 except ImportError:  # direct ``python automation/operations_control.py`` invocation
-    from _safe_io import file_lock, quote_identifier, sqlite_uri
+    from _safe_io import file_lock, quote_identifier
 
 try:
     from . import pricing

@@ -197,7 +197,7 @@ def _signal_id(theme: str, url: str) -> str:
 def persist_results(db: sqlite3.Connection, run_id: str,
                     results: list[dict], themes: dict) -> int:
     """Write agentkey probe signals into market_signals.db."""
-    timestamp = utc_now()
+    _timestamp = utc_now()
     saved = 0
 
     # Load existing signal themes to avoid re-inserting same-key signals

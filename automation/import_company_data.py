@@ -157,14 +157,14 @@ def _parse_xls(path: Path) -> dict[str, Any]:
     trend: list[dict[str, Any]] = []
     demographics: dict[str, dict[str, Any]] = {}
     section = "summary"
-    trend_started = False
+    _trend_started = False
     demographic_section: str | None = None
     for row in rows[1:]:
         values = row[1:]
         first = str(values[0]).strip() if values else ""
         if first == "阅读数据趋势明细":
             section = "trend"
-            trend_started = False
+            _trend_started = False
             continue
         if first in {"性别分布", "年龄分布", "地域分布"}:
             demographic_section = first

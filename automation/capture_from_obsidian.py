@@ -265,9 +265,9 @@ def main():
 
     # Summary
     captured = sum(1 for _, s in results if s == "captured")
-    skipped = sum(1 for _, s in results if s == "dry-run")
+    _skipped = sum(1 for _, s in results if s == "dry-run")
     errors = sum(1 for _, s in results if s and s.startswith(("error:", "read_error:", "timeout")))
-    unchanged = sum(1 for _, s in results if s == "skip" or (s or "").startswith("skip"))
+    _unchanged = sum(1 for _, s in results if s == "skip" or (s or "").startswith("skip"))
 
     parts = []
     if captured:

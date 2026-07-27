@@ -18,8 +18,6 @@ import os
 import re
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-import colorsys
-import math
 
 # ── Color palettes (dark tech-themed) ──────────────────────────────────────
 PALETTES = [

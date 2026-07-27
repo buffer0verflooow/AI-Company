@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from automation.notification_outbox import (
-    connect,
     enqueue,
     get,
     mark_delivered,

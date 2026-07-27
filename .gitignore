@@ -72,3 +72,4 @@ Thumbs.db
 
 # Local-only operational docs (kept out of the public repo)
 DEPLOYMENT.md
+*.lock

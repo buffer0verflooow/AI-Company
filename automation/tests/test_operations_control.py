@@ -23,6 +23,7 @@ from automation.operations_control import (
     update_experiment,
     utc_now,
 )
+from automation.operations_control import _apportion_shared_sessions
 
 
 class OperatingLedgerTests(unittest.TestCase):
@@ -471,6 +472,58 @@ class OutcomeBackfillTests(unittest.TestCase):
             out = backfill_outcomes(db_path, finance_db=root / "none.db", article_perf_db=root / "none2.db")
             self.assertEqual(out["backfilled"], 0)
             self.assertEqual(out["still_unmeasured"], 1)
+
+
+class SharedSessionApportionTests(unittest.TestCase):
+    def _row(self, run_id, session_id, **over):
+        row = {
+            "run_id": run_id,
+            "worker_session_id": session_id,
+            "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "reasoning_tokens": 0, "tool_call_count": 0,
+            "estimated_cost_usd": None, "estimated_cost_native": None,
+            "actual_cost_usd": None, "evidence_json": "{}",
+        }
+        row.update(over)
+        return row
+
+    def test_shared_session_split_evenly_and_sum_preserved(self):
+        rows = [
+            self._row(f"r{i}", "sess", input_tokens=1000, cache_read_tokens=300,
+                      estimated_cost_usd=6.0, estimated_cost_native=6.0)
+            for i in range(4)
+        ]
+        _apportion_shared_sessions(rows)
+        self.assertEqual(sum(r["input_tokens"] for r in rows), 1000)
+        self.assertEqual(sum(r["cache_read_tokens"] for r in rows), 300)
+        self.assertAlmostEqual(sum(r["estimated_cost_usd"] for r in rows), 6.0, places=6)
+        self.assertEqual([r["input_tokens"] for r in rows], [250, 250, 250, 250])
+        for r in rows:
+            self.assertEqual(json.loads(r["evidence_json"])["session_apportioned"]["runs_sharing"], 4)
+
+    def test_integer_remainder_is_distributed(self):
+        rows = [self._row(f"r{i}", "sess", input_tokens=100) for i in range(3)]
+        _apportion_shared_sessions(rows)
+        self.assertEqual(sorted(r["input_tokens"] for r in rows), [33, 33, 34])
+        self.assertEqual(sum(r["input_tokens"] for r in rows), 100)
+
+    def test_single_run_and_empty_session_untouched(self):
+        rows = [
+            self._row("solo", "only-me", input_tokens=999, estimated_cost_usd=5.0),
+            self._row("blank", "", input_tokens=42),
+        ]
+        _apportion_shared_sessions(rows)
+        self.assertEqual(rows[0]["input_tokens"], 999)
+        self.assertEqual(rows[0]["estimated_cost_usd"], 5.0)
+        self.assertEqual(rows[1]["input_tokens"], 42)
+        self.assertNotIn("session_apportioned", json.loads(rows[0]["evidence_json"]))
+        self.assertNotIn("session_apportioned", json.loads(rows[1]["evidence_json"]))
+
+    def test_none_cost_left_as_none(self):
+        rows = [self._row(f"r{i}", "sess", input_tokens=10, estimated_cost_usd=None) for i in range(2)]
+        _apportion_shared_sessions(rows)
+        self.assertEqual([r["estimated_cost_usd"] for r in rows], [None, None])
+        self.assertEqual(sum(r["input_tokens"] for r in rows), 10)
 
 
 if __name__ == "__main__":

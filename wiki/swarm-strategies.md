@@ -4,8 +4,8 @@
 编辑此文件会保留手写内容，自动段标记为 `
 
 <!-- swarm-kb-auto -->
-## 🤖 蜂群策略同步 (2026-07-24 21:02 UTC)
-*自动从蜂群知识库 L3/L4 条目生成，共计 15 条活跃知识*
+## 🤖 蜂群策略同步 (2026-07-26 21:02 UTC)
+*自动从蜂群知识库 L3/L4 条目生成，共计 16 条活跃知识*
 
 ---
 
@@ -36,7 +36,7 @@
 **Database**: `/home/pwn/workspace/research/swarm
 
 
-### 未分类 (9 条)
+### 未分类 (10 条)
 
 - **[🧠 Knowledge] [纠正] Correction: NtAllocateVirtualMemory syscall number is 0x18 on Win10 vs 0x19 on W...** (信任度 50%, 来源: hermes)
   - Correction: NtAllocateVirtualMemory syscall number is 0x18 on Win10 vs 0x19 on Win11. Wrong number causes STATUS_INVALID_PARAMETER. This is a fix for EDR bypass.
@@ -64,6 +64,19 @@
 
 - **[🧠 Knowledge] [任务] env.json CONFIRMED: HTTP 200 at https://auth.bancoplata.mx/envs/env.json. Still ...** (信任度 40%, 来源: deep-verify)
   - env.json CONFIRMED: HTTP 200 at https://auth.bancoplata.mx/envs/env.json. Still publicly accessible. Leaks: authFlowApiDomainPrefix=prime, telegrafApiUrl, snowplowCollectorUrl, centrifugoDomainPrefix,
+
+- **[🧠 Knowledge] [任务] ## Reporter 报告：AIGlasses_for_navigation (Archifancy)** (信任度 40%, 来源: reporter-01)
+  - ## Reporter 报告：AIGlasses_for_navigation (Archifancy)
+
+**Run**: 7886940e | **Domain**: modelscope.cn | **Status**: ✅ 完成
+
+---
+
+### ✅ 已验证证据
+
+| 项目 | 证据 |
+|------|------|
+| **存在性** | ModelScope 页面 `archifa
 
 
 ### Web 漏洞模式 (1 条)

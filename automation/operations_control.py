@@ -15,7 +15,7 @@ import re
 import sqlite3
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 try:
@@ -445,6 +445,65 @@ def _upsert_run(db: sqlite3.Connection, values: Dict[str, Any]) -> None:
     )
 
 
+# Usage fields sourced from the shared worker session, not from the individual
+# run.  When several runs reuse one Codex/Claude session each of them records the
+# session's *whole* usage, so a naive sum counts that one session N times.
+_SESSION_INT_FIELDS = (
+    "input_tokens", "output_tokens", "cache_read_tokens",
+    "cache_write_tokens", "reasoning_tokens", "tool_call_count",
+)
+_SESSION_FLOAT_FIELDS = ("estimated_cost_usd", "estimated_cost_native", "actual_cost_usd")
+
+
+def _apportion_shared_sessions(rows: List[Dict[str, Any]]) -> None:
+    """Split one worker session's tokens/cost evenly across the runs it served.
+
+    Every run in a shared session initially carries the session's full usage.
+    This mutates the rows in place so each run holds an equal share and the
+    per-session sum stays whole (integer remainders are handed out one-by-one;
+    the last run absorbs float rounding).  Runs with an empty ``worker_session_id``
+    or a session used by a single run are left untouched.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        session_id = str(row.get("worker_session_id") or "")
+        if session_id:
+            groups.setdefault(session_id, []).append(row)
+    for session_id, members in groups.items():
+        n = len(members)
+        if n < 2:
+            continue
+        for field in _SESSION_INT_FIELDS:
+            total = int(members[0].get(field) or 0)
+            base, remainder = divmod(total, n)
+            for index, row in enumerate(members):
+                row[field] = base + (1 if index < remainder else 0)
+        for field in _SESSION_FLOAT_FIELDS:
+            total = members[0].get(field)
+            if total is None:
+                continue
+            total = float(total)
+            per_run = round(total / n, 6)
+            allocated = 0.0
+            for index, row in enumerate(members):
+                if index < n - 1:
+                    row[field] = per_run
+                    allocated += per_run
+                else:
+                    row[field] = round(total - allocated, 6)
+        for row in members:
+            try:
+                evidence = json.loads(row.get("evidence_json") or "{}")
+                if not isinstance(evidence, dict):
+                    evidence = {}
+            except json.JSONDecodeError:
+                evidence = {}
+            evidence["session_apportioned"] = {
+                "worker_session_id": session_id, "runs_sharing": n,
+            }
+            row["evidence_json"] = _json(evidence)
+
+
 def sync_operational_runs(
     db_path: Path = DEFAULT_DB,
     router_db: Path = DEFAULT_ROUTER_DB,
@@ -477,6 +536,7 @@ def sync_operational_runs(
     all_run_ids = set(router_rows) | set(job_dirs)
     db = connect(db_path)
     counts = {"synced": 0, "content": 0, "security": 0}
+    pending_rows: List[Dict[str, Any]] = []
     try:
         now = utc_now()
         for run_id in sorted(all_run_ids):
@@ -592,9 +652,14 @@ def sync_operational_runs(
             else:
                 values["estimated_cost_native"] = None
                 values["estimated_cost_currency"] = ""
-            _upsert_run(db, values)
+            pending_rows.append(values)
             counts["synced"] += 1
             counts["content" if job_dir else "security"] += 1
+        # Dedupe shared worker sessions before persisting so a session reused by
+        # several runs is not counted once per run.
+        _apportion_shared_sessions(pending_rows)
+        for values in pending_rows:
+            _upsert_run(db, values)
         db.commit()
     finally:
         db.close()

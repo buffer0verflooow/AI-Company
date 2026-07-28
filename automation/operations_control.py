@@ -191,6 +191,8 @@ def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
             proposal_columns = {row[1] for row in db.execute("PRAGMA table_info(improvement_proposals)")}
             if "product_line" not in proposal_columns:
                 db.execute("ALTER TABLE improvement_proposals ADD COLUMN product_line TEXT NOT NULL DEFAULT 'company'")
+            if "escalated_at" not in proposal_columns:
+                db.execute("ALTER TABLE improvement_proposals ADD COLUMN escalated_at TEXT NOT NULL DEFAULT ''")
             run_columns = {row[1] for row in db.execute("PRAGMA table_info(operational_runs)")}
             migrations = {
                 "result_delivered": "INTEGER NOT NULL DEFAULT 0",
@@ -1257,6 +1259,222 @@ def _experiment_baseline(db: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+def _create_experiment_for_proposal(db: sqlite3.Connection, proposal: sqlite3.Row, now: str) -> str:
+    """Turn an approved proposal into a planned operating experiment.
+
+    Shared by manual approval and policy auto-approval so both paths capture the
+    same baseline and implementation contract.
+    """
+    experiment_id = f"OPS-EXP-{proposal['proposal_id'][7:]}"
+    db.execute(
+        """INSERT OR IGNORE INTO operating_experiments
+           (experiment_id,proposal_id,product_line,name,hypothesis,baseline_json,targets_json,
+            implementation_plan_json,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,'planned',?,?)""",
+        (
+            experiment_id, proposal["proposal_id"], str(proposal["product_line"] or "company"),
+            proposal["title"], proposal["problem_statement"], _json(_experiment_baseline(db)),
+            proposal["success_metrics_json"],
+            _json({
+                "recommended_action": proposal["recommended_action"],
+                "change_scopes": json.loads(proposal["change_scopes_json"] or "[]"),
+                "rule": "先落实经营方案，再决定是否需要代码变更",
+            }), now, now,
+        ),
+    )
+    return experiment_id
+
+
+def _recompute_review_status(db: sqlite3.Connection, review_id: str, now: str) -> str:
+    remaining = db.execute(
+        "SELECT COUNT(*) FROM improvement_proposals WHERE review_id=? AND status='pending_approval'",
+        (review_id,),
+    ).fetchone()[0]
+    approved = db.execute(
+        "SELECT COUNT(*) FROM improvement_proposals WHERE review_id=? AND status='approved'",
+        (review_id,),
+    ).fetchone()[0]
+    review_status = "partially_approved" if remaining else "approved" if approved else "closed"
+    db.execute("UPDATE tvcr_reviews SET status=?,updated_at=? WHERE review_id=?", (review_status, now, review_id))
+    return review_status
+
+
+def _approve_proposal(db: sqlite3.Connection, proposal: sqlite3.Row, *, actor: str, note: str, now: str) -> str:
+    """Approve one proposal and spawn its experiment (no commit — caller owns tx)."""
+    db.execute(
+        """UPDATE improvement_proposals SET status='approved',decided_by=?,decided_at=?,decision_note=?,updated_at=?
+           WHERE proposal_id=?""",
+        (actor, now, note, now, proposal["proposal_id"]),
+    )
+    experiment_id = _create_experiment_for_proposal(db, proposal, now)
+    _recompute_review_status(db, proposal["review_id"], now)
+    return experiment_id
+
+
+# Risk vocabulary for policy auto-approval.  A proposal is only eligible when it
+# states a low risk (or none) and carries no high/medium markers — anything
+# ambiguous stays with the user.
+_LOW_RISK_MARKERS = ("低", "low", "minimal", "minor", "轻微", "trivial")
+_HIGH_RISK_MARKERS = ("高", "中", "high", "medium", "严重", "critical", "不可逆", "irreversible", "危险")
+
+
+def _is_low_risk(risk: Any) -> bool:
+    text = str(risk or "").strip().lower()
+    if any(marker in text for marker in _HIGH_RISK_MARKERS):
+        return False
+    if not text:
+        return True
+    return any(marker in text for marker in _LOW_RISK_MARKERS)
+
+
+def _proposal_change_scopes(row: sqlite3.Row) -> set[str]:
+    try:
+        return {str(scope).strip().lower() for scope in json.loads(row["change_scopes_json"] or "[]") if str(scope).strip()}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set()
+
+
+def approved_change_scopes(db: sqlite3.Connection) -> set[str]:
+    """Union of change_scopes across every already-approved proposal.
+
+    This is the pre-authorised envelope: a new low-risk proposal that stays
+    inside it introduces no scope the user has not already sanctioned.
+    """
+    scopes: set[str] = set()
+    for row in db.execute("SELECT change_scopes_json FROM improvement_proposals WHERE status='approved'"):
+        scopes |= _proposal_change_scopes(row)
+    return scopes
+
+
+def auto_approve_proposals(
+    db_path: Path = DEFAULT_DB,
+    *,
+    actor: str = "policy-auto-approve",
+    now: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Policy-approve P2/low-risk proposals whose change_scopes are already sanctioned.
+
+    Deliberately narrow: only P2 priority, only a stated-low risk, and only when
+    every declared change scope already appears in an approved proposal.  P0/P1
+    or scope-expanding items always wait for an explicit human decision.
+    """
+    db = connect(db_path)
+    try:
+        stamp = now or utc_now()
+        baseline = approved_change_scopes(db)
+        candidates = db.execute(
+            "SELECT * FROM improvement_proposals WHERE status='pending_approval' AND priority='P2' ORDER BY review_id,item_no"
+        ).fetchall()
+        approved_ids: list[str] = []
+        skipped: list[Dict[str, str]] = []
+        for row in candidates:
+            scopes = _proposal_change_scopes(row)
+            if not _is_low_risk(row["risk"]):
+                reason = "risk is not stated-low"
+            elif not scopes:
+                reason = "no change_scopes declared"
+            elif not baseline:
+                reason = "no approved scope baseline yet"
+            elif not scopes.issubset(baseline):
+                reason = f"scopes outside approved baseline: {sorted(scopes - baseline)}"
+            else:
+                reason = ""
+            if reason:
+                skipped.append({"proposal_id": row["proposal_id"], "reason": reason})
+                continue
+            if not dry_run:
+                _approve_proposal(
+                    db, row,
+                    actor=actor,
+                    note=f"策略化自动批准：P2/低风险，change_scopes {sorted(scopes)} 落在已批准范围内",
+                    now=stamp,
+                )
+            approved_ids.append(row["proposal_id"])
+        if not dry_run:
+            db.commit()
+        return {
+            "approved": approved_ids,
+            "skipped": skipped,
+            "approved_scope_baseline": sorted(baseline),
+            "dry_run": dry_run,
+        }
+    finally:
+        db.close()
+
+
+def escalate_stale_proposals(
+    db_path: Path = DEFAULT_DB,
+    *,
+    now: Optional[str] = None,
+    p0_sla_hours: int = 72,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Enforce the proposal SLA: expire superseded backlog, escalate stale P0s.
+
+    * A pending proposal whose review is older than the latest review for the
+      same product line is auto-expired to ``superseded`` — a newer review has
+      replaced its evidence.
+    * A pending P0 in the current review that has waited longer than the SLA is
+      stamped ``escalated_at`` (status unchanged so the user can still decide).
+    """
+    stamp = now or utc_now()
+    try:
+        current = datetime.fromisoformat(stamp)
+    except ValueError:
+        current = datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(hours=p0_sla_hours)
+    db = connect(db_path)
+    try:
+        pending = db.execute(
+            """SELECT p.*, r.review_date AS review_date FROM improvement_proposals p
+               JOIN tvcr_reviews r ON r.review_id=p.review_id
+               WHERE p.status='pending_approval'"""
+        ).fetchall()
+        latest_date: Dict[str, str] = {}
+        for row in db.execute(
+            """SELECT p.product_line AS pl, MAX(r.review_date) AS md FROM improvement_proposals p
+               JOIN tvcr_reviews r ON r.review_id=p.review_id GROUP BY p.product_line"""
+        ):
+            latest_date[str(row["pl"])] = str(row["md"] or "")
+        superseded: list[str] = []
+        escalated: list[str] = []
+        for row in pending:
+            product_line = str(row["product_line"] or "company")
+            if str(row["review_date"] or "") < latest_date.get(product_line, ""):
+                superseded.append(row["proposal_id"])
+                if not dry_run:
+                    db.execute(
+                        """UPDATE improvement_proposals
+                           SET status='superseded',decided_by='sla-auto-expire',decided_at=?,
+                               decision_note='更晚的复盘已取代本提案，SLA 自动过期。',updated_at=?
+                           WHERE proposal_id=?""",
+                        (stamp, stamp, row["proposal_id"]),
+                    )
+                continue
+            if str(row["priority"] or "") == "P0" and not str(row["escalated_at"] or "").strip():
+                try:
+                    created = datetime.fromisoformat(str(row["created_at"] or ""))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if created <= cutoff:
+                    escalated.append(row["proposal_id"])
+                    if not dry_run:
+                        db.execute(
+                            "UPDATE improvement_proposals SET escalated_at=?,updated_at=? WHERE proposal_id=?",
+                            (stamp, stamp, row["proposal_id"]),
+                        )
+        if not dry_run:
+            db.commit()
+        return {"superseded": superseded, "escalated": escalated, "p0_sla_hours": p0_sla_hours, "dry_run": dry_run}
+    finally:
+        db.close()
+
+
 def apply_user_decision(
     db_path: Path,
     message: str,
@@ -1282,33 +1500,8 @@ def apply_user_decision(
         )
         experiment_id = ""
         if decision == "approved":
-            experiment_id = f"OPS-EXP-{proposal['proposal_id'][7:]}"
-            db.execute(
-                """INSERT INTO operating_experiments
-                   (experiment_id,proposal_id,product_line,name,hypothesis,baseline_json,targets_json,
-                    implementation_plan_json,status,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,'planned',?,?)""",
-                (
-                    experiment_id, proposal["proposal_id"], str(proposal["product_line"] or "company"),
-                    proposal["title"], proposal["problem_statement"], _json(_experiment_baseline(db)),
-                    proposal["success_metrics_json"],
-                    _json({
-                        "recommended_action": proposal["recommended_action"],
-                        "change_scopes": json.loads(proposal["change_scopes_json"] or "[]"),
-                        "rule": "先落实经营方案，再决定是否需要代码变更",
-                    }), now, now,
-                ),
-            )
-        remaining = db.execute(
-            "SELECT COUNT(*) FROM improvement_proposals WHERE review_id=? AND status='pending_approval'",
-            (proposal["review_id"],),
-        ).fetchone()[0]
-        approved = db.execute(
-            "SELECT COUNT(*) FROM improvement_proposals WHERE review_id=? AND status='approved'",
-            (proposal["review_id"],),
-        ).fetchone()[0]
-        review_status = "partially_approved" if remaining else "approved" if approved else "closed"
-        db.execute("UPDATE tvcr_reviews SET status=?,updated_at=? WHERE review_id=?", (review_status, now, proposal["review_id"]))
+            experiment_id = _create_experiment_for_proposal(db, proposal, now)
+        _recompute_review_status(db, proposal["review_id"], now)
         db.commit()
         return {
             "ok": True,
@@ -1512,6 +1705,14 @@ def main() -> int:
 
     sub.add_parser("reap-experiments")
 
+    auto_approve = sub.add_parser("auto-approve")
+    auto_approve.add_argument("--actor", default="policy-auto-approve")
+    auto_approve.add_argument("--dry-run", action="store_true")
+
+    escalate = sub.add_parser("escalate-sla")
+    escalate.add_argument("--p0-sla-hours", type=int, default=72)
+    escalate.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args()
     db_path = Path(args.db)
     if args.command == "sync-runs":
@@ -1572,6 +1773,12 @@ def main() -> int:
         return 0
     if args.command == "reap-experiments":
         print(json.dumps(reap_experiments(db_path), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "auto-approve":
+        print(json.dumps(auto_approve_proposals(db_path, actor=args.actor, dry_run=args.dry_run), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "escalate-sla":
+        print(json.dumps(escalate_stale_proposals(db_path, p0_sla_hours=args.p0_sla_hours, dry_run=args.dry_run), ensure_ascii=False, indent=2))
         return 0
     return 1
 

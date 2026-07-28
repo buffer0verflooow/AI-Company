@@ -17,9 +17,11 @@ try:
     from . import pricing
     from .operations_control import (
         DEFAULT_TIMEZONE,
+        auto_approve_proposals,
         backfill_outcomes,
         business_period,
         create_review,
+        escalate_stale_proposals,
         import_proposals,
         latest_origin,
         previous_business_day,
@@ -32,9 +34,11 @@ except ImportError:
     import pricing  # type: ignore[no-redef]
     from operations_control import (
         DEFAULT_TIMEZONE,
+        auto_approve_proposals,
         backfill_outcomes,
         business_period,
         create_review,
+        escalate_stale_proposals,
         import_proposals,
         latest_origin,
         previous_business_day,
@@ -386,6 +390,11 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
         update_review(db_path, review_id, status="failed", error=f"invalid proposals: {exc}", report_path=str(report_path))
         return {"review_id": review_id, "status": "failed", "error": str(exc), "runs": len(runs), "sync": sync}
     update_review(db_path, review_id, report_path=str(report_path), error="")
+    # Governance: expire superseded backlog / escalate stale P0s, then policy-approve
+    # the narrow slice (P2, low-risk, scopes already sanctioned) so the user only
+    # decides what genuinely needs a decision.
+    escalation = escalate_stale_proposals(db_path)
+    auto_approved = auto_approve_proposals(db_path)
     return {
         "review_id": review_id,
         "status": "pending_approval" if ids else "no_action",
@@ -393,6 +402,8 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
         "runs": len(runs),
         "sync": sync,
         "backfill": backfill,
+        "escalation": escalation,
+        "auto_approved": auto_approved,
         "report_path": str(report_path),
     }
 

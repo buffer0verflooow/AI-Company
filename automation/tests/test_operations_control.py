@@ -10,10 +10,12 @@ from pathlib import Path
 from automation.company_router import RouterState, classify_message
 from automation.operations_control import (
     apply_user_decision,
+    auto_approve_proposals,
     backfill_outcomes,
     business_period,
     connect,
     create_review,
+    escalate_stale_proposals,
     format_review_message,
     import_proposals,
     reap_experiments,
@@ -609,6 +611,127 @@ class SharedSessionApportionTests(unittest.TestCase):
         self.assertEqual([r["estimated_cost_usd"] for r in rows], [None, None])
         self.assertEqual(sum(r["input_tokens"] for r in rows), 10)
 
+
+class TieredApprovalTests(unittest.TestCase):
+    def _proposal(self, *, priority="P2", risk="低", scopes=("process",), item_title="小步实验"):
+        return {
+            "product_line": "article-production",
+            "priority": priority,
+            "title": item_title,
+            "problem_statement": "需要优化。",
+            "recommended_action": "执行小步实验",
+            "change_scopes": list(scopes),
+            "risk": risk,
+            "success_metrics": [{"metric": "direct_tokens", "baseline": "当前", "target": "下降", "window": "5篇"}],
+        }
+
+    def _review(self, db_path, day, proposals):
+        start, end = business_period(day)
+        review_id = create_review(db_path, review_day=day, period_start=start, period_end=end)
+        import_proposals(db_path, review_id, {"executive_summary": "s", "proposals": proposals})
+        return review_id
+
+    def test_auto_approves_p2_low_risk_within_approved_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            # Establish an approved scope baseline via a manual P1 approval.
+            r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
+            base_id = connect(db_path).execute(
+                "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
+            ).fetchone()[0]
+            apply_user_decision(db_path, f"批准 {base_id}", actor="user")
+
+            self._review(db_path, date(2026, 7, 11), [self._proposal(priority="P2", risk="低", scopes=("process",))])
+            result = auto_approve_proposals(db_path)
+            self.assertEqual(len(result["approved"]), 1)
+            db = connect(db_path)
+            statuses = {row["priority"]: row["status"] for row in db.execute("SELECT priority,status FROM improvement_proposals")}
+            self.assertEqual(statuses["P2"], "approved")
+            # An operating experiment is spawned by the policy approval too.
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operating_experiments").fetchone()[0], 2)
+            db.close()
+
+    def test_scope_outside_baseline_is_not_auto_approved(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
+            base_id = connect(db_path).execute(
+                "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
+            ).fetchone()[0]
+            apply_user_decision(db_path, f"批准 {base_id}", actor="user")
+            self._review(db_path, date(2026, 7, 11), [self._proposal(priority="P2", risk="低", scopes=("technology",))])
+            result = auto_approve_proposals(db_path)
+            self.assertEqual(result["approved"], [])
+            self.assertEqual(len(result["skipped"]), 1)
+
+    def test_high_risk_and_non_p2_are_never_auto_approved(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
+            base_id = connect(db_path).execute(
+                "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
+            ).fetchone()[0]
+            apply_user_decision(db_path, f"批准 {base_id}", actor="user")
+            self._review(db_path, date(2026, 7, 11), [
+                self._proposal(priority="P2", risk="高", scopes=("process",), item_title="高风险"),
+                self._proposal(priority="P0", risk="低", scopes=("process",), item_title="高优先"),
+            ])
+            result = auto_approve_proposals(db_path)
+            self.assertEqual(result["approved"], [])  # P0 excluded by priority, high-risk by risk
+
+
+class ProposalSLATests(unittest.TestCase):
+    def _payload(self, priority):
+        return {"executive_summary": "s", "proposals": [{
+            "product_line": "company",
+            "priority": priority,
+            "title": "SLA 提案",
+            "problem_statement": "p",
+            "recommended_action": "a",
+            "change_scopes": ["process"],
+            "risk": "低",
+            "success_metrics": [{"metric": "m", "baseline": "b", "target": "t", "window": "w"}],
+        }]}
+
+    def test_stale_p0_gets_escalation_stamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            start, end = business_period(date(2026, 7, 1))
+            review_id = create_review(db_path, review_day=date(2026, 7, 1), period_start=start, period_end=end)
+            pid = import_proposals(db_path, review_id, self._payload("P0"))[0]
+            # Backdate creation to 5 days ago so it is past the 72h SLA.
+            db = connect(db_path)
+            db.execute("UPDATE improvement_proposals SET created_at=? WHERE proposal_id=?", ("2026-07-01T00:00:00+00:00", pid))
+            db.commit()
+            db.close()
+            result = escalate_stale_proposals(db_path, now="2026-07-08T00:00:00+00:00")
+            self.assertIn(pid, result["escalated"])
+            db = connect(db_path)
+            row = db.execute("SELECT status,escalated_at FROM improvement_proposals WHERE proposal_id=?", (pid,)).fetchone()
+            self.assertEqual(row["status"], "pending_approval")  # user can still decide
+            self.assertTrue(row["escalated_at"])
+            db.close()
+
+    def test_superseded_backlog_is_auto_expired(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            s1, e1 = business_period(date(2026, 7, 1))
+            old = create_review(db_path, review_day=date(2026, 7, 1), period_start=s1, period_end=e1)
+            old_pid = import_proposals(db_path, old, self._payload("P1"))[0]
+            s2, e2 = business_period(date(2026, 7, 5))
+            create_review(db_path, review_day=date(2026, 7, 5), period_start=s2, period_end=e2)
+            new = connect(db_path).execute(
+                "SELECT review_id FROM tvcr_reviews WHERE review_date='2026-07-05'"
+            ).fetchone()[0]
+            import_proposals(db_path, new, self._payload("P1"))
+            result = escalate_stale_proposals(db_path, now="2026-07-06T00:00:00+00:00")
+            self.assertIn(old_pid, result["superseded"])
+            db = connect(db_path)
+            self.assertEqual(
+                db.execute("SELECT status FROM improvement_proposals WHERE proposal_id=?", (old_pid,)).fetchone()[0],
+                "superseded",
+            )
+            db.close()
 
 if __name__ == "__main__":
     unittest.main()

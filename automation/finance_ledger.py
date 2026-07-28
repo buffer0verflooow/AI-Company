@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+try:
+    from . import pricing
+except ImportError:  # direct ``python automation/finance_ledger.py`` invocation
+    import pricing  # type: ignore[no-redef]
+
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
 DEFAULT_DB = COMPANY_ROOT / "finance/finance_ledger.db"
@@ -25,6 +30,24 @@ ACTUAL_COST_STATUSES = {"actual", "confirmed", "provider_reported", "billed"}
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Columns added after usage_snapshots first shipped.  The names are hard-coded
+# literals (never user input), so a plain ALTER is safe.
+_USAGE_SNAPSHOT_MIGRATIONS = {
+    "confirmed_cost_usd": "REAL NOT NULL DEFAULT 0",
+    "estimated_cost_usd": "REAL NOT NULL DEFAULT 0",
+    "estimated_cost_native": "TEXT NOT NULL DEFAULT '{}'",
+    "priced_sessions": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _migrate_usage_snapshots(db: sqlite3.Connection) -> None:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(usage_snapshots)")}
+    for column, definition in _USAGE_SNAPSHOT_MIGRATIONS.items():
+        if column not in columns:
+            db.execute(f"ALTER TABLE usage_snapshots ADD COLUMN {column} {definition}")
+
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -96,6 +119,8 @@ def connect(path: Path) -> sqlite3.Connection:
         );
             """
         )
+        db.commit()
+        _migrate_usage_snapshots(db)
         db.commit()
         return db
     except BaseException:
@@ -182,19 +207,73 @@ def sync_forecast(db_path: Path, submissions: Path) -> bool:
         db.close()
 
 
-def _hermes_cost_snapshot(path: Path) -> tuple[float, int]:
+_SESSION_TOKEN_COLUMNS = (
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+)
+
+
+def _hermes_cost_snapshot(
+    path: Path, price_table: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Join measured Hermes session tokens to evidence-backed model prices.
+
+    Sessions the provider has already billed (``cost_status`` in
+    ``ACTUAL_COST_STATUSES``) contribute their recorded cost as *confirmed*.
+    Every other session is priced from ``model_prices`` via
+    ``pricing.estimate_cost`` so its real token cost is counted instead of
+    silently collapsing to ``$0``.  A session whose model has no matching price
+    row (or only non-USD prices) is kept honest: it stays ``unpriced`` (or is
+    tracked as a native-currency amount) rather than assumed free — "unknown is
+    not zero", and no FX rate is ever invented.
+    """
+    result: Dict[str, Any] = {
+        "confirmed_cost_usd": 0.0,
+        "estimated_cost_usd": 0.0,
+        "estimated_cost_native": {},
+        "priced_sessions": 0,
+        "unpriced_sessions": 0,
+    }
     if not path.is_file():
-        return 0.0, 0
-    db = sqlite3.connect(path)
+        return result
+    if price_table is None:
+        price_table = pricing.load_price_table()
+    try:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return result
     db.row_factory = sqlite3.Row
     try:
         cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
         if not {"estimated_cost_usd", "cost_status"}.issubset(cols):
-            return 0.0, 0
-        rows = db.execute("SELECT estimated_cost_usd,cost_status FROM sessions").fetchall()
-        actual = sum(float(row["estimated_cost_usd"] or 0) for row in rows if str(row["cost_status"] or "").lower() in ACTUAL_COST_STATUSES)
-        unpriced = sum(1 for row in rows if str(row["cost_status"] or "").lower() not in ACTUAL_COST_STATUSES)
-        return actual, unpriced
+            return result
+        token_cols = [column for column in _SESSION_TOKEN_COLUMNS if column in cols]
+        has_model = "model" in cols
+        select_cols = ["estimated_cost_usd", "cost_status", *token_cols]
+        if has_model:
+            select_cols.append("model")
+        native = result["estimated_cost_native"]
+        for row in db.execute(f"SELECT {','.join(select_cols)} FROM sessions"):
+            if str(row["cost_status"] or "").lower() in ACTUAL_COST_STATUSES:
+                result["confirmed_cost_usd"] += float(row["estimated_cost_usd"] or 0)
+                result["priced_sessions"] += 1
+                continue
+            tokens = {column: row[column] for column in token_cols}
+            est = pricing.estimate_cost(row["model"] if has_model else "", tokens, price_table)
+            if est["cost_status"] != "estimated":
+                result["unpriced_sessions"] += 1
+                continue
+            result["priced_sessions"] += 1
+            usd = est["estimated_cost_usd"]
+            if usd is not None:
+                result["estimated_cost_usd"] += float(usd)
+            else:
+                amount = est["estimated_cost_native"]
+                currency = str(est["estimated_cost_currency"] or "").upper()
+                if amount is not None and currency:
+                    native[currency] = round(native.get(currency, 0.0) + float(amount), 6)
+        result["confirmed_cost_usd"] = round(result["confirmed_cost_usd"], 6)
+        result["estimated_cost_usd"] = round(result["estimated_cost_usd"], 6)
+        return result
     finally:
         db.close()
 
@@ -218,19 +297,29 @@ def _route_counts(path: Path) -> Dict[str, int]:
 
 
 def sync_snapshot(db_path: Path, router_db: Path, hermes_db: Path) -> str:
-    actual_cost, unpriced = _hermes_cost_snapshot(hermes_db)
+    costs = _hermes_cost_snapshot(hermes_db, pricing.load_price_table(db_path))
     routes = _route_counts(router_db)
+    # ``actual_cost_usd`` carries the real measured USD cost: provider-confirmed
+    # billing plus tokens priced against evidence-backed ``model_prices`` (USD
+    # rows only — native-currency amounts stay in ``estimated_cost_native`` and
+    # are never converted with an invented FX rate).  The confirmed/estimated
+    # split is kept in dedicated columns so the mix stays auditable.
+    actual_cost = round(costs["confirmed_cost_usd"] + costs["estimated_cost_usd"], 6)
     snapshot_id = str(uuid.uuid4())
     db = connect(db_path)
     try:
         db.execute(
             """INSERT INTO usage_snapshots
                (snapshot_id,source,actual_cost_usd,unpriced_sessions,completed_security_runs,
-                completed_article_jobs,completed_video_jobs,captured_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                completed_article_jobs,completed_video_jobs,captured_at,
+                confirmed_cost_usd,estimated_cost_usd,estimated_cost_native,priced_sessions)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                snapshot_id, "hermes+company-router", actual_cost, unpriced,
+                snapshot_id, "hermes+company-router", actual_cost, costs["unpriced_sessions"],
                 routes["security"], routes["article"], routes["video"], utc_now(),
+                costs["confirmed_cost_usd"], costs["estimated_cost_usd"],
+                json.dumps(costs["estimated_cost_native"], ensure_ascii=False),
+                costs["priced_sessions"],
             ),
         )
         db.commit()

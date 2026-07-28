@@ -1162,6 +1162,21 @@ def proposals_for_review(db_path: Path, review_id: str) -> list[Dict[str, Any]]:
         db.close()
 
 
+def known_proposal_ids(db_path: Path = DEFAULT_DB) -> set[str]:
+    """Return every proposal id on record (any status, superseded included).
+
+    A review's proposals may legitimately cite a *prior* proposal — e.g. to
+    confirm whether an already-approved item was actually executed. Those
+    cross-references must not be mistaken for hallucinated run ids and reject the
+    whole review.
+    """
+    db = connect(db_path)
+    try:
+        return {str(row["proposal_id"]) for row in db.execute("SELECT proposal_id FROM improvement_proposals")}
+    finally:
+        db.close()
+
+
 def _compact_message_text(value: Any, limit: int) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if limit > 0 and len(text) > limit:

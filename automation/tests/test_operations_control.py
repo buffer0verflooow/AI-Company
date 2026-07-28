@@ -18,6 +18,7 @@ from automation.operations_control import (
     escalate_stale_proposals,
     format_review_message,
     import_proposals,
+    known_proposal_ids,
     reap_experiments,
     reap_stale_runs,
     record_outcome,
@@ -263,6 +264,22 @@ class TVCRGovernanceTests(unittest.TestCase):
             proposal_id = import_proposals(db_path, review_id, self._proposal_payload())[0]
             result = apply_user_decision(db_path, f"不批准 {proposal_id}", actor="user-1")
             self.assertEqual(result["decision"], "rejected")
+
+    def test_known_proposal_ids_returns_all_recorded_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            start, end = business_period(date(2026, 7, 15))
+            review_id = create_review(db_path, review_day=date(2026, 7, 15), period_start=start, period_end=end)
+            ids = import_proposals(db_path, review_id, self._proposal_payload())
+            self.assertEqual(known_proposal_ids(db_path), set(ids))
+            self.assertIn("TVCR-P-20260715-01", known_proposal_ids(db_path))
+
+    def test_known_proposal_ids_empty_without_proposals(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "operations.db"
+            start, end = business_period(date(2026, 7, 15))
+            create_review(db_path, review_day=date(2026, 7, 15), period_start=start, period_end=end)
+            self.assertEqual(known_proposal_ids(db_path), set())
 
 
 class ExperimentStateMachineTests(unittest.TestCase):

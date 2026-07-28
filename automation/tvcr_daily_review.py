@@ -17,12 +17,14 @@ try:
     from . import pricing
     from .operations_control import (
         DEFAULT_TIMEZONE,
+        PROPOSAL_ID_RE,
         auto_approve_proposals,
         backfill_outcomes,
         business_period,
         create_review,
         escalate_stale_proposals,
         import_proposals,
+        known_proposal_ids,
         latest_origin,
         previous_business_day,
         runs_for_period,
@@ -34,12 +36,14 @@ except ImportError:
     import pricing  # type: ignore[no-redef]
     from operations_control import (
         DEFAULT_TIMEZONE,
+        PROPOSAL_ID_RE,
         auto_approve_proposals,
         backfill_outcomes,
         business_period,
         create_review,
         escalate_stale_proposals,
         import_proposals,
+        known_proposal_ids,
         latest_origin,
         previous_business_day,
         runs_for_period,
@@ -172,9 +176,13 @@ def build_evidence_pack(
             "unpriced_runs": line_cost["unpriced_runs"],
             "unpriced_token_volume": line_cost["unpriced_token_volume"],
             "business_outcomes_measured": len(measured),
-            "accepted": sum(1 for item in measured if item["accepted"] == 1),
-            "published": sum(1 for item in measured if item["published"] == 1),
-            "reach": sum(int(item["reach"] or 0) for item in measured),
+            # Adoption/reach are only defined once at least one run is measured.
+            # With zero measured runs the outcome is UNKNOWN, not zero — keep the
+            # fields null so a reviewer never reads an unmeasured line as
+            # "business value = 0" (unmeasured must stay unmeasured, not become 0).
+            "accepted": sum(1 for item in measured if item["accepted"] == 1) if measured else None,
+            "published": sum(1 for item in measured if item["published"] == 1) if measured else None,
+            "reach": sum(int(item["reach"] or 0) for item in measured) if measured else None,
             "revenue_amounts_by_currency": {},
         }
 
@@ -251,8 +259,18 @@ def build_prompt(review_id: str, evidence_path: Path, report_path: Path, proposa
 """
 
 
-def validate_outputs(evidence: Dict[str, Any], report_text: str, payload: Dict[str, Any]) -> list[str]:
-    """Reject common business-accounting errors before a report can be delivered."""
+def validate_outputs(
+    evidence: Dict[str, Any],
+    report_text: str,
+    payload: Dict[str, Any],
+    proposal_ids: set[str] | None = None,
+) -> list[str]:
+    """Reject common business-accounting errors before a report can be delivered.
+
+    ``proposal_ids`` are prior proposal ids on record; a proposal may cite one as
+    evidence (e.g. "confirm the already-approved item shipped"), so such a
+    reference is valid context, not a hallucinated run id.
+    """
     errors: list[str] = []
     proposals = payload.get("proposals")
     if not isinstance(proposals, list):
@@ -272,6 +290,7 @@ def validate_outputs(evidence: Dict[str, Any], report_text: str, payload: Dict[s
         if any(phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")):
             errors.append("delivered technical results were incorrectly described as not reaching the user")
     known_run_ids = {str(run.get("run_id") or "") for run in evidence.get("runs") or []}
+    known_proposals = proposal_ids or set()
     for index, proposal in enumerate(proposals, 1):
         if not isinstance(proposal, dict):
             errors.append(f"proposal {index} must be an object")
@@ -282,8 +301,20 @@ def validate_outputs(evidence: Dict[str, Any], report_text: str, payload: Dict[s
         scopes = proposal.get("change_scopes")
         if scopes == ["technology"] or scopes == ["code"]:
             errors.append(f"proposal {index} jumps directly to a technology-only change")
-        evidence_ids = proposal.get("evidence_run_ids") or []
-        unknown = [item for item in evidence_ids if str(item) not in known_run_ids]
+        evidence_ids = proposal.get("evidence_run_ids")
+        if not isinstance(evidence_ids, list):
+            evidence_ids = []
+        unknown: list[Any] = []
+        for item in evidence_ids:
+            ref = str(item).strip()
+            if ref in known_run_ids:
+                continue
+            # A prior proposal cited as evidence is valid context. Accept ids we
+            # still hold, and — for superseded or already-pruned proposals no
+            # longer on record — any proposal-shaped id, rather than hard-failing.
+            if ref in known_proposals or PROPOSAL_ID_RE.fullmatch(ref):
+                continue
+            unknown.append(item)
         if unknown:
             errors.append(f"proposal {index} references unknown run ids: {unknown}")
     return errors
@@ -382,6 +413,7 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
             evidence,
             report_path.read_text(encoding="utf-8"),
             proposal_payload,
+            proposal_ids=known_proposal_ids(db_path),
         )
         if validation_errors:
             raise ValueError("; ".join(validation_errors))

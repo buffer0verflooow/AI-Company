@@ -74,6 +74,93 @@ class TVCRDailyReviewTests(unittest.TestCase):
         errors = validate_outputs(evidence, "实际模型成本为$0。", payload)
         self.assertIn("unknown model cost", errors[0])
 
+    def test_unmeasured_line_stays_null_not_zero(self):
+        # Regression: an all-unmeasured line used to report accepted/published/reach
+        # as 0, which read as "business value = 0" and got the review rejected.
+        pack = build_evidence_pack(
+            [
+                {"run_id": "a1", "product_line": "article-production", "status": "completed",
+                 "outcome_status": "unmeasured", "artifacts_json": "[]", "evidence_json": "{}"},
+                {"run_id": "a2", "product_line": "article-production", "status": "completed",
+                 "outcome_status": "unmeasured", "artifacts_json": "[]", "evidence_json": "{}"},
+            ],
+            review_day=date(2026, 7, 22),
+            period_start="2026-07-21T16:00:00+00:00",
+            period_end="2026-07-22T16:00:00+00:00",
+            thresholds={},
+        )
+        summary = pack["line_summaries"]["article-production"]
+        self.assertIsNone(summary["accepted"])
+        self.assertIsNone(summary["published"])
+        self.assertIsNone(summary["reach"])
+        self.assertEqual(summary["business_outcomes_measured"], 0)
+
+    def test_measured_line_reports_numeric_outcomes(self):
+        pack = build_evidence_pack(
+            [
+                {"run_id": "a1", "product_line": "article-production", "status": "completed",
+                 "outcome_status": "measured", "accepted": 1, "published": 1, "reach": 120,
+                 "artifacts_json": "[]", "evidence_json": "{}"},
+                {"run_id": "a2", "product_line": "article-production", "status": "completed",
+                 "outcome_status": "unmeasured", "artifacts_json": "[]", "evidence_json": "{}"},
+            ],
+            review_day=date(2026, 7, 22),
+            period_start="2026-07-21T16:00:00+00:00",
+            period_end="2026-07-22T16:00:00+00:00",
+            thresholds={},
+        )
+        summary = pack["line_summaries"]["article-production"]
+        self.assertEqual(summary["business_outcomes_measured"], 1)
+        self.assertEqual(summary["accepted"], 1)
+        self.assertEqual(summary["published"], 1)
+        self.assertEqual(summary["reach"], 120)
+
+    def test_validator_accepts_prior_proposal_reference(self):
+        # A proposal may cite an already-approved prior proposal as evidence
+        # (e.g. "confirm it was executed"); that must not be a hard failure.
+        evidence = {"runs": [{"run_id": "run-1", "outcome_status": "measured"}]}
+        payload = {"proposals": [{
+            "title": "确认已批准提案是否执行", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["process"],
+            "evidence_run_ids": ["run-1", "TVCR-P-20260715-03", "TVCR-P-20260716-01"],
+        }]}
+        errors = validate_outputs(
+            evidence, "report", payload,
+            proposal_ids={"TVCR-P-20260715-03", "TVCR-P-20260716-01"},
+        )
+        self.assertEqual(errors, [])
+
+    def test_validator_accepts_superseded_proposal_shaped_reference(self):
+        # A superseded/pruned proposal is no longer in the id set, but its
+        # proposal-shaped id still must not be read as a hallucinated run id.
+        evidence = {"runs": [{"run_id": "run-1", "outcome_status": "measured"}]}
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["process"], "evidence_run_ids": ["TVCR-P-20251231-09"],
+        }]}
+        errors = validate_outputs(evidence, "report", payload, proposal_ids=set())
+        self.assertEqual(errors, [])
+
+    def test_validator_still_rejects_hallucinated_run_ids(self):
+        evidence = {"runs": [{"run_id": "run-1", "outcome_status": "measured"}]}
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["process"], "evidence_run_ids": ["run-1", "made-up-run-999"],
+        }]}
+        errors = validate_outputs(evidence, "report", payload, proposal_ids=set())
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unknown run ids", errors[0])
+        self.assertIn("made-up-run-999", errors[0])
+
+    def test_validator_tolerates_non_list_evidence_ids(self):
+        evidence = {"runs": [{"run_id": "run-1", "outcome_status": "measured"}]}
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["process"], "evidence_run_ids": None,
+        }]}
+        errors = validate_outputs(evidence, "report", payload)
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

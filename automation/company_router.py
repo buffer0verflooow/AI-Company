@@ -608,6 +608,129 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     )
 
 
+# Routes the LLM fallback may promote a message into.  Each maps to the explicit
+# prefix the deterministic classifier already understands, so a fallback result
+# is re-run through classify_message rather than hand-building a RouteDecision —
+# security stays behind the same scope-authorization gate.
+_LLM_FALLBACK_PREFIX = {
+    "security": "/security ",
+    "article": "/article ",
+    "video": "/video ",
+    "company": "/company ",
+}
+_LLM_FALLBACK_JSON_RE = re.compile(r"\{[^{}]*\"route\"[^{}]*\}", re.S)
+
+
+def _parse_llm_fallback(stdout: str) -> Optional[Dict[str, Any]]:
+    """Pull the last {"route":...,"confidence":...} object out of an LLM reply."""
+    if not stdout:
+        return None
+    matches = _LLM_FALLBACK_JSON_RE.findall(stdout)
+    for chunk in reversed(matches):
+        try:
+            payload = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "route" in payload:
+            return payload
+    return None
+
+
+def _llm_fallback_classify(message: str, config: Dict[str, Any], *, timeout: int = 45) -> Optional[Dict[str, Any]]:
+    """One cheap Hermes turn to classify a message the keyword router was unsure of.
+
+    Returns ``{"route": <security|article|video|company|none>, "confidence": float}``
+    or ``None`` when the call fails or its output is unparseable.  The turn runs
+    with ``COMPANY_ROUTER_BYPASS=1`` so the classifier call is never itself routed.
+    """
+    prompt = (
+        f"{INTERNAL_WORKER_PREFIX}\n"
+        "你是公司消息路由器的低置信兜底分类器。只判断下面这条用户消息应交给哪条产品线，"
+        "不要执行任务，也不要追问。\n"
+        "候选：security（安全研究/漏洞）、article（公众号文章生产）、video（视频生产）、"
+        "company（公司经营执行）、none（闲聊/信息查询/无明确生产动作）。\n"
+        "只输出一行 JSON：{\"route\":\"...\",\"confidence\":0-1 之间的小数}。\n"
+        f"用户消息：{message}"
+    )
+    env = dict(os.environ)
+    env["COMPANY_ROUTER_BYPASS"] = "1"
+    cmd = [
+        str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
+        "--source", "tool", "--max-turns", "1",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(config.get("hermes_repo") or Path.cwd()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=int(config.get("llm_fallback_timeout_seconds", timeout)),
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_llm_fallback(proc.stdout)
+
+
+def classify_with_fallback(
+    message: str,
+    config: Dict[str, Any],
+    authorized_targets: Iterable[str] = (),
+    *,
+    fallback=None,
+) -> RouteDecision:
+    """Keyword classification, backed by a cheap LLM tie-break when unsure.
+
+    When the deterministic classifier lands on its low-confidence "unrecognised"
+    verdict, ask an LLM which product line the message belongs to.  A confident
+    answer is applied by re-running ``classify_message`` with that route's
+    explicit prefix, so every downstream guard (target extraction, security
+    authorization, external-action approval) still applies.  Any failure,
+    ``none`` verdict, or low LLM confidence keeps the original decision.
+    """
+    decision = classify_message(message, authorized_targets)
+    if not config.get("llm_fallback_enabled", True):
+        return decision
+    threshold = float(config.get("llm_fallback_confidence", 0.5))
+    # Only the genuine "unrecognised" verdict (0.45) is worth a paid tie-break.
+    # Empty/synthetic turns (0.0) and messages requesting external actions are
+    # left exactly as the deterministic classifier decided.
+    if decision.confidence <= 0.0 or decision.confidence >= threshold or decision.external_action:
+        return decision
+    if not " ".join((message or "").split()):
+        return decision
+
+    classifier = fallback or _llm_fallback_classify
+    try:
+        result = classifier(message, config)
+    except Exception:
+        return decision
+    if not isinstance(result, dict):
+        return decision
+    route = str(result.get("route") or "").strip().lower()
+    try:
+        llm_confidence = float(result.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return decision
+    prefix = _LLM_FALLBACK_PREFIX.get(route)
+    if not prefix or llm_confidence < threshold:
+        return decision
+
+    upgraded = classify_message(prefix + message, authorized_targets)
+    if upgraded.action in {"main_agent", "approval_required"} and route != "security":
+        # The LLM chose a line the explicit prefix still would not auto-dispatch
+        # (e.g. an external action surfaced): trust the deterministic outcome.
+        return upgraded
+    return RouteDecision(**{
+        **asdict(upgraded),
+        "confidence": min(llm_confidence, upgraded.confidence),
+        "reason": f"低置信 LLM 兜底改判为 {route}：{upgraded.reason}",
+    })
+
+
 class RouterState:
     def __init__(self, path: str):
         self.path = Path(path)
@@ -1388,7 +1511,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
         )}
 
     targets = extract_target(message)
-    decision = classify_message(message, config.get("authorized_targets") or [])
+    decision = classify_with_fallback(message, config, config.get("authorized_targets") or [])
     dedup_key = _build_dedup_key(session_id, targets, decision.intent)
     if decision.action == "dispatch_swarm" and not EXPLICIT_NEW_SWARM_RE.search(message):
         dedup_minutes = int(config.get("swarm_dedup_window_minutes", 10))
@@ -1550,6 +1673,7 @@ def main() -> int:
     parser.add_argument("--session-id", default="cli-test")
     parser.add_argument("--platform", default="cli")
     parser.add_argument("--dispatch", action="store_true", help="Submit eligible security message")
+    parser.add_argument("--llm-fallback", action="store_true", help="Allow the low-confidence LLM tie-break")
     args = parser.parse_args()
     config = load_config(Path(args.config))
 
@@ -1557,7 +1681,10 @@ def main() -> int:
         print(json.dumps(handle_hook(parse_hook_stdin(), config), ensure_ascii=False))
         return 0
 
-    decision = classify_message(args.message, config.get("authorized_targets") or [])
+    if args.llm_fallback:
+        decision = classify_with_fallback(args.message, config, config.get("authorized_targets") or [])
+    else:
+        decision = classify_message(args.message, config.get("authorized_targets") or [])
     if not args.dispatch:
         print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
         return 0

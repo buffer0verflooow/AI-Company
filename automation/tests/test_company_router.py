@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from automation.company_router import RouterState, build_context, classify_message, handle_hook, select_company_result, submit_security
+from automation.company_router import RouterState, build_context, classify_message, classify_with_fallback, handle_hook, select_company_result, submit_security
 from automation.operations_control import business_period, create_review, import_proposals
 from datetime import date
 
@@ -436,6 +436,74 @@ class SwarmIntegrationTests(unittest.TestCase):
             ],
         }
         self.assertEqual(select_company_result(result), "校正后的证据结论")
+
+
+class LowConfidenceFallbackTests(unittest.TestCase):
+    def _ambiguous(self):
+        # A terse imperative with no product-line vocabulary lands on the
+        # deterministic 0.45 "unrecognised" verdict.
+        decision = classify_message("把上次那个东西继续弄一下")
+        self.assertLess(decision.confidence, 0.5)
+        self.assertEqual(decision.action, "main_agent")
+        return "把上次那个东西继续弄一下"
+
+    def test_confident_llm_verdict_promotes_route(self):
+        message = self._ambiguous()
+        upgraded = classify_with_fallback(
+            message, {},
+            fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
+        )
+        self.assertEqual(upgraded.route, "article")
+        self.assertEqual(upgraded.action, "dispatch_article")
+        self.assertIn("兜底", upgraded.reason)
+
+    def test_none_verdict_keeps_main_agent(self):
+        message = self._ambiguous()
+        decision = classify_with_fallback(
+            message, {},
+            fallback=lambda msg, cfg: {"route": "none", "confidence": 0.9},
+        )
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_low_llm_confidence_is_ignored(self):
+        message = self._ambiguous()
+        decision = classify_with_fallback(
+            message, {},
+            fallback=lambda msg, cfg: {"route": "article", "confidence": 0.30},
+        )
+        self.assertEqual(decision.action, "main_agent")
+
+    def test_confident_keyword_match_never_calls_llm(self):
+        calls = []
+
+        def _fallback(msg, cfg):
+            calls.append(msg)
+            return {"route": "security", "confidence": 0.99}
+
+        decision = classify_with_fallback("写一篇关于 JWT 安全的公众号文章", {}, fallback=_fallback)
+        self.assertEqual(decision.route, "article")
+        self.assertEqual(calls, [])  # keyword confidence 0.86 >= threshold
+
+    def test_fallback_cannot_bypass_security_authorization(self):
+        # Even if the LLM says "security" for an external target, the re-run
+        # through classify_message still requires scope authorization.
+        decision = classify_with_fallback(
+            "顺手把 acme.com 弄一下", {},
+            authorized_targets=(),
+            fallback=lambda msg, cfg: {"route": "security", "confidence": 0.95},
+        )
+        if decision.route == "security":
+            self.assertIn(decision.action, {"approval_required", "dispatch_swarm"})
+
+    def test_disabled_flag_skips_fallback(self):
+        message = self._ambiguous()
+        called = []
+        decision = classify_with_fallback(
+            message, {"llm_fallback_enabled": False},
+            fallback=lambda msg, cfg: called.append(1) or {"route": "article", "confidence": 0.9},
+        )
+        self.assertEqual(decision.action, "main_agent")
+        self.assertEqual(called, [])
 
 
 if __name__ == "__main__":

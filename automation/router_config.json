@@ -46,6 +46,9 @@
   "cron_delivery_recovery_jobs": ["company-daily-auto-fix", "company-tvcr-daily-review"],
   "stale_run_minutes": 15,
   "max_runner_restarts": 2,
+  "llm_fallback_enabled": true,
+  "llm_fallback_confidence": 0.5,
+  "llm_fallback_timeout_seconds": 45,
   "security": {
     "min_finding_tokens": 200,
     "no_finding_patterns": [

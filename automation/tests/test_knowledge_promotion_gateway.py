@@ -138,6 +138,38 @@ class KnowledgePromotionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 promote(gate, candidate["candidate_id"], wiki)
 
+    def test_malformed_trust_and_tags_do_not_crash_or_grant_disclosure(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            self._source(source, [(
+                "k7", 3, "technique", "Generic lesson.", "Lesson", "general", "understand",
+                "[]", "active", json.dumps({"public": True}), "2026-07-15",
+            )])
+            counts = scan(source, gate)
+            self.assertEqual(counts["needs_validation"], 1)
+            candidate = list_candidates(gate)[0]
+            self.assertEqual(candidate["disclosure_status"], "unknown")
+
+    def test_frontmatter_quotes_reviewer_with_newline(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            wiki = Path(td) / "wiki"
+            self._source(source, [(
+                "k8", 3, "technique", "Generic lesson.", "Lesson", "general", "understand",
+                json.dumps({"base_confidence": 0.9, "cross_validation": 1.0}),
+                "active", json.dumps(["public"]), "2026-07-15",
+            )])
+            scan(source, gate)
+            candidate = list_candidates(gate)[0]
+            reviewed = Path(td) / "reviewed.md"
+            reviewed.write_text("# Reviewed lesson", encoding="utf-8")
+            approve(gate, candidate["candidate_id"], "reviewer\nstatus: hacked", reviewed, "public")
+            text = promote(gate, candidate["candidate_id"], wiki).read_text(encoding="utf-8")
+            self.assertNotIn("\nstatus: hacked\n", text)
+            self.assertIn('approved_by: "reviewer\\nstatus: hacked"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

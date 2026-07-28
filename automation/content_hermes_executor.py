@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -14,9 +13,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 try:
-    from ._safe_io import locked_atomic_write_text, sqlite_connection
+    from ._safe_io import locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
 except ImportError:  # direct script execution
-    from _safe_io import locked_atomic_write_text, sqlite_connection
+    from _safe_io import locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
 
 
 WORKSPACE = Path("/home/pwn/workspace")
@@ -215,7 +214,7 @@ def build_worker_invocation(
         # ``skills`` toolset (which also contains global skill mutation APIs).
         command.extend(["--skills", "humanizer"])
 
-    env = dict(os.environ)
+    env, _dropped = scrub_environment()
     # The router hook is global and runs inside this process too.  These two
     # markers make the ownership boundary explicit even on older Hermes builds
     # that do not persist a session source in the hook envelope.
@@ -233,7 +232,9 @@ def main() -> int:
     job_dir = Path(args.job_dir).resolve()
     request_path = job_dir / "request.json"
     try:
-        request = json.loads(request_path.read_text(encoding="utf-8"))
+        request = json.loads(read_text_limited(request_path, max_bytes=2 * 1024 * 1024))
+        if not isinstance(request, dict):
+            raise ValueError("request root must be an object")
         if request.get("route") not in {"company", "article", "video"}:
             raise ValueError(f"unsupported content route: {request.get('route')!r}")
     except Exception as exc:
@@ -272,7 +273,8 @@ def main() -> int:
     try:
         artifacts = [
             str(path) for path in sorted(job_dir.iterdir())
-            if path.is_file() and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log"}
+            if not path.is_symlink() and path.is_file()
+            and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log"}
         ]
     except OSError as exc:
         write_status(job_dir, {
@@ -288,7 +290,7 @@ def main() -> int:
     worker_result: Dict[str, Any] = {}
     if request["route"] == "company" and not missing:
         try:
-            value = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+            value = json.loads(read_text_limited(job_dir / "result.json", max_bytes=2 * 1024 * 1024))
             if not isinstance(value, dict):
                 raise ValueError("result.json must contain an object")
             worker_result = value

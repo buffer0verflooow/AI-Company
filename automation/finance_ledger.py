@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import uuid
@@ -15,10 +16,10 @@ from typing import Any, Dict, Optional
 
 try:
     from . import pricing
-    from ._safe_io import sqlite_uri
+    from ._safe_io import read_text_limited, sqlite_uri
 except ImportError:  # direct ``python automation/finance_ledger.py`` invocation
     import pricing  # type: ignore[no-redef]
-    from _safe_io import sqlite_uri
+    from _safe_io import read_text_limited, sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -154,7 +155,11 @@ def add_actual(
 ) -> str:
     if kind not in {"revenue", "expense"}:
         raise ValueError("kind must be revenue or expense")
-    if amount < 0:
+    try:
+        amount_value = float(amount)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("amount must be a finite non-negative number") from exc
+    if not math.isfinite(amount_value) or amount_value < 0:
         raise ValueError("amount must be non-negative")
     if not evidence_path.is_file():
         raise ValueError("an evidence file is required for actual transactions")
@@ -167,7 +172,7 @@ def add_actual(
                 description,source_ref,evidence_path,evidence_sha256,created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                transaction_id, occurred_at, product_line, kind, category, float(amount),
+                transaction_id, occurred_at, product_line, kind, category, amount_value,
                 currency.upper(), description, source_ref, str(evidence_path.resolve()),
                 sha256_file(evidence_path), utc_now(),
             ),
@@ -181,7 +186,7 @@ def add_actual(
 def sync_forecast(db_path: Path, submissions: Path) -> bool:
     if not submissions.is_file():
         return False
-    content = submissions.read_text(encoding="utf-8")
+    content = read_text_limited(submissions, max_bytes=10 * 1024 * 1024)
     match = BOUNTY_RANGE_RE.search(content)
     if not match:
         return False
@@ -256,8 +261,15 @@ def _hermes_cost_snapshot(
         native = result["estimated_cost_native"]
         for row in db.execute(f"SELECT {','.join(select_cols)} FROM sessions"):
             if str(row["cost_status"] or "").lower() in ACTUAL_COST_STATUSES:
-                result["confirmed_cost_usd"] += float(row["estimated_cost_usd"] or 0)
-                result["priced_sessions"] += 1
+                try:
+                    confirmed = float(row["estimated_cost_usd"])
+                except (TypeError, ValueError, OverflowError):
+                    confirmed = float("nan")
+                if math.isfinite(confirmed) and confirmed >= 0:
+                    result["confirmed_cost_usd"] += confirmed
+                    result["priced_sessions"] += 1
+                else:
+                    result["unpriced_sessions"] += 1
                 continue
             tokens = {column: row[column] for column in token_cols}
             est = pricing.estimate_cost(row["model"] if has_model else "", tokens, price_table)
@@ -284,7 +296,10 @@ def _route_counts(path: Path) -> Dict[str, int]:
     counts = {"security": 0, "article": 0, "video": 0}
     if not path.is_file():
         return counts
-    db = sqlite3.connect(path)
+    try:
+        db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True)
+    except sqlite3.Error:
+        return counts
     try:
         rows = db.execute(
             """SELECT route,COUNT(*) FROM route_events

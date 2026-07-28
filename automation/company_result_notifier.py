@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sqlite3
 import sys
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -26,7 +28,7 @@ try:
         swarm_command,
         utc_now,
     )
-    from ._safe_io import locked_append_text
+    from ._safe_io import locked_append_text, read_text_limited, sqlite_uri
     from .notification_outbox import (
         append_dead_letter as append_outbox_dead_letter,
         enqueue as enqueue_outbox,
@@ -50,7 +52,7 @@ except ImportError:  # Direct execution from automation/.
         swarm_command,
         utc_now,
     )
-    from _safe_io import locked_append_text
+    from _safe_io import locked_append_text, read_text_limited, sqlite_uri
     from notification_outbox import (
         append_dead_letter as append_outbox_dead_letter,
         enqueue as enqueue_outbox,
@@ -64,6 +66,8 @@ except ImportError:  # Direct execution from automation/.
 
 DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
 MirrorFn = Callable[[Dict[str, str], str], bool]
+SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+MAX_CRON_OUTPUT_BYTES = 5 * 1024 * 1024
 
 
 def _operations_api():
@@ -229,15 +233,21 @@ def list_terminal_deliveries(config: Dict[str, Any], limit: int = 50) -> list[Di
     path = _delivery_fallback_path(config)
     if not path.is_file():
         return []
-    records: list[Dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            records.append(value)
-    return records[-max(0, limit):][::-1]
+    if limit <= 0:
+        return []
+    records: deque[Dict[str, Any]] = deque(maxlen=limit)
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    records.append(value)
+    except OSError:
+        return []
+    return list(reversed(records))
 
 
 def _terminal_reason(config: Dict[str, Any], origin: Dict[str, str]) -> str:
@@ -353,8 +363,8 @@ def _read_cron_jobs(config: Dict[str, Any]) -> list[Dict[str, Any]]:
     configured = str(config.get("cron_jobs_path") or "").strip()
     path = Path(configured) if configured else Path("/home/pwn/.hermes/cron/jobs.json")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return []
     if isinstance(payload, dict):
         payload = payload.get("jobs")
@@ -374,11 +384,29 @@ def _cron_run_datetime(value: str) -> Optional[datetime]:
 
 
 def _find_cron_output(config: Dict[str, Any], job_id: str, last_run_at: str) -> Optional[Path]:
-    root = _cron_output_root(config) / job_id
+    if not SAFE_ID_RE.fullmatch(str(job_id or "")):
+        return None
+    output_root = _cron_output_root(config).resolve()
+    root = output_root / job_id
+    if root.is_symlink():
+        return None
+    try:
+        root.resolve(strict=False).relative_to(output_root)
+    except (OSError, ValueError):
+        return None
     if not root.is_dir():
         return None
     run_at = _cron_run_datetime(last_run_at)
-    candidates = sorted(root.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    candidates_with_mtime: list[tuple[float, Path]] = []
+    for item in root.glob("*.md"):
+        if item.is_symlink() or not item.is_file():
+            continue
+        try:
+            item.resolve().relative_to(root.resolve())
+            candidates_with_mtime.append((item.stat().st_mtime, item))
+        except (OSError, ValueError):
+            continue
+    candidates = [item for _, item in sorted(candidates_with_mtime, key=lambda pair: pair[0], reverse=True)]
     if not candidates:
         return None
     if run_at is None:
@@ -396,8 +424,8 @@ def _find_cron_output(config: Dict[str, Any], job_id: str, last_run_at: str) -> 
 def _extract_cron_response(path: Path) -> str:
     """Extract the report portion from Hermes' saved cron transcript."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = read_text_limited(path, max_bytes=MAX_CRON_OUTPUT_BYTES, errors="replace")
+    except (OSError, ValueError):
         return ""
     # Agent-driven jobs save the prompt and final answer under this marker.
     marker = "\n## Response\n"
@@ -442,7 +470,7 @@ def _cron_recovery_payload(
                 from .operations_control import format_review_message
             except ImportError:
                 from operations_control import format_review_message
-            db = sqlite3.connect(operations_db)
+            db = sqlite3.connect(sqlite_uri(operations_db, mode="ro"), uri=True)
             db.row_factory = sqlite3.Row
             try:
                 row = db.execute(
@@ -501,7 +529,7 @@ def _sync_tvcr_review_from_outbox(config: Dict[str, Any], row: Dict[str, Any]) -
     db_path = _operations_db_path(config)
     if not review_id or db_path is None:
         return
-    db = sqlite3.connect(db_path)
+    db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
     try:
         current = db.execute(
             "SELECT delivered,delivery_attempts FROM tvcr_reviews WHERE review_id=?",
@@ -772,8 +800,11 @@ def process_once(
                     and not runner_is_alive(row["runner_pid"], run_id)
                     and restarts < int(config.get("max_runner_restarts", 2))
                 ):
-                    decision = RouteDecision(**json.loads(row["decision_json"]))
                     try:
+                        raw_decision = json.loads(row["decision_json"])
+                        if not isinstance(raw_decision, dict):
+                            raise ValueError("decision_json root must be an object")
+                        decision = RouteDecision(**raw_decision)
                         pid = launch_runner(config, run_id, decision.intent)
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, error="")
                         summary["restarted"] += 1
@@ -886,12 +917,22 @@ def process_once(
             summary["checked"] += 1
             event_id = str(row["route_event_id"])
             run_id = str(row["run_id"])
-            status_path = content_job_path(config, run_id) / "status.json"
+            try:
+                status_path = content_job_path(config, run_id) / "status.json"
+            except ValueError as exc:
+                state.update(event_id, status="failed", error=f"invalid content run path: {exc}")
+                summary["failed"] += 1
+                continue
             payload: Dict[str, Any] = {}
             if status_path.exists():
                 try:
-                    payload = json.loads(status_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
+                    if status_path.is_symlink():
+                        raise ValueError("content status file may not be a symlink")
+                    value = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+                    if not isinstance(value, dict):
+                        raise ValueError("content status root must be an object")
+                    payload = value
+                except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
                     state.update(event_id, error=f"content status query failed: {exc}")
                     summary["failed"] += 1
                     continue

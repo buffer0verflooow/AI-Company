@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from typing import Any, Dict
+
+try:
+    from ._safe_io import scrub_environment
+except ImportError:  # direct script execution
+    from _safe_io import scrub_environment
 
 
 WORKSPACE = "/home/pwn/workspace"
@@ -49,7 +53,11 @@ def main() -> int:
         return 0
 
     prompt = build_prompt(payload)
-    env = dict(os.environ)
+    env, _dropped = scrub_environment()
+    env["COMPANY_ROUTER_BYPASS"] = "1"
+    env["HERMES_SESSION_SOURCE"] = "tool"
+    env["HERMES_WRITE_SAFE_ROOT"] = WORKSPACE
+    env["TERMINAL_CWD"] = WORKSPACE
     cmd = [
         "hermes", "chat", "-q", prompt, "-Q",
         "--source", "tool", "--max-turns", "40",

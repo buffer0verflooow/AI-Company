@@ -9,14 +9,14 @@ not each implement a subtly different version.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
 import tempfile
-import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Collection, Iterator, Optional
+from typing import Collection, Iterator, Mapping, Optional
 from urllib.parse import quote
 
 try:  # pragma: no cover - Windows is not the deployment platform
@@ -26,6 +26,27 @@ except ImportError:  # pragma: no cover
 
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SECRET_ENV_RE = re.compile(
+    r"(?:^|_)(?:SECRET|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE_KEY|ACCESS_KEY|"
+    r"API_KEY|KEY|TOKEN|BEARER|COOKIE|AUTH|AUTHORIZATION|DSN)(?:_|$)|"
+    r"(?:DATABASE|REDIS)_URL$",
+    re.I,
+)
+SECRET_ENV_EXTRA = {
+    "WEIXIN_APP_ID",
+    "WEIXIN_APP_SECRET",
+    "WEIXIN_TOKEN",
+    "QQ_APP_ID",
+    "QQ_CLIENT_SECRET",
+    "DASHSCOPE_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+}
+URL_CREDENTIAL_RE = re.compile(r"://[^/@\s]+@")
 LOGGER = logging.getLogger(__name__)
 
 __all__ = [
@@ -34,8 +55,11 @@ __all__ = [
     "locked_append_text",
     "locked_atomic_write_text",
     "quote_identifier",
+    "read_text_limited",
+    "scrub_environment",
     "sqlite_connection",
     "sqlite_uri",
+    "stream_contains",
 ]
 
 
@@ -71,6 +95,62 @@ def sqlite_uri(path: Path, *, mode: str = "ro") -> str:
     return f"file:{encoded}?mode={mode}"
 
 
+def scrub_environment(
+    base: Optional[Mapping[str, str]] = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Remove credentials before launching an isolated or untrusted worker."""
+
+    source = os.environ if base is None else base
+    env: dict[str, str] = {}
+    dropped: list[str] = []
+    for key, value in source.items():
+        if (
+            key in SECRET_ENV_EXTRA
+            or SECRET_ENV_RE.search(key)
+            or URL_CREDENTIAL_RE.search(str(value))
+        ):
+            dropped.append(key)
+            continue
+        env[str(key)] = str(value)
+    return env, sorted(dropped)
+
+
+def read_text_limited(
+    path: Path,
+    *,
+    max_bytes: int,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+) -> str:
+    """Read a text file while rejecting content larger than *max_bytes*."""
+
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    with Path(path).open("rb") as stream:
+        payload = stream.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ValueError(f"file exceeds {max_bytes} bytes: {path}")
+    return payload.decode(encoding, errors)
+
+
+def stream_contains(path: Path, needle: bytes, *, chunk_size: int = 1024 * 1024) -> bool:
+    """Search a file without loading the whole transcript into memory."""
+
+    if not needle:
+        return True
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    overlap = max(0, len(needle) - 1)
+    previous = b""
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            combined = previous + chunk
+            if needle in combined:
+                return True
+            previous = combined[-overlap:] if overlap else b""
+    return False
+
+
 @contextmanager
 def file_lock(target: Path) -> Iterator[None]:
     """Serialize writes associated with *target* using a sibling lock file."""
@@ -97,6 +177,11 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode: Optional[int] = None
+    try:
+        existing_mode = path.stat().st_mode & 0o7777
+    except OSError:
+        pass
     temporary: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -111,8 +196,25 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        if existing_mode is not None:
+            os.chmod(temporary, existing_mode)
         os.replace(temporary, path)
         temporary = None
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    # Some network/virtual filesystems do not support syncing
+                    # directory descriptors.  The replace itself has already
+                    # succeeded, so do not report a false write failure.
+                    pass
+            finally:
+                os.close(directory_fd)
     finally:
         if temporary is not None:
             try:

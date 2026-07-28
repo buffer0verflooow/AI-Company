@@ -103,6 +103,15 @@ class MarketRadarTests(unittest.TestCase):
         self.assertEqual(records[0]["content_risk"], "prompt_injection")
         self.assertEqual(canonical_url("file:///etc/passwd"), "")
 
+    def test_canonical_url_rejects_credentials_and_private_network_literals(self):
+        self.assertEqual(canonical_url("https://user:pass@example.com/path"), "")
+        self.assertEqual(canonical_url("http://127.0.0.1/admin"), "")
+        self.assertEqual(canonical_url("http://10.1.2.3/admin"), "")
+
+    def test_non_object_query_is_rejected_before_enabled_filter(self):
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            run_radar({"enabled": True, "queries": ["not-an-object"]})
+
     def test_run_builds_only_multi_source_qualified_pulse(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

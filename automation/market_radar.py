@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
@@ -25,6 +26,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
+
+try:
+    from ._safe_io import atomic_write_text, read_text_limited
+except ImportError:  # direct script execution
+    from _safe_io import atomic_write_text, read_text_limited
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -55,7 +61,7 @@ def utc_now() -> str:
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
         raise ValueError("market radar config must be an object")
     endpoint = str(payload.get("endpoint") or ANYSEARCH_ENDPOINT)
@@ -93,12 +99,14 @@ def validate_queries(queries: Iterable[Dict[str, Any]]) -> None:
 
 def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    db.executescript(
-        """
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        db.executescript(
+            """
         CREATE TABLE IF NOT EXISTS market_radar_runs (
             run_id TEXT PRIMARY KEY,
             status TEXT NOT NULL DEFAULT 'running',
@@ -172,13 +180,17 @@ def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_market_pulses_queue
         ON market_pulses(status,score DESC,created_at);
-        """
-    )
-    signal_columns = {row[1] for row in db.execute("PRAGMA table_info(market_signals)")}
-    if "eligible_for_pulse" not in signal_columns:
-        db.execute("ALTER TABLE market_signals ADD COLUMN eligible_for_pulse INTEGER NOT NULL DEFAULT 1")
-    db.commit()
-    return db
+            """
+        )
+        signal_columns = {row[1] for row in db.execute("PRAGMA table_info(market_signals)")}
+        if "eligible_for_pulse" not in signal_columns:
+            db.execute("ALTER TABLE market_signals ADD COLUMN eligible_for_pulse INTEGER NOT NULL DEFAULT 1")
+        db.commit()
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -198,11 +210,17 @@ def anysearch_call(tool_name: str, arguments: Dict[str, Any], config: Dict[str, 
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(ANYSEARCH_ENDPOINT, data=payload, headers=headers, method="POST")
     opener = urllib.request.build_opener(_NoRedirect())
-    timeout = max(1, int(config.get("timeout_seconds", 30)))
-    max_bytes = max(4096, int(config.get("max_response_bytes", 2_000_000)))
+    timeout = min(120, max(1, int(config.get("timeout_seconds", 30))))
+    max_bytes = min(10 * 1024 * 1024, max(4096, int(config.get("max_response_bytes", 2_000_000))))
     try:
         with opener.open(request, timeout=timeout) as response:
             body = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = str(exc.reason or exc)
+        finally:
+            exc.close()
+        raise RuntimeError(f"AnySearch HTTP error {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"AnySearch request failed: {exc}") from exc
     if len(body) > max_bytes:
@@ -211,10 +229,15 @@ def anysearch_call(tool_name: str, arguments: Dict[str, Any], config: Dict[str, 
         parsed = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"AnySearch returned invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("AnySearch response root must be an object")
     if parsed.get("error"):
         message = parsed["error"].get("message") if isinstance(parsed["error"], dict) else parsed["error"]
         raise RuntimeError(f"AnySearch API error: {message}")
-    for item in (parsed.get("result") or {}).get("content") or []:
+    result = parsed.get("result") or {}
+    if not isinstance(result, dict):
+        raise RuntimeError("AnySearch result must be an object")
+    for item in result.get("content") or []:
         if isinstance(item, dict) and item.get("type") == "text":
             return str(item.get("text") or "")
     raise RuntimeError("AnySearch response did not contain text content")
@@ -235,17 +258,33 @@ def _content_risk(*values: str) -> str:
 def canonical_url(value: str) -> str:
     try:
         parsed = urllib.parse.urlsplit(value.strip())
+        hostname = parsed.hostname
     except ValueError:
         return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not hostname or "@" in parsed.netloc:
         return ""
+    hostname = hostname.lower().rstrip(".")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
+    if port and not ((parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)):
+        netloc = f"{netloc}:{port}"
     query = []
     for key, val in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
         if key.lower().startswith("utm_") or key.lower() in TRACKING_QUERY_KEYS:
             continue
         query.append((key, val))
     path = parsed.path or "/"
-    return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, urllib.parse.urlencode(query), ""))
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, path, urllib.parse.urlencode(query), ""))
 
 
 def _published_at(text: str) -> str:
@@ -278,7 +317,7 @@ def parse_batch_markdown(text: str, queries: list[Dict[str, Any]]) -> list[Dict[
         url = canonical_url(str(current.get("url") or ""))
         if url:
             current["canonical_url"] = url
-            current["source_domain"] = urllib.parse.urlsplit(url).netloc.lower()
+            current["source_domain"] = urllib.parse.urlsplit(url).hostname or ""
             current["snippet"] = _sanitize_text(" ".join(current.pop("snippet_lines", [])))
             current["title"] = _sanitize_text(str(current.get("title") or ""), 400)
             current["published_at"] = _published_at(current["snippet"])
@@ -518,10 +557,12 @@ def _write_report(path: Path, run_id: str, signals: list[Dict[str, Any]], pulses
         ])
     lines.extend(["## 信号明细", "", "| 主题 | 分数 | 入选脉冲 | 渠道 | 来源 | 标题 |", "|---|---:|:---:|---|---|---|"])
     for item in sorted(signals, key=lambda signal: signal["total"], reverse=True):
-        title = item["title"].replace("|", "\\|")
+        title = item["title"].replace("\\", "\\\\").replace("|", "\\|")
+        title = title.replace("[", "\\[").replace("]", "\\]")
+        link = item["canonical_url"].replace("(", "%28").replace(")", "%29")
         eligible = "✅" if item.get("eligible_for_pulse") else "—"
-        lines.append(f"| {item['theme']} | {item['total']} | {eligible} | {item['channel']} | {item['source_domain']} | [{title}]({item['canonical_url']}) |")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        lines.append(f"| {item['theme']} | {item['total']} | {eligible} | {item['channel']} | {item['source_domain']} | [{title}]({link}) |")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def run_radar(
@@ -532,9 +573,10 @@ def run_radar(
 ) -> Dict[str, Any]:
     if not config.get("enabled", True):
         return {"status": "disabled", "signals": 0, "pulses": 0}
-    queries = [dict(item) for item in config.get("queries") or [] if item.get("enabled", True)]
-    validate_queries(queries)
-    max_queries = max(1, int(config.get("max_queries_per_cycle", 10)))
+    configured_queries = config.get("queries") or []
+    validate_queries(configured_queries)
+    queries = [dict(item) for item in configured_queries if item.get("enabled", True)]
+    max_queries = min(50, max(1, int(config.get("max_queries_per_cycle", 10))))
     queries = queries[:max_queries]
     run_id = f"MKT-RUN-{uuid.uuid4().hex[:12]}"
     run_root = Path(config.get("run_root") or DEFAULT_RUN_ROOT)
@@ -553,11 +595,11 @@ def run_radar(
         db.commit()
     finally:
         db.close()
-    (run_dir / "request.json").write_text(json.dumps({
+    atomic_write_text(run_dir / "request.json", json.dumps({
         "run_id": run_id, "queries": queries, "endpoint": ANYSEARCH_ENDPOINT,
         "upstream_commit": UPSTREAM_COMMIT, "upstream_zip_sha256": UPSTREAM_ZIP_SHA256,
         "api_key_mode": "environment" if os.environ.get("ANYSEARCH_API_KEY") else "anonymous",
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    }, ensure_ascii=False, indent=2))
 
     all_records: list[Dict[str, Any]] = []
     raw_sections: list[str] = []
@@ -572,7 +614,10 @@ def run_radar(
         error = str(exc)
 
     raw_path = run_dir / "raw-response.md"
-    raw_path.write_text("\n\n".join(raw_sections), encoding="utf-8")
+    try:
+        atomic_write_text(raw_path, "\n\n".join(raw_sections))
+    except OSError as exc:
+        error = error or f"failed to write raw response: {exc}"
     if error:
         completed = utc_now()
         db = connect(db_path)
@@ -588,22 +633,39 @@ def run_radar(
         return {"run_id": run_id, "status": "failed", "error": error, "signals": 0, "pulses": 0}
 
     queries_by_id = {item["id"]: item for item in queries}
-    db = connect(db_path)
     try:
-        signals = persist_signals(db, run_id, all_records, queries_by_id, config, now=now)
-        pulses = build_pulses(db, run_id, signals, raw_path, config)
-        report_path = run_dir / "market-radar-report.md"
-        _write_report(report_path, run_id, signals, pulses)
-        (run_dir / "market-pulses.json").write_text(json.dumps(pulses, ensure_ascii=False, indent=2), encoding="utf-8")
+        db = connect(db_path)
+        try:
+            signals = persist_signals(db, run_id, all_records, queries_by_id, config, now=now)
+            pulses = build_pulses(db, run_id, signals, raw_path, config)
+            report_path = run_dir / "market-radar-report.md"
+            _write_report(report_path, run_id, signals, pulses)
+            atomic_write_text(run_dir / "market-pulses.json", json.dumps(pulses, ensure_ascii=False, indent=2))
+            completed = utc_now()
+            db.execute(
+                """UPDATE market_radar_runs SET status='completed',result_count=?,signal_count=?,pulse_count=?,
+                   raw_path=?,report_path=?,error='',completed_at=?,updated_at=? WHERE run_id=?""",
+                (len(all_records), len(signals), len(pulses), str(raw_path), str(report_path), completed, completed, run_id),
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
         completed = utc_now()
-        db.execute(
-            """UPDATE market_radar_runs SET status='completed',result_count=?,signal_count=?,pulse_count=?,
-               raw_path=?,report_path=?,error='',completed_at=?,updated_at=? WHERE run_id=?""",
-            (len(all_records), len(signals), len(pulses), str(raw_path), str(report_path), completed, completed, run_id),
-        )
-        db.commit()
-    finally:
-        db.close()
+        try:
+            db = connect(db_path)
+            try:
+                db.execute(
+                    """UPDATE market_radar_runs SET status='failed',raw_path=?,error=?,completed_at=?,updated_at=?
+                       WHERE run_id=?""",
+                    (str(raw_path), str(exc)[:2000], completed, completed, run_id),
+                )
+                db.commit()
+            finally:
+                db.close()
+        except (OSError, sqlite3.Error):
+            pass
+        return {"run_id": run_id, "status": "failed", "error": str(exc), "signals": 0, "pulses": 0}
     qualified = [pulse for pulse in pulses if pulse["status"] == "new"]
     return {
         "run_id": run_id, "status": "completed", "results": len(all_records),

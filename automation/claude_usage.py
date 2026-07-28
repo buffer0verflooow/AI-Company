@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+try:
+    from ._safe_io import stream_contains
+except ImportError:  # direct script/module execution from automation/
+    from _safe_io import stream_contains
+
 
 DEFAULT_CLAUDE_PROJECTS = Path.home() / ".claude/projects"
 
@@ -20,7 +25,7 @@ def _session_files(root: Path) -> Iterable[Path]:
 def _counter(value: Any) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -50,7 +55,7 @@ def read_claude_session(path: Path) -> Dict[str, Any]:
     }
     seen_messages: set[str] = set()
     seen_tools: set[str] = set()
-    with path.open(encoding="utf-8") as stream:
+    with path.open(encoding="utf-8", errors="replace") as stream:
         for raw in stream:
             try:
                 event = json.loads(raw)
@@ -91,17 +96,18 @@ def find_claude_usage(reference: str, root: Path = DEFAULT_CLAUDE_PROJECTS) -> D
     if not reference or not root.is_dir():
         return {}
     needle = reference.encode()
-    matches: list[Path] = []
+    newest: Path | None = None
+    newest_mtime = -1
     for path in _session_files(root):
         try:
-            if needle in path.read_bytes():
-                matches.append(path)
+            if stream_contains(path, needle):
+                modified = _mtime_ns(path)
+                if modified > newest_mtime:
+                    newest = path
+                    newest_mtime = modified
         except OSError:
             continue
-    if not matches:
-        return {}
-    newest = max(matches, key=_mtime_ns)
-    if _mtime_ns(newest) < 0:
+    if newest is None:
         return {}
     try:
         return read_claude_session(newest)

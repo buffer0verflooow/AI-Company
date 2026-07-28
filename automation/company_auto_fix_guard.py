@@ -10,6 +10,7 @@ changes" wording from swallowing unrelated knowledge-base edits.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -39,7 +40,6 @@ def _run(*args: str) -> tuple[int, str]:
 
 
 def main() -> int:
-    now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     status_code, status = _run("git", "status", "--porcelain")
     head_code, head = _run("git", "rev-parse", "HEAD")
     if status_code != 0 or head_code != 0 or not head:
@@ -48,9 +48,11 @@ def main() -> int:
 
     dirty_paths = [line[3:] for line in status.splitlines() if len(line) >= 4]
     automation_dirty = [path for path in dirty_paths if path == "automation" or path.startswith("automation/")]
-    worktree = Path(tempfile.gettempdir()) / f"company-auto-fix-{now}"
+    temporary_root = Path(tempfile.mkdtemp(prefix="company-auto-fix-"))
+    worktree = temporary_root / "worktree"
     add_code, add_output = _run("git", "worktree", "add", "--detach", str(worktree), head)
     if add_code != 0:
+        shutil.rmtree(temporary_root, ignore_errors=True)
         print("MANDATORY SAFETY STOP: could not create an isolated worktree.")
         print(add_output[-1000:])
         return 0

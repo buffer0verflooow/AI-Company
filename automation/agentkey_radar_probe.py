@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
@@ -18,9 +19,15 @@ import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+try:
+    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
+except ImportError:  # direct script execution
+    from _safe_io import atomic_write_text, read_text_limited, scrub_environment
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
 DEFAULT_CONFIG = COMPANY_ROOT / "automation/market_radar_config.json"
@@ -29,7 +36,7 @@ WORKSPACE = Path("/home/pwn/workspace")
 HERMES = os.environ.get("HERMES_EXECUTABLE", "hermes")
 MAX_WORKERS = 4          # parallel agentkey queries per run
 WORKER_TIMEOUT = 120     # seconds per agentkey query run
-PROBE_IDENTIFIER = "agentkey-probe"
+MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -37,16 +44,21 @@ def utc_now() -> str:
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
+    if not isinstance(value, dict):
+        raise ValueError("agentkey radar config must be an object")
+    return value
 
 
 def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    db.execute("""
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("""
         CREATE TABLE IF NOT EXISTS agentkey_probe_runs (
             run_id TEXT PRIMARY KEY,
             status TEXT NOT NULL DEFAULT 'running',
@@ -58,8 +70,12 @@ def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-    """)
-    return db
+        """)
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def _sanitize_text(value: str, limit: int = 2400) -> str:
@@ -73,17 +89,33 @@ def _canonical_url(value: str) -> str:
     try:
         from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qsl
         parsed = urlsplit(value.strip())
+        hostname = parsed.hostname
     except (ValueError, AttributeError):
         return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not hostname or "@" in parsed.netloc:
         return ""
+    hostname = hostname.lower().rstrip(".")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port and not ((parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
     clean_qs = []
     tracking = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"}
     for key, val in parse_qsl(parsed.query, keep_blank_values=True):
         if key.lower().startswith("utm_") or key.lower() in tracking:
             continue
         clean_qs.append((key, val))
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(),
+    return urlunsplit((parsed.scheme.lower(), host,
                        parsed.path or "/", urlencode(clean_qs), ""))
 
 
@@ -113,16 +145,17 @@ def _topic_searches(topics: dict) -> list[dict]:
 
 
 def _agentkey_prompt(theme_title: str, query: str, output_path: str) -> str:
+    query_json = json.dumps(query, ensure_ascii=False)
     return f"""[AGENTKEY_RADAR_PROBE]
 你是公司市场雷达的 AgentKey 探测 Worker。使用 agentkey skill（自动加载）进行 web 搜索。
 
-任务主题：{theme_title}
-搜索查询：{query}
+任务主题：{json.dumps(theme_title, ensure_ascii=False)}
+搜索查询：{json.dumps(query, ensure_ascii=False)}
 
 执行步骤：
-1. 用 execute_tool(name="agentkey_search", params={{"query": "{query}", "num": 5}}) 搜索
+1. 用 execute_tool(name="agentkey_search", params={{"query": {query_json}, "num": 5}}) 搜索
 2. 从结果中提取每条的有效 URL、标题和摘要
-3. 将结果以 JSON 格式写入 {output_path}，格式：
+3. 将结果以 JSON 格式写入 {json.dumps(output_path, ensure_ascii=False)}，格式：
    [{{"title": "...", "url": "...", "snippet": "...", "source_domain": "..."}}, ...]
 4. 不要修改输出文件外的任何内容，不要执行任何外部操作。
 """
@@ -132,33 +165,56 @@ def _run_one_query(theme_title: str, query: str, output_dir: Path) -> list[dict]
     """Spawn a hermes chat subprocess that loads agentkey skill and runs a search."""
     output_path = output_dir / f"ak-{uuid.uuid4().hex[:12]}.json"
     prompt = _agentkey_prompt(theme_title, query, str(output_path))
+    env, _dropped = scrub_environment()
+    env["COMPANY_ROUTER_BYPASS"] = "1"
+    env["HERMES_SESSION_SOURCE"] = "tool"
+    env["HERMES_WRITE_SAFE_ROOT"] = str(output_dir.resolve())
+    env["TERMINAL_CWD"] = str(output_dir.resolve())
     try:
-        proc = subprocess.run(
-            [HERMES, "chat", "-q", prompt, "-Q", "--source", "tool",
-             "--skills", "agentkey", "--max-turns", "8"],
-            cwd=str(WORKSPACE),
-            capture_output=True, text=True, timeout=WORKER_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return [{"error": f"agentkey worker timed out ({WORKER_TIMEOUT}s)"}]
+        try:
+            proc = subprocess.run(
+                [HERMES, "chat", "-q", prompt, "-Q", "--source", "tool",
+                 "--skills", "agentkey", "--max-turns", "8"],
+                cwd=str(WORKSPACE), env=env,
+                capture_output=True, text=True, timeout=WORKER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return [{"error": f"agentkey worker timed out ({WORKER_TIMEOUT}s)"}]
+        except OSError as exc:
+            return [{"error": f"agentkey worker failed to start: {exc}"}]
 
-    if proc.returncode != 0:
-        return [{"error": f"hermes exit {proc.returncode}: {proc.stderr[:500]}"}]
+        if proc.returncode != 0:
+            return [{"error": f"hermes exit {proc.returncode}: {proc.stderr[:500]}"}]
 
-    # Wait for output file with backoff
-    for _ in range(10):
-        if output_path.is_file() and output_path.stat().st_size > 10:
-            break
-        time.sleep(1)
-    else:
-        return [{"error": "agentkey worker produced no output file"}]
+        # Wait for output file with backoff
+        for _ in range(10):
+            try:
+                ready = output_path.is_file() and output_path.stat().st_size > 10
+            except OSError:
+                ready = False
+            if ready:
+                break
+            time.sleep(1)
+        else:
+            return [{"error": "agentkey worker produced no output file"}]
 
-    try:
-        results = json.loads(output_path.read_text(encoding="utf-8"))
-        output_path.unlink(missing_ok=True)
-        return results if isinstance(results, list) else [results]
-    except (json.JSONDecodeError, OSError) as exc:
-        return [{"error": f"invalid JSON from agentkey worker: {exc}"}]
+        try:
+            results = json.loads(read_text_limited(output_path, max_bytes=MAX_OUTPUT_BYTES))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as exc:
+            return [{"error": f"invalid JSON from agentkey worker: {exc}"}]
+        if isinstance(results, dict):
+            results = [results]
+        if not isinstance(results, list):
+            return [{"error": "agentkey worker output must be an array or object"}]
+        valid = [item for item in results if isinstance(item, dict)]
+        if len(valid) != len(results):
+            valid.append({"error": "agentkey worker output contained non-object items"})
+        return valid
+    finally:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _parse_agentkey_result(raw: dict, theme: str, theme_title: str,
@@ -174,7 +230,8 @@ def _parse_agentkey_result(raw: dict, theme: str, theme_title: str,
     canon = _canonical_url(url)
     if not canon:
         return None
-    domain = str(raw.get("source_domain") or "") or (canon.split("/")[2] if "//" in canon else "")
+    from urllib.parse import urlsplit
+    domain = urlsplit(canon).hostname or ""
     return {
         "canonical_url": canon,
         "source_domain": domain,
@@ -197,21 +254,10 @@ def _signal_id(theme: str, url: str) -> str:
 def persist_results(db: sqlite3.Connection, run_id: str,
                     results: list[dict], themes: dict) -> int:
     """Write agentkey probe signals into market_signals.db."""
-    _timestamp = utc_now()
     saved = 0
-
-    # Load existing signal themes to avoid re-inserting same-key signals
-    existing = {
-        row["signal_id"]
-        for row in db.execute(
-            "SELECT signal_id FROM market_signals WHERE channel='agentkey'"
-        ).fetchall()
-    }
 
     for item in results:
         sig_id = _signal_id(item["theme"], item["canonical_url"])
-        if sig_id in existing:
-            continue  # already recorded in a previous probe run
 
         scores = _score_signal(item, themes.get(item["theme"], {}))
         evidence = json.dumps({
@@ -222,7 +268,7 @@ def persist_results(db: sqlite3.Connection, run_id: str,
 
         now = utc_now()
         try:
-            db.execute(
+            cursor = db.execute(
                 """INSERT OR IGNORE INTO market_signals
                    (signal_id,canonical_url,theme,theme_title,product_line,query_id,query_text,
                     channel,title,url,source_domain,snippet,published_at,first_seen_at,last_seen_at,
@@ -243,7 +289,7 @@ def persist_results(db: sqlite3.Connection, run_id: str,
                     run_id, evidence, now, now,
                 ),
             )
-            if db.execute("SELECT changes()").fetchone()[0] > 0:
+            if cursor.rowcount > 0:
                 saved += 1
         except sqlite3.IntegrityError:
             continue
@@ -284,7 +330,9 @@ def extract_themes(config: dict) -> dict:
     """Extract unique themes from the market radar config queries."""
     topics: dict = {}
     for q in config.get("queries", []):
-        theme = q.get("theme", "")
+        if not isinstance(q, dict):
+            raise ValueError("each agentkey radar query must be an object")
+        theme = str(q.get("theme") or "").strip()
         if not theme or not q.get("enabled", True):
             continue
         if theme not in topics:
@@ -294,7 +342,9 @@ def extract_themes(config: dict) -> dict:
                 "keywords_en": [],
                 "keywords_zh": [],
             }
-        query_text = q.get("query", "")
+        query_text = str(q.get("query") or "").strip()
+        if not query_text or len(query_text) > 400 or "\n" in query_text:
+            raise ValueError(f"invalid agentkey radar query for theme {theme!r}")
         # Classify keyword by language
         if re.search(r"[\u4e00-\u9fff]", query_text):
             topics[theme]["keywords_zh"].append(query_text)
@@ -328,70 +378,95 @@ def run_probe(config: dict) -> dict:
     finally:
         db.close()
 
-    # Build search tasks — one query per theme keyword
     searches = _topic_searches(themes)
+    max_searches = min(50, max(1, int(config.get("agentkey_max_queries", config.get("max_queries_per_cycle", 10)))))
+    searches = searches[:max_searches]
     all_results: list[dict] = []
     errors: list[str] = []
-
-    for i, search in enumerate(searches):
-        print(f"[{i+1}/{len(searches)}] query={search['query'][:60]}...", flush=True)
-        items = _run_one_query(search["theme_title"], search["query"], run_dir)
-        parsed = 0
-        for item_raw in items:
-            record = _parse_agentkey_result(
-                item_raw, search["theme"], search["theme_title"],
-                search["product_line"], search["query"],
-            )
-            if record:
-                all_results.append(record)
-                parsed += 1
-            elif "error" in item_raw:
-                errors.append(item_raw["error"])
-        print(f"  → {parsed} signals", flush=True)
-
-    # Persist to market_signals.db
-    db = connect(db_path)
-    try:
-        saved = persist_results(db, run_id, all_results, themes)
-        db.commit()
-    finally:
-        db.close()
-
-    # Write probe report
     report_path = run_dir / "agentkey-probe-report.md"
-    lines = [
-        "# AgentKey 雷达探测报告",
-        "",
-        f"> Run: `{run_id}`",
-        f"> 生成时间: {utc_now()}",
-        f"> 主题数: {len(themes)}",
-        f"> 查询数: {len(searches)}",
-        f"> 新信号: {saved}",
-        f"> 错误: {len(errors)}" if errors else "",
-        "",
-        "## 主题",
-    ]
-    for t, v in themes.items():
-        lines.append(f"- **{v['title']}** ({len(v['keywords_en'])} en + {len(v['keywords_zh'])} zh)")
-    lines.append("")
-    if errors:
-        lines.extend(["## 错误", ""])
-        lines.extend(f"- {e[:200]}" for e in errors[:10])
-        lines.append("")
-    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    completed = utc_now()
-    db = connect(db_path)
     try:
-        db.execute(
-            """UPDATE agentkey_probe_runs
-               SET status='completed',signal_count=?,completed_at=?,updated_at=?
-               WHERE run_id=?""",
-            (saved, completed, completed, run_id),
-        )
-        db.commit()
-    finally:
-        db.close()
+        workers = max(1, min(len(searches), max(1, int(config.get("agentkey_max_workers", MAX_WORKERS)))))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agentkey-radar") as pool:
+            futures = {
+                pool.submit(_run_one_query, search["theme_title"], search["query"], run_dir): (index, search)
+                for index, search in enumerate(searches, 1)
+            }
+            for future in as_completed(futures):
+                index, search = futures[future]
+                print(f"[{index}/{len(searches)}] query={search['query'][:60]}...", flush=True)
+                try:
+                    items = future.result()
+                except Exception as exc:
+                    items = [{"error": f"agentkey query failed: {exc}"}]
+                parsed = 0
+                for item_raw in items:
+                    record = _parse_agentkey_result(
+                        item_raw, search["theme"], search["theme_title"],
+                        search["product_line"], search["query"],
+                    )
+                    if record:
+                        all_results.append(record)
+                        parsed += 1
+                    elif "error" in item_raw:
+                        errors.append(str(item_raw["error"]))
+                print(f"  → {parsed} signals", flush=True)
+
+        db = connect(db_path)
+        try:
+            saved = persist_results(db, run_id, all_results, themes)
+            db.commit()
+        finally:
+            db.close()
+
+        lines = [
+            "# AgentKey 雷达探测报告", "", f"> Run: `{run_id}`",
+            f"> 生成时间: {utc_now()}", f"> 主题数: {len(themes)}",
+            f"> 查询数: {len(searches)}", f"> 新信号: {saved}",
+            f"> 错误: {len(errors)}" if errors else "", "", "## 主题",
+        ]
+        for value in themes.values():
+            lines.append(
+                f"- **{value['title']}** "
+                f"({len(value['keywords_en'])} en + {len(value['keywords_zh'])} zh)"
+            )
+        lines.append("")
+        if errors:
+            lines.extend(["## 错误", ""])
+            lines.extend(f"- {_sanitize_text(error, 200)}" for error in errors[:10])
+            lines.append("")
+        atomic_write_text(report_path, "\n".join(lines) + "\n")
+
+        completed = utc_now()
+        db = connect(db_path)
+        try:
+            db.execute(
+                """UPDATE agentkey_probe_runs
+                   SET status='completed',signal_count=?,completed_at=?,updated_at=?
+                   WHERE run_id=?""",
+                (saved, completed, completed, run_id),
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        completed = utc_now()
+        try:
+            db = connect(db_path)
+            try:
+                db.execute(
+                    """UPDATE agentkey_probe_runs
+                       SET status='failed',error=?,completed_at=?,updated_at=? WHERE run_id=?""",
+                    (str(exc)[:2000], completed, completed, run_id),
+                )
+                db.commit()
+            finally:
+                db.close()
+        except (OSError, sqlite3.Error):
+            pass
+        return {
+            "run_id": run_id, "status": "failed", "error": str(exc),
+            "themes": len(themes), "searches": len(searches), "signals": 0,
+        }
 
     return {
         "run_id": run_id,

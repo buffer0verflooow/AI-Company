@@ -13,8 +13,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import re
 import sqlite3
 import subprocess
 import time
@@ -27,11 +25,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 try:
     from .operations_control import connect as connect_operations
     from .operations_control import latest_origin, update_experiment, utc_now
-    from ._safe_io import sqlite_uri
+    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment, sqlite_uri
 except ImportError:  # direct ``python automation/company_operator.py`` invocation
     from operations_control import connect as connect_operations
     from operations_control import latest_origin, update_experiment, utc_now
-    from _safe_io import sqlite_uri
+    from _safe_io import atomic_write_text, read_text_limited, scrub_environment, sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -47,7 +45,7 @@ DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
         raise ValueError("company operator config must be an object")
     return payload
@@ -83,9 +81,11 @@ def _stable_id(prefix: str, key: str) -> str:
 
 
 def connect(path: Path = DEFAULT_OPERATIONS_DB) -> sqlite3.Connection:
-    db = connect_operations(path)
-    db.executescript(
-        """
+    db: sqlite3.Connection | None = None
+    try:
+        db = connect_operations(path)
+        db.executescript(
+            """
         CREATE TABLE IF NOT EXISTS autonomy_opportunities (
             opportunity_id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -148,10 +148,14 @@ def connect(path: Path = DEFAULT_OPERATIONS_DB) -> sqlite3.Connection:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-        """
-    )
-    db.commit()
-    return db
+            """
+        )
+        db.commit()
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def _upsert_opportunity(db: sqlite3.Connection, item: Dict[str, Any]) -> str:
@@ -317,6 +321,8 @@ def discover_opportunities(
         market_db_value = str(config.get("market_signals_db") or "").strip()
         market_db_path = Path(market_db_value) if market_db_value else None
         if market_db_path and market_db_path.is_file():
+            pulse_statuses: Dict[str, str] = {}
+            pulse_scores: Dict[str, float] = {}
             market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
             market_db.row_factory = sqlite3.Row
             try:
@@ -566,17 +572,6 @@ def build_worker_prompt(opportunity: Dict[str, Any], run_dir: Path) -> str:
 
 
 # ── Isolated-worker hardening ─────────────────────────────────────────────
-# The worker's model access comes from ~/.hermes/config.yaml, not from these
-# env vars, so scrubbing external-service credentials does not break the run.
-SECRET_ENV_RE = re.compile(
-    r"(SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|API[_-]?KEY|_KEY$|_TOKEN$|^TOKEN$|BEARER|COOKIE)",
-    re.I,
-)
-SECRET_ENV_EXTRA = {
-    "WEIXIN_APP_ID", "WEIXIN_APP_SECRET", "WEIXIN_TOKEN", "QQ_APP_ID", "QQ_CLIENT_SECRET",
-    "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-}
 # Company surfaces the autonomy boundary declares read-only; a worker that
 # writes here (code / config) has escaped its sandbox.
 # operations_control.db is explicitly excluded because workers legitimately
@@ -584,29 +579,14 @@ SECRET_ENV_EXTRA = {
 # (see _record_operational_run). Concurrent cron (notifier) also modifies it.
 _AUDIT_CODE_DIRS = ("automation", "scripts")
 _AUDIT_DBS = ("finance/finance_ledger.db", "operations/runtime/knowledge_promotion.db")
-# List of DBs whose mtime is NOT audited (legitimate concurrent access).
-_AUDIT_DB_SKIP = frozenset([
-    "operations/runtime/operations_control.db",
-    "operations/runtime/company_router.db",
-])
-
-
 def scrub_worker_env(base: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], list]:
     """Drop external-service credentials from the env handed to an isolated worker."""
-    source = dict(os.environ) if base is None else dict(base)
-    env: Dict[str, str] = {}
-    dropped: list = []
-    for key, value in source.items():
-        if key in SECRET_ENV_EXTRA or SECRET_ENV_RE.search(key):
-            dropped.append(key)
-            continue
-        env[key] = value
-    return env, sorted(dropped)
+    return scrub_environment(base)
 
 
 def audit_sandbox_writes(run_dir: Path, since: float, company_root: Path = COMPANY_ROOT) -> list:
     """Return read-only company files a worker mutated during its run (sandbox escapes)."""
-    run_prefix = str(run_dir.resolve())
+    run_root = run_dir.resolve()
     violations: set = set()
     for rel in _AUDIT_CODE_DIRS:
         base = company_root / rel
@@ -616,7 +596,13 @@ def audit_sandbox_writes(run_dir: Path, since: float, company_root: Path = COMPA
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
                 continue
             try:
-                if path.stat().st_mtime > since and not str(path.resolve()).startswith(run_prefix):
+                resolved = path.resolve()
+                try:
+                    resolved.relative_to(run_root)
+                    inside_run = True
+                except ValueError:
+                    inside_run = False
+                if path.stat().st_mtime > since and not inside_run:
                     violations.add(str(path))
             except OSError:
                 continue
@@ -634,12 +620,16 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
     run_dir.mkdir(parents=True, exist_ok=True)
     prompt = build_worker_prompt(opportunity, run_dir)
     worker_env, dropped_env = scrub_worker_env()
-    (run_dir / "request.json").write_text(json.dumps({
+    worker_env["COMPANY_ROUTER_BYPASS"] = "1"
+    worker_env["HERMES_SESSION_SOURCE"] = "tool"
+    worker_env["HERMES_WRITE_SAFE_ROOT"] = str(run_dir.resolve())
+    worker_env["TERMINAL_CWD"] = str(run_dir.resolve())
+    atomic_write_text(run_dir / "request.json", json.dumps({
         "opportunity": opportunity,
         "prompt": prompt,
         "scrubbed_env_vars": dropped_env,
         "created_at": utc_now(),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    }, ensure_ascii=False, indent=2))
     sandbox_baseline = time.time()
     try:
         proc = subprocess.run(
@@ -671,14 +661,14 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
         return {"status": "failed", "error": error, "summary": "", "next_action": "", "metrics": {}}
     result_path = run_dir / "result.json"
     report_path = run_dir / "action-report.md"
-    if not result_path.is_file() or not report_path.is_file():
-        missing = [p.name for p in (report_path, result_path) if not p.is_file()]
+    if any(path.is_symlink() or not path.is_file() for path in (result_path, report_path)):
+        missing = [p.name for p in (report_path, result_path) if p.is_symlink() or not p.is_file()]
         return {
             "status": "failed", "error": f"worker missing required artifacts: {', '.join(missing)}",
             "summary": proc.stdout.strip()[-2000:], "next_action": "", "metrics": {},
         }
     try:
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_limited(result_path, max_bytes=2 * 1024 * 1024))
         if not isinstance(payload, dict):
             raise ValueError("result root must be an object")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -700,7 +690,7 @@ def worker_usage(run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     state_db = Path(config.get("hermes_state_db") or "/home/pwn/.hermes/state.db")
     if not state_db.is_file():
         return {}
-    db = sqlite3.connect(state_db)
+    db = sqlite3.connect(sqlite_uri(state_db, mode="ro"), uri=True)
     db.row_factory = sqlite3.Row
     try:
         row = db.execute(
@@ -719,6 +709,27 @@ def worker_usage(run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         db.close()
 
 
+def _regular_artifacts(run_dir: Path) -> list[Path]:
+    root = run_dir.resolve()
+    artifacts: list[Path] = []
+    for path in sorted(run_dir.iterdir()):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        artifacts.append(path)
+    return artifacts
+
+
+def _safe_counter(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _record_operational_run(
     db: sqlite3.Connection,
     run_id: str,
@@ -729,8 +740,14 @@ def _record_operational_run(
     started_at: str,
     completed_at: str,
 ) -> None:
-    artifacts = [str(path) for path in sorted(run_dir.iterdir()) if path.is_file()]
-    output_bytes = sum(path.stat().st_size for path in run_dir.iterdir() if path.is_file())
+    artifact_paths = _regular_artifacts(run_dir)
+    artifacts = [str(path) for path in artifact_paths]
+    output_bytes = 0
+    for path in artifact_paths:
+        try:
+            output_bytes += path.stat().st_size
+        except OSError:
+            continue
     status = "completed" if result["status"] in {"completed", "needs_approval"} else "failed"
     now = utc_now()
     db.execute(
@@ -753,9 +770,9 @@ def _record_operational_run(
         (
             run_id, opportunity["product_line"], "autonomy", opportunity["description"], status,
             started_at, completed_at, str(usage.get("id") or ""), str(usage.get("model") or ""),
-            int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0),
-            int(usage.get("cache_read_tokens") or 0), int(usage.get("cache_write_tokens") or 0),
-            int(usage.get("reasoning_tokens") or 0), int(usage.get("tool_call_count") or 0),
+            _safe_counter(usage.get("input_tokens")), _safe_counter(usage.get("output_tokens")),
+            _safe_counter(usage.get("cache_read_tokens")), _safe_counter(usage.get("cache_write_tokens")),
+            _safe_counter(usage.get("reasoning_tokens")), _safe_counter(usage.get("tool_call_count")),
             usage.get("estimated_cost_usd"), usage.get("actual_cost_usd"),
             str(usage.get("cost_status") or "unknown"), _json(artifacts), output_bytes,
             result.get("summary", ""), _json({
@@ -806,7 +823,7 @@ def execute_opportunity(
         result = {"status": "failed", "summary": "", "next_action": "", "metrics": {}, "error": str(exc)}
     usage = worker_usage(run_dir, config)
     completed = utc_now()
-    artifacts = [str(path) for path in sorted(run_dir.iterdir()) if path.is_file()]
+    artifacts = [str(path) for path in _regular_artifacts(run_dir)]
     final_status = "completed" if result["status"] == "completed" else "waiting_approval" if result["status"] == "needs_approval" else "failed"
     db = connect(db_path)
     try:
@@ -846,8 +863,21 @@ def execute_opportunity(
                 opportunity["source_ref"],
                 "evaluated" if result["status"] == "completed" else "needs_approval",
             )
-        except (OSError, sqlite3.Error, ValueError):
-            pass
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            detail = f"market pulse update failed: {exc}"
+            result["postprocess_error"] = detail
+            try:
+                post_db = connect(db_path)
+                try:
+                    post_db.execute(
+                        "UPDATE autonomy_runs SET error=?,updated_at=? WHERE run_id=?",
+                        (detail, utc_now(), run_id),
+                    )
+                    post_db.commit()
+                finally:
+                    post_db.close()
+            except (OSError, sqlite3.Error):
+                pass
     return {"run_id": run_id, "run_dir": str(run_dir), **result}
 
 

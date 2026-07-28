@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sqlite3
 from datetime import date, datetime, time, timedelta, timezone
@@ -19,9 +20,9 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 try:
-    from ._safe_io import file_lock, quote_identifier, sqlite_uri
+    from ._safe_io import file_lock, quote_identifier, read_text_limited, sqlite_uri
 except ImportError:  # direct ``python automation/operations_control.py`` invocation
-    from _safe_io import file_lock, quote_identifier, sqlite_uri
+    from _safe_io import file_lock, quote_identifier, read_text_limited, sqlite_uri
 
 try:
     from . import pricing
@@ -227,10 +228,59 @@ def _sql_assignments(fields: Dict[str, Any], allowed: set[str]) -> str:
 
 def _read_json(path: Path) -> Dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = json.loads(read_text_limited(path, max_bytes=2 * 1024 * 1024))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _safe_counter(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _artifact_paths(job_dir: Path, raw_artifacts: Any) -> list[Path]:
+    """Return regular, non-symlink artifacts contained by one job directory."""
+
+    root = job_dir.resolve()
+    candidates: list[Path]
+    if isinstance(raw_artifacts, list) and raw_artifacts:
+        candidates = []
+        for item in raw_artifacts:
+            if not isinstance(item, str) or not item:
+                continue
+            path = Path(item)
+            candidates.append(path if path.is_absolute() else root / path)
+    else:
+        try:
+            candidates = list(job_dir.iterdir())
+        except OSError:
+            return []
+    result: list[Path] = []
+    for path in sorted(candidates, key=str):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved.name in {"request.json", "status.json", "executor.log"}:
+            continue
+        result.append(resolved)
+    return result
+
+
+def _path_mtime_ns(path_value: Any) -> int:
+    try:
+        path = Path(str(path_value))
+        if path.is_symlink() or not path.is_file():
+            return -1
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
 
 
 def _parse_dt(value: str) -> Optional[datetime]:
@@ -259,7 +309,7 @@ def previous_business_day(timezone_name: str = DEFAULT_TIMEZONE) -> date:
 def _find_worker_session(hermes_db: Path, job_dir: Path) -> Dict[str, Any]:
     if not hermes_db.is_file():
         return {}
-    db = sqlite3.connect(hermes_db)
+    db = sqlite3.connect(sqlite_uri(hermes_db, mode="ro"), uri=True)
     db.row_factory = sqlite3.Row
     try:
         session = db.execute(
@@ -322,18 +372,18 @@ def _classify_security_findings(
     log_file = log_dir / f"swarm-{run_id}.log"
     if log_file.is_file():
         try:
-            fragments.append(log_file.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
+            fragments.append(read_text_limited(log_file, max_bytes=10 * 1024 * 1024, errors="replace"))
+        except (OSError, ValueError):
             pass
 
     # Swarm DB — agent_tasks result_summary
     if swarm_db.is_file():
         try:
-            conn = sqlite3.connect(str(swarm_db))
+            conn = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
             conn.row_factory = sqlite3.Row
             try:
                 for row in conn.execute(
-                    "SELECT task_type, result_summary FROM agent_tasks "
+                    "SELECT task_type, substr(result_summary,1,1000000) AS result_summary FROM agent_tasks "
                     "WHERE run_id=? AND status='completed' "
                     "AND result_summary IS NOT NULL AND result_summary!='{}'",
                     (run_id,),
@@ -343,7 +393,7 @@ def _classify_security_findings(
                         fragments.append(summary)
                 # Also grab swarm_runs.conversation_summary
                 row = conn.execute(
-                    "SELECT conversation_summary FROM swarm_runs WHERE run_id=?",
+                    "SELECT substr(conversation_summary,1,1000000) FROM swarm_runs WHERE run_id=?",
                     (run_id,),
                 ).fetchone()
                 if row and row[0]:
@@ -424,8 +474,8 @@ def _quality_status(route: str, job_dir: Path) -> str:
     if not qa.is_file():
         return "missing_qa"
     try:
-        text = qa.read_text(encoding="utf-8")
-    except OSError:
+        text = read_text_limited(qa, max_bytes=2 * 1024 * 1024)
+    except (OSError, UnicodeDecodeError, ValueError):
         return "qa_unreadable"
     if all(gate in text for gate in ("Gate 1", "Gate 2", "Gate 3")) and "通过" in text:
         return "qa_reported_pass"
@@ -476,7 +526,7 @@ def _apportion_shared_sessions(rows: List[Dict[str, Any]]) -> None:
         if n < 2:
             continue
         for field in _SESSION_INT_FIELDS:
-            total = int(members[0].get(field) or 0)
+            total = _safe_counter(members[0].get(field))
             base, remainder = divmod(total, n)
             for index, row in enumerate(members):
                 row[field] = base + (1 if index < remainder else 0)
@@ -484,7 +534,12 @@ def _apportion_shared_sessions(rows: List[Dict[str, Any]]) -> None:
             total = members[0].get(field)
             if total is None:
                 continue
-            total = float(total)
+            try:
+                total = float(total)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(total) or total < 0:
+                continue
             per_run = round(total / n, 6)
             allocated = 0.0
             for index, row in enumerate(members):
@@ -521,7 +576,7 @@ def sync_operational_runs(
     price_table = pricing.load_price_table(finance_db)
     router_rows: Dict[str, Dict[str, Any]] = {}
     if router_db.is_file():
-        source = sqlite3.connect(router_db)
+        source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
         source.row_factory = sqlite3.Row
         try:
             for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
@@ -555,15 +610,9 @@ def sync_operational_runs(
             artifacts: list[str] = []
             output_bytes = 0
             if job_dir:
-                raw_artifacts = status.get("artifacts") if isinstance(status.get("artifacts"), list) else []
-                if raw_artifacts:
-                    artifacts = [str(item) for item in raw_artifacts]
-                else:
-                    artifacts = [str(path) for path in sorted(job_dir.iterdir()) if path.is_file() and path.name not in {"request.json", "status.json", "executor.log"}]
-                for item in artifacts:
-                    path = Path(item)
-                    if not path.is_absolute():
-                        path = job_dir / path
+                artifact_paths = _artifact_paths(job_dir, status.get("artifacts"))
+                artifacts = [str(path) for path in artifact_paths]
+                for path in artifact_paths:
                     try:
                         output_bytes += path.stat().st_size
                     except OSError:
@@ -581,7 +630,7 @@ def sync_operational_runs(
                 if native_candidates:
                     usage_source, worker = max(
                         native_candidates,
-                        key=lambda pair: Path(str(pair[1]["source_path"])).stat().st_mtime_ns,
+                        key=lambda pair: _path_mtime_ns(pair[1].get("source_path")),
                     )
             started_at = str(status.get("started_at") or request.get("created_at") or router.get("created_at") or "")
             completed_at = str(status.get("completed_at") or (router.get("updated_at") if str(status.get("status") or router.get("status")) in {"completed", "needs_approval", "failed", "cancelled"} else "") or "")
@@ -612,12 +661,12 @@ def sync_operational_runs(
                 "duration_seconds": duration,
                 "worker_session_id": str(worker.get("id") or status.get("worker_session_id") or ""),
                 "model": str(worker.get("model") or ""),
-                "input_tokens": int(worker.get("input_tokens") or 0),
-                "output_tokens": int(worker.get("output_tokens") or 0),
-                "cache_read_tokens": int(worker.get("cache_read_tokens") or 0),
-                "cache_write_tokens": int(worker.get("cache_write_tokens") or 0),
-                "reasoning_tokens": int(worker.get("reasoning_tokens") or 0),
-                "tool_call_count": int(worker.get("tool_call_count") or 0),
+                "input_tokens": _safe_counter(worker.get("input_tokens")),
+                "output_tokens": _safe_counter(worker.get("output_tokens")),
+                "cache_read_tokens": _safe_counter(worker.get("cache_read_tokens")),
+                "cache_write_tokens": _safe_counter(worker.get("cache_write_tokens")),
+                "reasoning_tokens": _safe_counter(worker.get("reasoning_tokens")),
+                "tool_call_count": _safe_counter(worker.get("tool_call_count")),
                 "estimated_cost_usd": worker.get("estimated_cost_usd"),
                 "actual_cost_usd": worker.get("actual_cost_usd"),
                 "cost_status": str(worker.get("cost_status") or "unknown"),
@@ -780,16 +829,20 @@ def _run_article_titles(run: Dict[str, Any]) -> list[str]:
 
     for name in _TITLE_ARTIFACT_NAMES:
         path = by_name.get(name)
-        if not path or not Path(path).is_file():
+        candidate = Path(path) if path else None
+        if candidate is None or candidate.is_symlink() or not candidate.is_file():
             continue
         try:
-            lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+            lines: list[str] = []
+            with candidate.open("r", encoding="utf-8", errors="replace") as stream:
+                for _, line in zip(range(60), stream):
+                    lines.append(line.rstrip("\r\n"))
         except OSError:
             continue
         in_frontmatter = False
         h1 = ""
         fence_seen = 0
-        for line in lines[:60]:
+        for line in lines:
             stripped = line.strip()
             if stripped == "---" and fence_seen < 2:
                 in_frontmatter = not in_frontmatter
@@ -836,7 +889,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
                     if key and key not in out:
                         out[key] = {
                             "article_id": str(row["article_id"]),
-                            "reads": int(row["reads"] or 0),
+                            "reads": _safe_counter(row["reads"]),
                             "published_at": str(row["published_at"] or ""),
                             "platform": str(row["platform"] or ""),
                             "source": "article_metrics",
@@ -851,20 +904,20 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
                     # Skip the exported header row ("内容标题 / 传播渠道 / 发表日期").
                     if not key or channel == "传播渠道" or key == _normalize_title("内容标题"):
                         continue
-                    reads = int(row["reads"] or 0)
+                    reads = _safe_counter(row["reads"])
                     bucket = totals.setdefault(key, {"reads": 0, "published_at": "", "has_total": False})
                     if channel in {"全部", "all", "total", "合计"}:
                         bucket["reads"] = reads
                         bucket["has_total"] = True
                     elif not bucket["has_total"]:
-                        bucket["reads"] = max(int(bucket["reads"]), reads)
+                        bucket["reads"] = max(_safe_counter(bucket["reads"]), reads)
                     if not bucket["published_at"]:
                         bucket["published_at"] = str(row["published_at"] or "")
                 for key, bucket in totals.items():
                     if key not in out:
                         out[key] = {
                             "article_id": "",
-                            "reads": int(bucket["reads"]),
+                            "reads": _safe_counter(bucket["reads"]),
                             "published_at": str(bucket["published_at"]),
                             "platform": "",
                             "source": "article_source_metrics",
@@ -931,7 +984,14 @@ def backfill_outcomes(
             fields: Optional[Dict[str, Any]] = None
             source = ""
             for tx in revenue:
-                if run_id and run_id in str(tx.get("source_ref") or ""):
+                source_ref = str(tx.get("source_ref") or "")
+                matches_run = bool(
+                    run_id and re.search(
+                        rf"(?<![A-Za-z0-9._-]){re.escape(run_id)}(?![A-Za-z0-9._-])",
+                        source_ref,
+                    )
+                )
+                if matches_run:
                     fields = {
                         "outcome_status": "measured", "accepted": 1, "published": 1,
                         "revenue_amount": float(tx.get("amount") or 0),
@@ -1704,7 +1764,7 @@ def reap_stale_runs(
     # Runner PIDs live in the router DB; join them back to each run.
     runner_pids: Dict[str, Any] = {}
     if router_db.is_file():
-        source = sqlite3.connect(router_db)
+        source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
         source.row_factory = sqlite3.Row
         try:
             for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
@@ -1733,9 +1793,9 @@ def reap_stale_runs(
             if dry_run:
                 continue
             empty = (
-                int(row["input_tokens"] or 0) == 0
-                and int(row["output_tokens"] or 0) == 0
-                and int(row["output_bytes"] or 0) == 0
+                _safe_counter(row["input_tokens"]) == 0
+                and _safe_counter(row["output_tokens"]) == 0
+                and _safe_counter(row["output_bytes"]) == 0
             )
             quality = "empty_output" if empty else "unmeasured"
             note = f"stale run reaped at {now_iso}: worker not alive after >={stale_minutes:.0f}m running"
@@ -1782,7 +1842,7 @@ def reap_stale_runs(
 def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> Dict[str, str]:
     if not router_db.is_file():
         return {}
-    db = sqlite3.connect(router_db)
+    db = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
     db.row_factory = sqlite3.Row
     try:
         row = db.execute(

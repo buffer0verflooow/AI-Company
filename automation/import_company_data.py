@@ -13,12 +13,18 @@ import hashlib
 import json
 import re
 import sqlite3
+import stat
 import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+try:
+    from ._safe_io import atomic_write_text
+except ImportError:  # direct ``python automation/import_company_data.py`` invocation
+    from _safe_io import atomic_write_text
 
 
 ROOT = Path("/home/pwn/workspace/company")
@@ -27,6 +33,10 @@ FINANCE_DB = ROOT / "finance/finance_ledger.db"
 ARTICLE_EVIDENCE = ROOT / "marketing/evidence/article-stats-2026-07-15/数据统计.zip"
 ZENMUX_EVIDENCE = ROOT / "finance/sources/zenmux-models-2026-07-15.json"
 OHMYGPT_EVIDENCE = ROOT / "finance/sources/ohmygpt-models-2026-07-15.html"
+MAX_ARCHIVE_MEMBERS = 200
+MAX_ARCHIVE_FILE_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
 
 
 def sha256(path: Path) -> str:
@@ -43,10 +53,12 @@ def now() -> str:
 
 def article_db() -> sqlite3.Connection:
     ARTICLE_DB.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(ARTICLE_DB)
-    db.row_factory = sqlite3.Row
-    db.executescript(
-        """
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(ARTICLE_DB)
+        db.row_factory = sqlite3.Row
+        db.executescript(
+            """
         CREATE TABLE IF NOT EXISTS article_metrics (
             article_id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -91,17 +103,23 @@ def article_db() -> sqlite3.Connection:
             UNIQUE(title, published_at, channel, measured_at, source_path)
         );
         CREATE INDEX IF NOT EXISTS idx_article_source_title ON article_source_metrics(title);
-        """
-    )
-    return db
+            """
+        )
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def finance_db() -> sqlite3.Connection:
     FINANCE_DB.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(FINANCE_DB)
-    db.row_factory = sqlite3.Row
-    db.execute(
-        """
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(FINANCE_DB)
+        db.row_factory = sqlite3.Row
+        db.execute(
+            """
         CREATE TABLE IF NOT EXISTS model_prices (
             price_id TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -124,9 +142,13 @@ def finance_db() -> sqlite3.Connection:
             notes TEXT NOT NULL DEFAULT '',
             UNIQUE(provider, model_slug, currency, source_url)
         )
-        """
-    )
-    return db
+            """
+        )
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def _number(value: Any) -> float | None:
@@ -157,14 +179,12 @@ def _parse_xls(path: Path) -> dict[str, Any]:
     trend: list[dict[str, Any]] = []
     demographics: dict[str, dict[str, Any]] = {}
     section = "summary"
-    _trend_started = False
     demographic_section: str | None = None
     for row in rows[1:]:
         values = row[1:]
         first = str(values[0]).strip() if values else ""
         if first == "阅读数据趋势明细":
             section = "trend"
-            _trend_started = False
             continue
         if first in {"性别分布", "年龄分布", "地域分布"}:
             demographic_section = first
@@ -251,22 +271,76 @@ def _parse_tendency_xls(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _extract_xls_exports(archive: zipfile.ZipFile, destination: Path) -> list[Path]:
+    """Extract bounded, root-level XLS exports without trusting ZIP paths."""
+
+    infos = archive.infolist()
+    if len(infos) > MAX_ARCHIVE_MEMBERS:
+        raise ValueError(f"archive has too many members: {len(infos)}")
+    declared_total = sum(max(0, info.file_size) for info in infos if not info.is_dir())
+    if declared_total > MAX_ARCHIVE_TOTAL_BYTES:
+        raise ValueError(f"archive expands beyond {MAX_ARCHIVE_TOTAL_BYTES} bytes")
+
+    exports: list[Path] = []
+    extracted_total = 0
+    for info in infos:
+        name = info.filename
+        member = PurePosixPath(name)
+        mode = info.external_attr >> 16
+        if (
+            not name
+            or "\x00" in name
+            or "\\" in name
+            or member.is_absolute()
+            or ".." in member.parts
+            or stat.S_ISLNK(mode)
+        ):
+            raise ValueError(f"unsafe archive member: {name!r}")
+        if info.flag_bits & 0x1:
+            raise ValueError(f"encrypted archive member is unsupported: {name!r}")
+        if info.is_dir():
+            continue
+        if info.file_size > MAX_ARCHIVE_FILE_BYTES:
+            raise ValueError(f"archive member is too large: {name!r}")
+        if info.file_size and (
+            info.compress_size <= 0
+            or info.file_size / info.compress_size > MAX_COMPRESSION_RATIO
+        ):
+            raise ValueError(f"suspicious compression ratio for archive member: {name!r}")
+        if len(member.parts) != 1 or member.suffix.lower() != ".xls":
+            continue
+
+        target = destination / member.name
+        written = 0
+        with archive.open(info, "r") as source, target.open("xb") as sink:
+            while chunk := source.read(1024 * 1024):
+                written += len(chunk)
+                extracted_total += len(chunk)
+                if written > MAX_ARCHIVE_FILE_BYTES or extracted_total > MAX_ARCHIVE_TOTAL_BYTES:
+                    raise ValueError("archive exceeded extraction limits")
+                sink.write(chunk)
+        exports.append(target)
+    return sorted(exports)
+
+
 def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not zip_path.is_file():
         raise FileNotFoundError(zip_path)
+    source_path = str(zip_path.resolve())
+    source_hash = sha256(zip_path)
     with tempfile.TemporaryDirectory(prefix="company-article-stats-") as tmp:
         tmp_path = Path(tmp)
         with zipfile.ZipFile(zip_path) as archive:
-            archive.extractall(tmp_path)
+            exports = _extract_xls_exports(archive, tmp_path)
         rows: list[dict[str, Any]] = []
         source_rows: list[dict[str, Any]] = []
-        for path in sorted(tmp_path.glob("*.xls")):
+        for path in exports:
             if path.name.startswith("tendency_"):
                 source_rows.extend(_parse_tendency_xls(path))
                 continue
             item = _parse_xls(path)
-            item["source_path"] = str(zip_path.resolve())
-            item["source_sha256"] = sha256(zip_path)
+            item["source_path"] = source_path
+            item["source_sha256"] = source_hash
             rows.append(item)
     db = article_db()
     try:
@@ -307,7 +381,7 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
                 ),
             )
         for item in source_rows:
-            source_key = f"{item['title']}:{item['published_at']}:{item['channel']}:{zip_path.resolve()}"
+            source_key = f"{item['title']}:{item['published_at']}:{item['channel']}:{source_path}"
             db.execute(
                 """
                 INSERT INTO article_source_metrics (
@@ -321,7 +395,7 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
                 (
                     str(uuid.uuid5(uuid.NAMESPACE_URL, source_key)), item["title"], item["published_at"],
                     item["channel"], item["reads"], item["read_share"], item["measured_at"],
-                    str(zip_path.resolve()), sha256(zip_path), now(),
+                    source_path, source_hash, now(),
                 ),
             )
         db.commit()
@@ -447,7 +521,7 @@ def write_article_report(rows: list[dict[str, Any]], source_rows: list[dict[str,
         f"- 趋势总表中识别到 2026 年 7 月发布内容 {len(current_titles)} 篇（包括没有逐篇明细导出的文章）。", "",
         "## 结构化存储", "", "- SQLite：`marketing/article_performance.db`。", "- `article_metrics`：逐篇摘要指标、趋势明细和人群分布 JSON。", "- `article_source_metrics`：趋势总表中的文章、发布日期、传播渠道和阅读人数。",
     ]
-    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(report, "\n".join(lines) + "\n")
     return report
 
 

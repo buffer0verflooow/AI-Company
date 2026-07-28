@@ -16,10 +16,12 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 try:
+    from ._safe_io import read_text_limited, sqlite_uri
     from .company_router import load_config
     from .notification_outbox import enqueue, summary as outbox_summary
     from .operations_control import latest_origin, utc_now
 except ImportError:  # direct execution from automation/
+    from _safe_io import read_text_limited, sqlite_uri
     from company_router import load_config
     from notification_outbox import enqueue
     from notification_outbox import summary as outbox_summary
@@ -33,15 +35,18 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 
 def _read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return None
 
 
 def _db_rows(path: Path, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
     if not path.is_file():
         return []
-    db = sqlite3.connect(path)
+    try:
+        db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True)
+    except sqlite3.Error:
+        return []
     db.row_factory = sqlite3.Row
     try:
         return db.execute(query, params).fetchall()

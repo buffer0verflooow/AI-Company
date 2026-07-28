@@ -12,7 +12,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from finance_ledger import connect
+try:
+    from .finance_ledger import connect
+    from ._safe_io import read_text_limited
+except ImportError:  # direct script execution
+    from finance_ledger import connect
+    from _safe_io import read_text_limited
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -33,7 +38,11 @@ GROUP_RATIO_RE = re.compile(r"Group ratio[：:]\s*([0-9.]+)", re.I)
 
 
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            value.update(chunk)
+    return value.hexdigest()
 
 
 def text_content(fragment: str) -> str:
@@ -41,7 +50,7 @@ def text_content(fragment: str) -> str:
 
 
 def parse_rows(source: Path) -> list[dict[str, object]]:
-    content = source.read_text(encoding="utf-8")
+    content = read_text_limited(source, max_bytes=50 * 1024 * 1024)
     rows: list[dict[str, object]] = []
     for match in ROW_RE.finditer(content):
         body = text_content(match.group("body"))
@@ -117,4 +126,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -34,6 +34,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from ._safe_io import atomic_write_text, file_lock, read_text_limited
+except ImportError:  # direct script execution
+    from _safe_io import atomic_write_text, file_lock, read_text_limited
+
 OBSIDIAN_VAULT = Path(os.environ.get(
     "OBSIDIAN_VAULT_PATH",
     str(Path.home() / "workspace" / "company"),
@@ -49,6 +54,20 @@ TRACKING_FILE = (
 )
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+CAPTURE_BOOTSTRAP = """\
+import runpy
+import sys
+
+capture, db, agent, source, tags, intent, title = sys.argv[1:]
+args = [capture, "--db", db, "--content", sys.stdin.read(), "--agent", agent,
+        "--source", source, "--tags", tags, "--force-capture"]
+if intent:
+    args.extend(["--intent", intent])
+if title:
+    args.extend(["--title", title])
+sys.argv = args
+runpy.run_path(capture, run_name="__main__")
+"""
 
 # Obsidian 中不该自动捕获的路径
 EXCLUDE_PATTERNS = [
@@ -103,8 +122,8 @@ def find_candidate_notes(vault: Path) -> list[Path]:
         if any(pat in rel for pat in EXCLUDE_PATTERNS):
             continue
         try:
-            raw = md_file.read_text(encoding="utf-8", errors="replace")
-        except (OSError, PermissionError):
+            raw = read_text_limited(md_file, max_bytes=10 * 1024 * 1024, errors="replace")
+        except (OSError, ValueError):
             continue
         fm = parse_frontmatter(raw)
         if fm.get("swarm") == "capture" or str(fm.get("swarm", "")).lower() == "capture":
@@ -120,7 +139,8 @@ def compute_content_hash(content: str) -> str:
 def load_tracking() -> dict:
     if TRACKING_FILE.exists():
         try:
-            return json.loads(TRACKING_FILE.read_text(encoding="utf-8"))
+            value = json.loads(TRACKING_FILE.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
         except (json.JSONDecodeError, OSError):
             pass
     return {}
@@ -128,12 +148,17 @@ def load_tracking() -> dict:
 
 def save_tracking(tracking: dict) -> None:
     TRACKING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    from _safe_io import file_lock
     with file_lock(TRACKING_FILE):
-        TRACKING_FILE.write_text(
-            json.dumps(tracking, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        current: dict = {}
+        if TRACKING_FILE.is_file():
+            try:
+                value = json.loads(TRACKING_FILE.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    current = value
+            except (OSError, json.JSONDecodeError):
+                pass
+        current.update(tracking)
+        atomic_write_text(TRACKING_FILE, json.dumps(current, ensure_ascii=False, indent=2))
 
 
 def get_title_from_note(text: str, path: Path) -> str:
@@ -151,8 +176,8 @@ def get_title_from_note(text: str, path: Path) -> str:
 def capture_note(path: Path, dry_run: bool) -> str | None:
     """Capture one Obsidian note to Swarm KB. Returns entry_id or None."""
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, PermissionError) as exc:
+        raw = read_text_limited(path, max_bytes=10 * 1024 * 1024, errors="replace")
+    except (OSError, ValueError) as exc:
         return f"read_error:{exc}"
 
     fm = parse_frontmatter(raw)
@@ -163,10 +188,14 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
     title = get_title_from_note(raw, path)
 
     # Build capture args
-    tags = json.dumps(fm.get("swarm_tags", fm.get("tags", [])))
-    if isinstance(tags, list):
-        tags = ",".join(tags)
-    tags = tags.strip("[]").replace('"', "").replace("'", "").replace(" ", "")
+    raw_tags = fm.get("swarm_tags", fm.get("tags", []))
+    if isinstance(raw_tags, (list, tuple, set)):
+        tag_items = [str(item).strip() for item in raw_tags]
+    elif isinstance(raw_tags, str):
+        tag_items = [item.strip() for item in raw_tags.strip("[]").split(",")]
+    else:
+        tag_items = []
+    tags = ",".join(item for item in tag_items if item)
 
     agent = str(fm.get("swarm_agent", "obsidian"))
     source = str(fm.get("swarm_source", "article"))
@@ -180,26 +209,19 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
         return None
 
     cmd = [
-        sys.executable, str(CAPTURE_PY),
-        "--db", str(SWARM_DB),
-        "--content", f"## {title}\n\n{body}",
-        "--agent", agent,
-        "--source", source,
-        "--tags", tags or "obsidian",
-        "--force-capture",
+        sys.executable, "-c", CAPTURE_BOOTSTRAP, str(CAPTURE_PY), str(SWARM_DB),
+        agent, source, tags or "obsidian", intent, title,
     ]
-    if intent:
-        cmd.extend(["--intent", intent])
-    if title:
-        cmd.extend(["--title", title])
 
     try:
         proc = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=30,
+            input=f"## {title}\n\n{body}", capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return "timeout"
+    except OSError as exc:
+        return f"error:{exc}"
 
     output = (proc.stdout or "").strip()
     if proc.returncode != 0:
@@ -231,12 +253,18 @@ def main():
 
     tracking = load_tracking()
     results = []
+    unchanged = 0
 
     for path in sorted(candidates):
         rel = str(path.relative_to(vault))
         content_hash = ""
         if not args.dry_run:
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            try:
+                raw = read_text_limited(path, max_bytes=10 * 1024 * 1024, errors="replace")
+            except (OSError, ValueError) as exc:
+                print(f"  ❌ {rel} → read_error:{exc}")
+                results.append((rel, f"read_error:{exc}"))
+                continue
             content_hash = compute_content_hash(raw)
 
             # Skip if already captured (same content hash)
@@ -244,6 +272,7 @@ def main():
             if existing.get("content_hash") == content_hash:
                 if args.verbose:
                     print(f"  SKIP {rel} (unchanged)")
+                unchanged += 1
                 continue
 
         result = capture_note(path, dry_run=args.dry_run)
@@ -265,15 +294,15 @@ def main():
 
     # Summary
     captured = sum(1 for _, s in results if s == "captured")
-    _skipped = sum(1 for _, s in results if s == "dry-run")
     errors = sum(1 for _, s in results if s and s.startswith(("error:", "read_error:", "timeout")))
-    _unchanged = sum(1 for _, s in results if s == "skip" or (s or "").startswith("skip"))
 
     parts = []
     if captured:
         parts.append(f"{captured} captured")
     if errors:
         parts.append(f"{errors} errors")
+    if unchanged:
+        parts.append(f"{unchanged} unchanged")
     if args.dry_run:
         parts.append(f"{len(candidates)} candidates (dry-run)")
     elif not captured and not errors:

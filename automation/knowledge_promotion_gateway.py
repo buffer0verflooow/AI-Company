@@ -7,12 +7,18 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable
+
+try:
+    from ._safe_io import atomic_write_text, read_text_limited, sqlite_uri
+except ImportError:  # direct script execution
+    from _safe_io import atomic_write_text, read_text_limited, sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -70,11 +76,13 @@ def utc_now() -> str:
 
 def connect_gate(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.executescript(
-        """
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.executescript(
+            """
         CREATE TABLE IF NOT EXISTS promotion_candidates (
             candidate_id TEXT PRIMARY KEY,
             knowledge_id TEXT NOT NULL UNIQUE,
@@ -97,10 +105,14 @@ def connect_gate(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_promotion_status
         ON promotion_candidates(status, updated_at DESC);
-        """
-    )
-    db.commit()
-    return db
+            """
+        )
+        db.commit()
+        return db
+    except BaseException:
+        if db is not None:
+            db.close()
+        raise
 
 
 def _tags(value: Any) -> set[str]:
@@ -108,6 +120,8 @@ def _tags(value: Any) -> set[str]:
         parsed = json.loads(value or "[]")
     except json.JSONDecodeError:
         parsed = []
+    if not isinstance(parsed, (list, tuple, set)):
+        return set()
     return {str(item).strip().lower() for item in parsed if str(item).strip()}
 
 
@@ -116,7 +130,16 @@ def _trust(value: Any) -> Dict[str, float]:
         parsed = json.loads(value or "{}")
     except json.JSONDecodeError:
         parsed = {}
-    return {key: float(parsed.get(key, 0.0) or 0.0) for key in ("logic_soundness", "base_confidence", "cross_validation")}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    result: Dict[str, float] = {}
+    for key in ("logic_soundness", "base_confidence", "cross_validation"):
+        try:
+            score = float(parsed.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            score = 0.0
+        result[key] = max(0.0, min(1.0, score)) if math.isfinite(score) else 0.0
+    return result
 
 
 def sensitivity_hits(text: str) -> list[str]:
@@ -157,6 +180,15 @@ def sanitize_preview(text: str, limit: int = 600) -> str:
     value = PATH_RE.sub("[REDACTED_PATH]", value)
     value = " ".join(value.split())
     return value[:limit]
+
+
+def _yaml_scalar(value: Any) -> str:
+    text = str(value or "")
+    if re.fullmatch(r"[A-Za-z0-9_.:@+/-]+", text) and text.lower() not in {
+        "null", "true", "false", "yes", "no", "on", "off",
+    }:
+        return text
+    return json.dumps(text, ensure_ascii=False)
 
 
 def assess(entry: sqlite3.Row) -> Dict[str, Any]:
@@ -210,17 +242,18 @@ def assess(entry: sqlite3.Row) -> Dict[str, Any]:
 
 
 def scan(swarm_db: Path, gate_db: Path) -> Dict[str, int]:
-    source = sqlite3.connect(swarm_db)
+    source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
     source.row_factory = sqlite3.Row
-    gate = connect_gate(gate_db)
+    gate: sqlite3.Connection | None = None
     counts: Dict[str, int] = {}
     now = utc_now()
     try:
+        gate = connect_gate(gate_db)
         entries = source.execute(
             """SELECT id,level,knowledge_type,content,title,domain,knowledge_intent,
                       trust_vector,status,tags,last_validated_at
                FROM knowledge_entries WHERE status='active'"""
-        ).fetchall()
+        )
         for entry in entries:
             result = assess(entry)
             existing = gate.execute(
@@ -254,7 +287,8 @@ def scan(swarm_db: Path, gate_db: Path) -> Dict[str, int]:
         gate.commit()
     finally:
         source.close()
-        gate.close()
+        if gate is not None:
+            gate.close()
     return counts
 
 
@@ -265,7 +299,7 @@ def approve(
     reviewed_file: Path,
     disclosure_status: str,
 ) -> None:
-    content = reviewed_file.read_text(encoding="utf-8").strip()
+    content = read_text_limited(reviewed_file, max_bytes=2 * 1024 * 1024).strip()
     if disclosure_status != "public":
         raise ValueError("company Wiki promotion requires proven public disclosure/fix status")
     leaks = must_redact_hits(content)
@@ -312,13 +346,13 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
         body = (
             "---\n"
             "tags: [knowledge-promotion, reviewed]\n"
-            f"source_knowledge_id: {row['knowledge_id']}\n"
-            f"approved_by: {row['approved_by']}\n"
-            f"approved_at: {row['approved_at']}\n"
+            f"source_knowledge_id: {_yaml_scalar(row['knowledge_id'])}\n"
+            f"approved_by: {_yaml_scalar(row['approved_by'])}\n"
+            f"approved_at: {_yaml_scalar(row['approved_at'])}\n"
             "---\n\n"
             f"{content.strip()}\n"
         )
-        path.write_text(body, encoding="utf-8")
+        atomic_write_text(path, body)
         now = utc_now()
         db.execute(
             "UPDATE promotion_candidates SET status='promoted',promoted_path=?,promoted_at=?,updated_at=? WHERE candidate_id=?",

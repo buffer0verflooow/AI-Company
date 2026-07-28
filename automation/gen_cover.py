@@ -65,7 +65,7 @@ def _title_slug(title: str) -> str:
 
 def _pick_palette(seed: str) -> dict:
     """Deterministically pick a palette based on a seed string."""
-    h = hashlib.md5(seed.encode()).hexdigest()
+    h = hashlib.sha256(seed.encode()).hexdigest()
     idx = int(h[:8], 16) % len(PALETTES)
     return PALETTES[idx]
 
@@ -192,20 +192,29 @@ def generate_cover(title: str, output_dir: str, *,
     cover_path = out_dir / f"cover-{slug}.png"
     thumb_path = out_dir / f"cover-{slug}-thumb.png"
 
-    img.save(cover_path, "PNG")
+    try:
+        img.save(cover_path, "PNG")
 
-    # ── Thumbnail ──────────────────────────────────────────────────────────
-    thumb = img.copy()
-    thumb.thumbnail(thumb_size, Image.LANCZOS)
-    # If the result is smaller (non-square aspect), center on a square canvas
-    if thumb.size != thumb_size:
-        canvas = Image.new("RGB", thumb_size, bg_rgb)
-        offset_x = (thumb_size[0] - thumb.size[0]) // 2
-        offset_y = (thumb_size[1] - thumb.size[1]) // 2
-        canvas.paste(thumb, (offset_x, offset_y))
-        canvas.save(thumb_path, "PNG")
-    else:
-        thumb.save(thumb_path, "PNG")
+        # ── Thumbnail ──────────────────────────────────────────────────────
+        thumb = img.copy()
+        try:
+            thumb.thumbnail(thumb_size, Image.LANCZOS)
+            # If the result is smaller (non-square aspect), center on a square canvas
+            if thumb.size != thumb_size:
+                canvas = Image.new("RGB", thumb_size, bg_rgb)
+                try:
+                    offset_x = (thumb_size[0] - thumb.size[0]) // 2
+                    offset_y = (thumb_size[1] - thumb.size[1]) // 2
+                    canvas.paste(thumb, (offset_x, offset_y))
+                    canvas.save(thumb_path, "PNG")
+                finally:
+                    canvas.close()
+            else:
+                thumb.save(thumb_path, "PNG")
+        finally:
+            thumb.close()
+    finally:
+        img.close()
 
     return str(cover_path), str(thumb_path)
 

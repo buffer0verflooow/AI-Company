@@ -26,9 +26,23 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 try:
-    from ._safe_io import file_lock, locked_atomic_write_text, quote_identifier, sqlite_uri
+    from ._safe_io import (
+        file_lock,
+        locked_atomic_write_text,
+        quote_identifier,
+        read_text_limited,
+        scrub_environment,
+        sqlite_uri,
+    )
 except ImportError:  # direct ``python automation/company_router.py`` invocation
-    from _safe_io import file_lock, locked_atomic_write_text, quote_identifier, sqlite_uri
+    from _safe_io import (
+        file_lock,
+        locked_atomic_write_text,
+        quote_identifier,
+        read_text_limited,
+        scrub_environment,
+        sqlite_uri,
+    )
 
 
 HERE = Path(__file__).resolve().parent
@@ -206,7 +220,9 @@ def utc_now() -> str:
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
+    if not isinstance(data, dict):
+        raise ValueError("router config must be an object")
     data["config_path"] = str(path)
     return data
 
@@ -216,8 +232,8 @@ def resolve_session_origin(index_path: str, session_id: str) -> Dict[str, str]:
     if not index_path or not session_id:
         return {}
     try:
-        payload = json.loads(Path(index_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(read_text_limited(Path(index_path), max_bytes=10 * 1024 * 1024))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict):
         return {}
@@ -652,11 +668,12 @@ def _llm_fallback_classify(message: str, config: Dict[str, Any], *, timeout: int
         "只输出一行 JSON：{\"route\":\"...\",\"confidence\":0-1 之间的小数}。\n"
         f"用户消息：{message}"
     )
-    env = dict(os.environ)
+    env, _dropped = scrub_environment()
     env["COMPANY_ROUTER_BYPASS"] = "1"
+    env["HERMES_SESSION_SOURCE"] = "tool"
     cmd = [
         str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
-        "--source", "tool", "--max-turns", "1",
+        "--source", "tool", "--max-turns", "1", "--toolsets", "none",
     ]
     try:
         proc = subprocess.run(
@@ -1052,6 +1069,9 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
         "--idle-rounds", "2",
         "--json",
     ]
+    runner_env, _dropped = scrub_environment()
+    runner_env["COMPANY_ROUTER_BYPASS"] = "1"
+    runner_env["HERMES_SESSION_SOURCE"] = "tool"
     log_fh = log_path.open("a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -1062,7 +1082,7 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
-            env=dict(os.environ),
+            env=runner_env,
         )
     except BaseException:
         log_fh.close()
@@ -1072,7 +1092,18 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
 
 
 def content_job_path(config: Dict[str, Any], run_id: str) -> Path:
-    return Path(config["content_job_dir"]) / run_id
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid content run id: {value!r}")
+    root = Path(config["content_job_dir"]).resolve()
+    candidate = root / value
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"content run escapes job root: {value!r}") from exc
+    if candidate.is_symlink():
+        raise ValueError(f"content run directory may not be a symlink: {value!r}")
+    return candidate
 
 
 def launch_content_job(
@@ -1103,6 +1134,11 @@ def launch_content_job(
         raise RuntimeError(f"content job request missing: {request_path}")
 
     log_path = job_dir / "executor.log"
+    executor_env, _dropped = scrub_environment()
+    executor_env["COMPANY_ROUTER_BYPASS"] = "1"
+    executor_env["HERMES_SESSION_SOURCE"] = "tool"
+    executor_env["HERMES_WRITE_SAFE_ROOT"] = str(job_dir.resolve())
+    executor_env["TERMINAL_CWD"] = str(job_dir.resolve())
     log_fh = log_path.open("a", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -1113,7 +1149,7 @@ def launch_content_job(
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
-            env=dict(os.environ),
+            env=executor_env,
         )
     except BaseException:
         log_fh.close()
@@ -1200,13 +1236,21 @@ def refresh_session_content_jobs(config: Dict[str, Any], state: RouterState, ses
         ("dispatch_company", "公司执行 Worker"),
     ):
         for row in state.active_for_session(session_id, action=action):
-            status_path = content_job_path(config, row["run_id"]) / "status.json"
+            try:
+                status_path = content_job_path(config, row["run_id"]) / "status.json"
+            except ValueError as exc:
+                updates.append(f"- {label}任务路径无效：{exc}")
+                continue
             if not status_path.exists():
                 updates.append(f"- {label}任务 {row['run_id'][:8]} 正在启动。")
                 continue
             try:
-                payload = json.loads(status_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+                if status_path.is_symlink():
+                    raise ValueError("status file may not be a symlink")
+                payload = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+                if not isinstance(payload, dict):
+                    raise ValueError("status root must be an object")
+            except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
                 updates.append(f"- {label}任务 {row['run_id'][:8]} 状态读取失败：{exc}")
                 continue
             status = str(payload.get("status") or "unknown")
@@ -1343,7 +1387,7 @@ def _session_has_meaningful_content(
     if not hermes_db_path.is_file():
         return False
     try:
-        db = sqlite3.connect(hermes_db_path)
+        db = sqlite3.connect(sqlite_uri(hermes_db_path, mode="ro"), uri=True)
         db.row_factory = sqlite3.Row
         try:
             user_count = db.execute(

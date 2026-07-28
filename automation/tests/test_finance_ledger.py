@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.finance_ledger import add_actual, connect, report, sync_forecast, sync_snapshot, utc_now
+from automation.finance_ledger import add_actual, connect, report, sync_forecast, sync_snapshot
 
 
 class FinanceLedgerTests(unittest.TestCase):
@@ -38,6 +38,18 @@ class FinanceLedgerTests(unittest.TestCase):
             result = report(db)
             self.assertFalse(result["actual_revenue_is_zero"])
             self.assertEqual(result["actual"][0]["amount"], 100.0)
+
+    def test_actual_transaction_rejects_nonfinite_amounts(self):
+        with tempfile.TemporaryDirectory() as td:
+            evidence = Path(td) / "receipt.txt"
+            evidence.write_text("receipt", encoding="utf-8")
+            for amount in (float("nan"), float("inf"), float("-inf"), -1.0):
+                with self.subTest(amount=amount), self.assertRaises(ValueError):
+                    add_actual(
+                        Path(td) / "ledger.db", product_line="security", kind="revenue",
+                        category="bounty", amount=amount, currency="USD", description="",
+                        source_ref="run-1", evidence_path=evidence, occurred_at="2026-07-29",
+                    )
 
 
 class SessionPricingSnapshotTests(unittest.TestCase):

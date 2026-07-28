@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 from collections import defaultdict
@@ -15,6 +14,7 @@ from typing import Any, Dict
 
 try:
     from . import pricing
+    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
     from .operations_control import (
         DEFAULT_TIMEZONE,
         PROPOSAL_ID_RE,
@@ -34,6 +34,7 @@ try:
     )
 except ImportError:
     import pricing  # type: ignore[no-redef]
+    from _safe_io import atomic_write_text, read_text_limited, scrub_environment
     from operations_control import (
         DEFAULT_TIMEZONE,
         PROPOSAL_ID_RE,
@@ -54,13 +55,12 @@ except ImportError:
 
 
 HERE = Path(__file__).resolve().parent
-COMPANY_ROOT = HERE.parent
 DEFAULT_CONFIG = HERE / "operations_control_config.json"
 TVCR_INTERNAL_PREFIX = "[COMPANY_TVCR_INTERNAL]"
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
         raise ValueError("operations control config must be a JSON object")
     return value
@@ -342,7 +342,7 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
         period_end=period_end,
         thresholds=config.get("token_warning_thresholds") or {},
     )
-    evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(evidence_path, json.dumps(evidence, ensure_ascii=False, indent=2))
     review_id = create_review(
         db_path,
         review_day=review_day,
@@ -359,15 +359,18 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
     )
 
     if not runs:
-        report_path.write_text(
+        atomic_write_text(
+            report_path,
             f"# TVCR 每日经营复盘 {review_day.isoformat()}\n\n本周期没有可归集的产品线运行记录，未形成经营改进提案。\n",
-            encoding="utf-8",
         )
-        proposals_path.write_text(json.dumps({
+        atomic_write_text(proposals_path, json.dumps({
             "executive_summary": "本周期没有可归集的产品线运行记录。",
             "proposals": [],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        ids = import_proposals(db_path, review_id, json.loads(proposals_path.read_text(encoding="utf-8")))
+        }, ensure_ascii=False, indent=2))
+        ids = import_proposals(db_path, review_id, {
+            "executive_summary": "本周期没有可归集的产品线运行记录。",
+            "proposals": [],
+        })
         update_review(db_path, review_id, report_path=str(report_path))
         return {"review_id": review_id, "status": "no_action", "proposals": ids, "runs": 0, "sync": sync}
 
@@ -377,15 +380,19 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
 
     update_review(db_path, review_id, status="analyzing", error="")
     prompt = build_prompt(review_id, evidence_path, report_path, proposals_path)
-    env = dict(os.environ)
+    env, _dropped = scrub_environment()
+    env["COMPANY_ROUTER_BYPASS"] = "1"
+    env["HERMES_SESSION_SOURCE"] = "tool"
+    env["HERMES_WRITE_SAFE_ROOT"] = str(review_dir.resolve())
+    env["TERMINAL_CWD"] = str(review_dir.resolve())
     try:
         proc = subprocess.run(
             [
                 str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
                 "--source", "tool", "--max-turns", str(int(config.get("tvcr_max_turns", 20))),
-                "--pass-session-id",
+                "--pass-session-id", "--toolsets", "file",
             ],
-            cwd=str(COMPANY_ROOT.parent),
+            cwd=str(review_dir),
             env=env,
             capture_output=True,
             text=True,
@@ -406,12 +413,12 @@ def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: 
         update_review(db_path, review_id, status="failed", error=error, report_path=str(report_path))
         return {"review_id": review_id, "status": "failed", "error": error, "runs": len(runs), "sync": sync}
     try:
-        proposal_payload = json.loads(proposals_path.read_text(encoding="utf-8"))
+        proposal_payload = json.loads(read_text_limited(proposals_path, max_bytes=2_000_000))
         if not isinstance(proposal_payload, dict):
             raise ValueError("proposals root must be an object")
         validation_errors = validate_outputs(
             evidence,
-            report_path.read_text(encoding="utf-8"),
+            read_text_limited(report_path, max_bytes=2_000_000),
             proposal_payload,
             proposal_ids=known_proposal_ids(db_path),
         )

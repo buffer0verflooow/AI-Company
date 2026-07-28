@@ -102,6 +102,38 @@ class OperatingLedgerTests(unittest.TestCase):
             self.assertEqual(row["accepted"], 1)
             self.assertEqual(row["value_score"], 4.0)
 
+    def test_sync_ignores_artifacts_outside_job_directory_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            router_db = root / "router.db"
+            state = RouterState(str(router_db))
+            event_id = state.insert("s1", "weixin", "h-artifacts", "写一篇文章", classify_message("写一篇文章"))
+            run_id = "run-artifacts"
+            state.update(event_id, run_id=run_id, status="completed")
+            state.close()
+            job_dir = root / "jobs" / run_id
+            job_dir.mkdir(parents=True)
+            inside = job_dir / "draft.md"
+            inside.write_text("inside", encoding="utf-8")
+            outside = root / "outside.md"
+            outside.write_text("outside-secret", encoding="utf-8")
+            link = job_dir / "link.md"
+            link.symlink_to(outside)
+            (job_dir / "request.json").write_text(json.dumps({
+                "run_id": run_id, "route": "article", "message": "write",
+            }), encoding="utf-8")
+            (job_dir / "status.json").write_text(json.dumps({
+                "status": "completed", "artifacts": [str(inside), str(outside), str(link)],
+            }), encoding="utf-8")
+
+            ledger = root / "operations.db"
+            sync_operational_runs(ledger, router_db, root / "jobs", root / "missing-hermes.db")
+            db = connect(ledger)
+            row = db.execute("SELECT artifacts_json,output_bytes FROM operational_runs WHERE run_id=?", (run_id,)).fetchone()
+            db.close()
+            self.assertEqual(json.loads(row["artifacts_json"]), [str(inside.resolve())])
+            self.assertEqual(row["output_bytes"], len("inside"))
+
     def test_syncs_usage_from_codex_native_session(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -551,6 +583,17 @@ class OutcomeBackfillTests(unittest.TestCase):
             self.assertEqual(row["outcome_status"], "measured")
             self.assertEqual(row["revenue_amount"], 88.0)
             self.assertEqual(row["accepted"], 1)
+
+    def test_revenue_source_ref_requires_run_id_boundary(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "ops.db"
+            self._seed_run(db_path, "run-1", "article-production", [])
+            finance = root / "finance.db"
+            self._finance_db(finance, source_ref="content-job run-10 delivered", amount=88.0)
+            out = backfill_outcomes(db_path, finance_db=finance, article_perf_db=root / "none.db")
+            self.assertEqual(out["backfilled"], 0)
+            self.assertEqual(out["still_unmeasured"], 1)
 
     def test_backfill_never_overwrites_measured_run(self):
         with tempfile.TemporaryDirectory() as td:

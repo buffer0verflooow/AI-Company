@@ -16,9 +16,15 @@ collapses to zero.  A run that cannot be priced stays explicitly ``unpriced``
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    from ._safe_io import sqlite_uri
+except ImportError:  # direct ``python automation/pricing.py`` invocation
+    from _safe_io import sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -48,6 +54,21 @@ def _base(slug: str) -> str:
     return slug.rsplit("/", 1)[-1] if slug else ""
 
 
+def _counter(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _nonnegative_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> Dict[str, Any]:
     """Load evidence-backed prices read-only.
 
@@ -58,7 +79,7 @@ def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> Dict[str, Any]:
     by_slug: Dict[str, List[Dict[str, Any]]] = {}
     by_base: Dict[str, List[Dict[str, Any]]] = {}
     try:
-        db = sqlite3.connect(f"file:{finance_db}?mode=ro", uri=True)
+        db = sqlite3.connect(sqlite_uri(finance_db, mode="ro"), uri=True)
     except sqlite3.Error:
         return {"by_slug": by_slug, "by_base": by_base}
     db.row_factory = sqlite3.Row
@@ -133,7 +154,7 @@ def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> 
     components that are absent for the model are listed in
     ``unpriced_components`` rather than assumed free-but-hidden.
     """
-    token_counts = {field: int(tokens.get(field) or 0) for field, _ in _COST_COMPONENTS}
+    token_counts = {field: _counter(tokens.get(field)) for field, _ in _COST_COMPONENTS}
     total_tokens = sum(token_counts.values())
     result: Dict[str, Any] = {
         "estimated_cost_usd": None,
@@ -160,20 +181,20 @@ def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> 
         count = token_counts[field]
         if not count:
             continue
-        rate = price.get(price_col)
+        rate = _nonnegative_float(price.get(price_col))
         if rate is None:
             unpriced.append(field)
             continue
-        native += count * float(rate) / PER_MILLION
+        native += count * rate / PER_MILLION
         priced.append(field)
 
     currency = price["currency"]
-    native = round(native, 6)
+    native_amount = round(native, 6) if priced else None
     result.update({
-        "estimated_cost_native": native,
+        "estimated_cost_native": native_amount,
         "estimated_cost_currency": currency,
         # USD only when the price itself is USD — no invented FX rate.
-        "estimated_cost_usd": native if currency == "USD" else None,
+        "estimated_cost_usd": native_amount if currency == "USD" else None,
         "cost_status": "estimated" if priced else "unpriced",
         "matched_slug": price["model_slug"],
         "matched_provider": price["provider"],
@@ -224,19 +245,28 @@ def cost_rollup(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     priced_runs = 0
     for run in runs:
         status = _norm(run.get("cost_status") or "unknown")
-        tokens = sum(int(run.get(field) or 0) for field, _ in _COST_COMPONENTS)
+        tokens = sum(_counter(run.get(field)) for field, _ in _COST_COMPONENTS)
         if status in ACTUAL_COST_STATUSES:
-            confirmed_usd += float(run.get("actual_cost_usd") or 0)
-            priced_runs += 1
+            amount = _nonnegative_float(run.get("actual_cost_usd"))
+            if amount is None:
+                unpriced_runs += 1
+                unpriced_tokens += tokens
+            else:
+                confirmed_usd += amount
+                priced_runs += 1
         elif status == "estimated":
-            priced_runs += 1
-            usd = run.get("estimated_cost_usd")
-            if usd is not None:
-                estimated_usd += float(usd)
-            native = run.get("estimated_cost_native")
+            usd = _nonnegative_float(run.get("estimated_cost_usd"))
+            native = _nonnegative_float(run.get("estimated_cost_native"))
             currency = str(run.get("estimated_cost_currency") or "").upper()
-            if usd is None and native is not None and currency:
-                estimated_native[currency] = round(estimated_native.get(currency, 0.0) + float(native), 6)
+            if usd is not None:
+                estimated_usd += usd
+                priced_runs += 1
+            elif native is not None and currency:
+                estimated_native[currency] = round(estimated_native.get(currency, 0.0) + native, 6)
+                priced_runs += 1
+            else:
+                unpriced_runs += 1
+                unpriced_tokens += tokens
         else:
             unpriced_runs += 1
             unpriced_tokens += tokens

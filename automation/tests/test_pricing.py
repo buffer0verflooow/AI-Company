@@ -123,6 +123,35 @@ class PricingTests(unittest.TestCase):
         est = estimate_cost("deepseek/deepseek-v4-pro", {"input_tokens": 100}, table)
         self.assertEqual(est["cost_status"], "unpriced")
 
+    def test_finance_db_path_with_uri_metacharacters_is_loaded_literally(self):
+        special = Path(self._tmp.name) / "finance?archive#1.db"
+        _finance_db(special)
+        table = load_price_table(special)
+        self.assertIsNotNone(match_price("gpt-5.6-sol", table))
+
+    def test_malformed_and_negative_token_counts_are_ignored(self):
+        est = estimate_cost(
+            "deepseek/deepseek-v4-pro",
+            {"input_tokens": -10, "output_tokens": "bad", "cache_read_tokens": 1_000_000},
+            self.table,
+        )
+        self.assertEqual(est["priced_components"], ["cache_read_tokens"])
+        self.assertAlmostEqual(est["estimated_cost_usd"], 0.003625, places=6)
+
+    def test_negative_and_nonfinite_rates_are_never_priced(self):
+        table = {
+            "by_slug": {},
+            "by_base": {"unsafe": [{
+                "provider": "x", "model_slug": "unsafe", "currency": "USD",
+                "input_price": -1, "output_price": float("nan"),
+                "cache_read_price": None, "cache_write_price": None,
+            }]},
+        }
+        est = estimate_cost("unsafe", {"input_tokens": 100, "output_tokens": 100}, table)
+        self.assertEqual(est["cost_status"], "unpriced")
+        self.assertIsNone(est["estimated_cost_usd"])
+        self.assertEqual(est["unpriced_components"], ["input_tokens", "output_tokens"])
+
     def test_cost_rollup_separates_confirmed_estimated_unpriced(self):
         runs = [
             {"cost_status": "estimated", "estimated_cost_usd": 1.3, "input_tokens": 100},
@@ -138,6 +167,16 @@ class PricingTests(unittest.TestCase):
         self.assertEqual(roll["unpriced_runs"], 1)
         self.assertEqual(roll["unpriced_token_volume"], 100)
         self.assertEqual(roll["priced_runs"], 3)
+
+    def test_cost_rollup_rejects_negative_and_nonfinite_amounts(self):
+        roll = cost_rollup([
+            {"cost_status": "billed", "actual_cost_usd": float("nan"), "input_tokens": 10},
+            {"cost_status": "estimated", "estimated_cost_usd": -1, "input_tokens": 20},
+        ])
+        self.assertEqual(roll["confirmed_cost_usd"], 0.0)
+        self.assertEqual(roll["estimated_cost_usd"], 0.0)
+        self.assertEqual(roll["unpriced_runs"], 2)
+        self.assertEqual(roll["unpriced_token_volume"], 30)
 
 
 if __name__ == "__main__":

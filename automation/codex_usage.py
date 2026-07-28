@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+try:
+    from ._safe_io import stream_contains
+except ImportError:  # direct script/module execution from automation/
+    from _safe_io import stream_contains
+
 
 DEFAULT_CODEX_SESSIONS = Path.home() / ".codex/sessions"
 
@@ -20,7 +25,7 @@ def _session_files(root: Path) -> Iterable[Path]:
 def _counter(value: Any) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -49,7 +54,7 @@ def read_codex_session(path: Path) -> Dict[str, Any]:
         "source_path": str(path),
     }
     final_usage: Dict[str, Any] = {}
-    with path.open(encoding="utf-8") as stream:
+    with path.open(encoding="utf-8", errors="replace") as stream:
         for raw in stream:
             try:
                 event = json.loads(raw)
@@ -91,18 +96,19 @@ def find_codex_usage(reference: str, root: Path = DEFAULT_CODEX_SESSIONS) -> Dic
     """Find the newest Codex session whose transcript contains a run reference."""
     if not reference or not root.is_dir():
         return {}
-    matches: list[Path] = []
+    newest: Path | None = None
+    newest_mtime = -1
     needle = reference.encode()
     for path in _session_files(root):
         try:
-            if needle in path.read_bytes():
-                matches.append(path)
+            if stream_contains(path, needle):
+                modified = _mtime_ns(path)
+                if modified > newest_mtime:
+                    newest = path
+                    newest_mtime = modified
         except OSError:
             continue
-    if not matches:
-        return {}
-    newest = max(matches, key=_mtime_ns)
-    if _mtime_ns(newest) < 0:
+    if newest is None:
         return {}
     try:
         return read_codex_session(newest)

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from automation.company_result_notifier import (
+    _find_cron_output,
     _fit_delivery_message,
     list_terminal_deliveries,
     process_once,
@@ -55,6 +56,42 @@ class NotifierTests(unittest.TestCase):
         )
         self.assertLessEqual(len(fitted), 1800)
         self.assertIn("通知已截断", fitted)
+
+    def test_terminal_delivery_limit_zero_returns_no_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            fallback = Path(td) / "deliveries.jsonl"
+            fallback.write_text('{"identifier":"one"}\n', encoding="utf-8")
+            self.assertEqual(list_terminal_deliveries({"delivery_fallback_path": str(fallback)}, 0), [])
+
+    def test_cron_output_rejects_traversal_job_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(_find_cron_output({"cron_output_root": td}, "../escape", ""))
+
+    def test_invalid_content_run_path_is_failed_without_filesystem_escape(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = str(root / "router.db")
+            state = RouterState(db_path)
+            decision = classify_message("写一篇 Agent 工程公众号文章")
+            event_id = state.insert(
+                "session-invalid", "weixin", "hash-invalid", "写文章", decision,
+                origin={"platform": "weixin", "chat_id": "chat"},
+            )
+            state.update(event_id, run_id="../escape", status="running")
+            state.close()
+            config = self._config(td, db_path)
+            config["content_job_dir"] = str(root / "jobs")
+            summary = process_once(
+                config,
+                deliverer=lambda *_args: (True, ""),
+                mirror=lambda *_args: True,
+            )
+            self.assertEqual(summary["failed"], 1)
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT status,error FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            state.close()
+            self.assertEqual(row["status"], "failed")
+            self.assertIn("invalid content run path", row["error"])
 
     def _setup_event(self, td: str):
         db_path = str(Path(td) / "router.db")

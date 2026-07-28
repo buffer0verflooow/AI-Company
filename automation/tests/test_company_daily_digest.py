@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from automation.company_daily_digest import build_digest, run
 from automation.company_router import RouterState, classify_message
 from automation.notification_outbox import pending
-from automation.operations_control import business_period, create_review, import_proposals
+from automation.operations_control import business_period, connect, create_review, import_proposals, utc_now
 
 
 class CompanyDailyDigestTests(unittest.TestCase):
@@ -90,6 +90,52 @@ class CompanyDailyDigestTests(unittest.TestCase):
             self.assertIn("智能体安全治理", message)
             self.assertIn("待审批提案：1（P0：1）", message)
             self.assertTrue(info["origin_available"])
+
+    def _seed_failed_run(self, operations_db: Path, run_id: str, product_line: str,
+                         quality: str, created_at: str) -> None:
+        db = connect(operations_db)
+        db.execute(
+            """INSERT INTO operational_runs (run_id,product_line,source_type,status,
+               quality_status,created_at,completed_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (run_id, product_line, "content-job", "failed", quality, created_at, created_at, utc_now()),
+        )
+        db.commit()
+        db.close()
+
+    def test_digest_clusters_recent_failures(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = self._setup(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            operations_db = root / "operations.db"
+            recent = "2026-07-25T18:00:00+00:00"  # inside the 24h window
+            self._seed_failed_run(operations_db, "f1", "security-exploration", "empty_output", recent)
+            self._seed_failed_run(operations_db, "f2", "security-exploration", "empty_output", recent)
+            self._seed_failed_run(operations_db, "f3", "article-production", "missing_qa", recent)
+            self._seed_failed_run(operations_db, "old", "company", "empty_output", "2026-07-01T00:00:00+00:00")
+
+            message, info = build_digest(
+                config,
+                now=datetime(2026, 7, 26, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+            self.assertIn("失败聚类：3 次失败，2 个类别", message)
+            self.assertIn("security-exploration / empty_output：2 次", message)
+            clusters = info["failure_clusters"]
+            self.assertEqual(clusters[0]["count"], 2)  # ranked most-frequent first
+            self.assertNotIn("old", [c.get("run_id") for c in clusters])  # window excludes stale failure
+
+    def test_digest_reports_no_failures_cleanly(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = self._setup(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            message, info = build_digest(
+                config,
+                now=datetime(2026, 7, 26, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+            self.assertIn("失败聚类：无失败运行", message)
+            self.assertEqual(info["failure_clusters"], [])
 
     def test_run_enqueues_one_daily_notification(self):
         with tempfile.TemporaryDirectory() as td:

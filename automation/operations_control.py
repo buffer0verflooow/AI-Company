@@ -1632,6 +1632,138 @@ def reap_experiments(
     return {"advanced_to_evaluating": advanced, "due_backfilled": backfilled, "stale_planned": stale_planned}
 
 
+DEFAULT_STALE_RUN_MINUTES = 120
+
+
+def _age_minutes(reference: str, *, now: Optional[datetime] = None) -> float:
+    dt = _parse_dt(reference)
+    if dt is None:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    return max(0.0, (now - dt).total_seconds() / 60.0)
+
+
+def _runner_pid_alive(pid: Any, run_id: str) -> bool:
+    """True only if *pid* is a live worker process for *run_id*.
+
+    Mirrors the notifier's liveness probe: a recycled PID that now belongs to an
+    unrelated process must not keep a dead run pinned to ``running``.
+    """
+    try:
+        pid_int = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        cmdline = Path(f"/proc/{pid_int}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        return False
+    return run_id in cmdline and ("content_hermes_executor.py" in cmdline or "swarm_runner.py" in cmdline)
+
+
+def reap_stale_runs(
+    db_path: Path = DEFAULT_DB,
+    *,
+    router_db: Path = DEFAULT_ROUTER_DB,
+    stale_minutes: float = DEFAULT_STALE_RUN_MINUTES,
+    now: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Terminalize operational runs stuck in ``running``/``submitted``.
+
+    A worker can die before writing ``status.json`` (e.g. an executor crash on
+    startup), leaving both the router event and the derived operational run
+    pinned to ``running`` forever.  The result notifier restarts such runs a
+    bounded number of times but never records a terminal outcome once restarts
+    are exhausted, so cost/outcome reporting keeps counting them as in-flight.
+
+    This reaps any run older than *stale_minutes* whose worker PID is no longer
+    alive: the operational run becomes ``failed`` and the backing router event is
+    terminalized too, so ``sync_operational_runs`` cannot resurrect it.  Live
+    workers are always left untouched.  Idempotent.
+    """
+    now_dt = now or datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat(timespec="seconds")
+
+    # Runner PIDs live in the router DB; join them back to each run.
+    runner_pids: Dict[str, Any] = {}
+    if router_db.is_file():
+        source = sqlite3.connect(router_db)
+        source.row_factory = sqlite3.Row
+        try:
+            for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
+                runner_pids[str(row["run_id"])] = row["runner_pid"]
+        finally:
+            source.close()
+
+    reaped: list[str] = []
+    skipped_alive: list[str] = []
+    db = connect(db_path)
+    try:
+        rows = db.execute(
+            "SELECT run_id, started_at, created_at, input_tokens, output_tokens, "
+            "output_bytes, outcome_notes, evidence_json FROM operational_runs "
+            "WHERE status IN ('running','submitted')"
+        ).fetchall()
+        for row in rows:
+            run_id = str(row["run_id"])
+            reference = str(row["started_at"] or row["created_at"] or "")
+            if _age_minutes(reference, now=now_dt) < stale_minutes:
+                continue
+            if _runner_pid_alive(runner_pids.get(run_id), run_id):
+                skipped_alive.append(run_id)
+                continue
+            reaped.append(run_id)
+            if dry_run:
+                continue
+            empty = (
+                int(row["input_tokens"] or 0) == 0
+                and int(row["output_tokens"] or 0) == 0
+                and int(row["output_bytes"] or 0) == 0
+            )
+            quality = "empty_output" if empty else "unmeasured"
+            note = f"stale run reaped at {now_iso}: worker not alive after >={stale_minutes:.0f}m running"
+            existing_note = str(row["outcome_notes"] or "").strip()
+            outcome_notes = f"{existing_note}\n{note}".strip() if existing_note else note
+            try:
+                evidence = json.loads(row["evidence_json"] or "{}")
+                if not isinstance(evidence, dict):
+                    evidence = {}
+            except (TypeError, json.JSONDecodeError):
+                evidence = {}
+            evidence["stale_reaped"] = {"at": now_iso, "stale_minutes": stale_minutes}
+            db.execute(
+                "UPDATE operational_runs SET status='failed', quality_status=?, "
+                "completed_at=CASE WHEN completed_at IS NULL OR completed_at='' THEN ? ELSE completed_at END, "
+                "outcome_notes=?, evidence_json=?, updated_at=? WHERE run_id=?",
+                (quality, now_iso, outcome_notes, _json(evidence), now_iso, run_id),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    # Terminalize the backing router events so neither the next sync pass nor the
+    # notifier re-derives ``running`` or attempts another restart.
+    if reaped and not dry_run and router_db.is_file():
+        with file_lock(router_db):
+            sink = sqlite3.connect(router_db, timeout=5.0)
+            try:
+                sink.execute("PRAGMA busy_timeout=5000")
+                for run_id in reaped:
+                    sink.execute(
+                        "UPDATE route_events SET status='failed', "
+                        "error=CASE WHEN error IS NULL OR error='' THEN ? ELSE error END, "
+                        "updated_at=? WHERE run_id=? AND status IN ('running','submitted')",
+                        (f"stale run reaped at {now_iso}", now_iso, run_id),
+                    )
+                sink.commit()
+            finally:
+                sink.close()
+
+    return {"reaped": reaped, "skipped_alive": skipped_alive, "stale_minutes": stale_minutes}
+
+
 def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> Dict[str, str]:
     if not router_db.is_file():
         return {}
@@ -1705,6 +1837,10 @@ def main() -> int:
 
     sub.add_parser("reap-experiments")
 
+    reap_runs = sub.add_parser("reap-stale-runs")
+    reap_runs.add_argument("--stale-minutes", type=float, default=DEFAULT_STALE_RUN_MINUTES)
+    reap_runs.add_argument("--dry-run", action="store_true")
+
     auto_approve = sub.add_parser("auto-approve")
     auto_approve.add_argument("--actor", default="policy-auto-approve")
     auto_approve.add_argument("--dry-run", action="store_true")
@@ -1773,6 +1909,12 @@ def main() -> int:
         return 0
     if args.command == "reap-experiments":
         print(json.dumps(reap_experiments(db_path), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "reap-stale-runs":
+        print(json.dumps(
+            reap_stale_runs(db_path, stale_minutes=args.stale_minutes, dry_run=args.dry_run),
+            ensure_ascii=False, indent=2,
+        ))
         return 0
     if args.command == "auto-approve":
         print(json.dumps(auto_approve_proposals(db_path, actor=args.actor, dry_run=args.dry_run), ensure_ascii=False, indent=2))

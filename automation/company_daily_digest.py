@@ -152,6 +152,52 @@ def _market_summary(market_db: Path) -> list[str]:
     return lines
 
 
+def _failure_clusters(
+    operations_db: Path, now: datetime, *, window_hours: int = 24, top: int = 3
+) -> tuple[list[str], list[Dict[str, Any]]]:
+    """Group recent failed runs by ``product_line/quality_status``.
+
+    A flat failure count hides whether one root cause (e.g. empty security
+    output) dominates.  Clustering on the two dimensions we already record turns
+    the readout into an actionable "fix this class first" signal.  Returns the
+    rendered digest lines plus a structured payload for metadata.
+    """
+    start = (now - timedelta(hours=window_hours)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    rows = _db_rows(
+        operations_db,
+        """SELECT product_line,quality_status,outcome_notes,request_text
+           FROM operational_runs
+           WHERE status='failed' AND COALESCE(completed_at,created_at)>=?""",
+        (start,),
+    )
+    if not rows:
+        return ["近 24 小时失败聚类：无失败运行"], []
+
+    clusters: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        product = str(row["product_line"] or "unknown")
+        quality = str(row["quality_status"] or "unmeasured")
+        key = (product, quality)
+        bucket = clusters.setdefault(key, {"count": 0, "sample": ""})
+        bucket["count"] += 1
+        if not bucket["sample"]:
+            sample = " ".join(str(row["outcome_notes"] or row["request_text"] or "").split())
+            bucket["sample"] = sample[:60]
+
+    ranked = sorted(clusters.items(), key=lambda item: item[1]["count"], reverse=True)
+    payload = [
+        {"product_line": product, "quality_status": quality, "count": data["count"], "sample": data["sample"]}
+        for (product, quality), data in ranked
+    ]
+    lines = [f"近 24 小时失败聚类：{len(rows)} 次失败，{len(clusters)} 个类别"]
+    for entry in payload[:top]:
+        suffix = f"（例：{entry['sample']}）" if entry["sample"] else ""
+        lines.append(
+            f"- {entry['product_line']} / {entry['quality_status']}：{entry['count']} 次{suffix}"
+        )
+    return lines, payload
+
+
 def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> tuple[str, Dict[str, Any]]:
     zone = ZoneInfo(str(config.get("timezone") or DEFAULT_TIMEZONE))
     current = now.astimezone(zone) if now else datetime.now(zone)
@@ -161,6 +207,7 @@ def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> t
     review_state, review_text = _review_summary(operations_db)
     pending, p0, stale_proposals = _proposal_summary(operations_db, current)
     total_runs, completed_runs, measured_runs, stale_outcomes = _run_summary(operations_db, current)
+    failure_lines, failure_clusters = _failure_clusters(operations_db, current)
     origin = latest_origin(router_db)
     outbox = outbox_summary(operations_db)
     lines = [
@@ -173,6 +220,8 @@ def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> t
         f"超过 72 小时未决策：{stale_proposals} 条（系统不会代替用户批准）",
         f"近 24 小时运行：{total_runs} 次，完成 {completed_runs} 次，已计量结果 {measured_runs} 次",
         f"超过 24 小时未补录结果：{stale_outcomes} 次",
+        "",
+        *failure_lines,
         "",
         *_market_summary(market_db),
         "",
@@ -191,6 +240,7 @@ def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> t
         "completed_runs_24h": completed_runs,
         "measured_runs_24h": measured_runs,
         "stale_outcomes": stale_outcomes,
+        "failure_clusters": failure_clusters,
     }
     return message, {"origin": origin, **metadata}
 

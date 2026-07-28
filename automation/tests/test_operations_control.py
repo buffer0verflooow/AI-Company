@@ -19,6 +19,7 @@ from automation.operations_control import (
     format_review_message,
     import_proposals,
     reap_experiments,
+    reap_stale_runs,
     record_outcome,
     runs_for_period,
     sync_operational_runs,
@@ -732,6 +733,106 @@ class ProposalSLATests(unittest.TestCase):
                 "superseded",
             )
             db.close()
+
+
+class StaleRunReaperTests(unittest.TestCase):
+    def _seed_run(self, db_path: Path, run_id: str, *, status: str, started_at: str,
+                  tokens: int = 0, output_bytes: int = 0) -> None:
+        db = connect(db_path)
+        now = utc_now()
+        db.execute(
+            """INSERT INTO operational_runs (run_id,product_line,source_type,status,
+               started_at,created_at,updated_at,input_tokens,output_bytes)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (run_id, "company", "content-job", status, started_at, started_at, now, tokens, output_bytes),
+        )
+        db.commit()
+        db.close()
+
+    def _seed_router_event(self, router_db: Path, run_id: str, *, status: str, runner_pid: int) -> None:
+        state = RouterState(str(router_db))
+        event_id = state.insert(
+            "session-1", "cli", f"hash-{run_id}", f"msg {run_id}",
+            classify_message("/company 继续推进公司任务"),
+        )
+        state.update(event_id, run_id=run_id, runner_pid=runner_pid, status=status)
+        state.close()
+
+    def test_reaps_stale_running_run_with_dead_worker(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "ops.db"
+            router_db = Path(td) / "router.db"
+            old = "2026-07-21T02:00:00+00:00"
+            self._seed_run(db_path, "run-stale", status="running", started_at=old)
+            self._seed_router_event(router_db, "run-stale", status="running", runner_pid=999999999)
+
+            out = reap_stale_runs(db_path, router_db=router_db, stale_minutes=120)
+            self.assertIn("run-stale", out["reaped"])
+
+            db = connect(db_path)
+            row = db.execute(
+                "SELECT status,quality_status,completed_at FROM operational_runs WHERE run_id='run-stale'"
+            ).fetchone()
+            db.close()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["quality_status"], "empty_output")
+            self.assertTrue(row["completed_at"])
+
+            # Router event terminalized so a later sync cannot resurrect it.
+            router = sqlite3.connect(router_db)
+            rstatus = router.execute(
+                "SELECT status FROM route_events WHERE run_id='run-stale'"
+            ).fetchone()[0]
+            router.close()
+            self.assertEqual(rstatus, "failed")
+
+    def test_fresh_running_run_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "ops.db"
+            router_db = Path(td) / "router.db"
+            self._seed_run(db_path, "run-fresh", status="running", started_at=utc_now())
+            self._seed_router_event(router_db, "run-fresh", status="running", runner_pid=999999999)
+
+            out = reap_stale_runs(db_path, router_db=router_db, stale_minutes=120)
+            self.assertEqual(out["reaped"], [])
+            db = connect(db_path)
+            self.assertEqual(
+                db.execute("SELECT status FROM operational_runs WHERE run_id='run-fresh'").fetchone()[0],
+                "running",
+            )
+            db.close()
+
+    def test_reaper_is_idempotent_and_ignores_terminal_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "ops.db"
+            router_db = Path(td) / "router.db"
+            old = "2026-07-21T02:00:00+00:00"
+            self._seed_run(db_path, "run-stale", status="running", started_at=old)
+            self._seed_run(db_path, "run-done", status="completed", started_at=old)
+            self._seed_router_event(router_db, "run-stale", status="running", runner_pid=999999999)
+
+            first = reap_stale_runs(db_path, router_db=router_db, stale_minutes=120)
+            second = reap_stale_runs(db_path, router_db=router_db, stale_minutes=120)
+            self.assertEqual(first["reaped"], ["run-stale"])
+            self.assertEqual(second["reaped"], [])  # already failed, nothing to do
+
+    def test_dry_run_reports_without_mutating(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "ops.db"
+            router_db = Path(td) / "router.db"
+            old = "2026-07-21T02:00:00+00:00"
+            self._seed_run(db_path, "run-stale", status="running", started_at=old)
+            self._seed_router_event(router_db, "run-stale", status="running", runner_pid=999999999)
+
+            out = reap_stale_runs(db_path, router_db=router_db, stale_minutes=120, dry_run=True)
+            self.assertEqual(out["reaped"], ["run-stale"])
+            db = connect(db_path)
+            self.assertEqual(
+                db.execute("SELECT status FROM operational_runs WHERE run_id='run-stale'").fetchone()[0],
+                "running",
+            )
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

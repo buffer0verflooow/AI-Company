@@ -742,35 +742,82 @@ def cost_report(db_path: Path = DEFAULT_DB) -> Dict[str, Any]:
     return {"rollup": pricing.cost_rollup(runs), "by_model": by_model}
 
 
-_TITLE_ARTIFACT_NAMES = ("draft-humanized.md", "draft.md", "draft-formatted.md")
+# Draft variants a content run may leave behind, most-final first.  Humanising
+# and formatting can each rewrite the H1, so the published title may live in any
+# of them.
+_TITLE_ARTIFACT_NAMES = ("draft-humanized.md", "draft-formatted.md", "draft.md")
 
 
 def _normalize_title(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
 
 
-def _run_article_title(run: Dict[str, Any]) -> str:
-    """Best-effort published title of a content run = first H1 of its draft."""
+def _run_article_titles(run: Dict[str, Any]) -> list[str]:
+    """Every candidate published title of a content run, most-final draft first.
+
+    For each draft artifact (humanised / formatted / plain) two candidates are
+    taken: the frontmatter ``title:`` (the exact key ``wechat_push.py`` publishes
+    under) and the first ``# `` H1.  Humanising and formatting can each rewrite
+    the H1, and the account is published under the frontmatter title, so trying
+    both (still by *exact* normalized match) recovers reach the plain-draft H1
+    alone would miss.  Nothing is fuzzy-matched or invented.
+    """
     try:
         artifacts = json.loads(run.get("artifacts_json") or "[]")
     except json.JSONDecodeError:
-        return ""
+        return []
     by_name = {Path(str(a)).name: str(a) for a in artifacts if isinstance(a, str)}
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    def _add(title: str) -> None:
+        key = _normalize_title(title)
+        if title and key and key not in seen:
+            seen.add(key)
+            titles.append(title)
+
     for name in _TITLE_ARTIFACT_NAMES:
         path = by_name.get(name)
         if not path or not Path(path).is_file():
             continue
         try:
-            for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("# "):
-                    return line[2:].strip()
+            lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-    return ""
+        in_frontmatter = False
+        h1 = ""
+        fence_seen = 0
+        for line in lines[:60]:
+            stripped = line.strip()
+            if stripped == "---" and fence_seen < 2:
+                in_frontmatter = not in_frontmatter
+                fence_seen += 1
+                continue
+            if in_frontmatter and line.startswith("title:"):
+                _add(line.split(":", 1)[1].strip())
+            elif not in_frontmatter and not h1 and line.startswith("# "):
+                h1 = line[2:].strip()
+        if h1:
+            _add(h1)
+    return titles
+
+
+def _run_article_title(run: Dict[str, Any]) -> str:
+    """Best-effort single published title of a content run (first candidate)."""
+    titles = _run_article_titles(run)
+    return titles[0] if titles else ""
 
 
 def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
-    """Map exact-normalized published title -> reach evidence (read-only)."""
+    """Map exact-normalized published title -> reach/publish evidence (read-only).
+
+    Reads both measured tables in ``article_performance.db``:
+      * ``article_metrics`` — the per-article snapshot (reads, published_at, platform).
+      * ``article_source_metrics`` — per-channel reads; the aggregate ('全部'/total)
+        channel is a second, independent publish+reach witness used only for titles
+        that ``article_metrics`` does not already carry.
+    Only exact normalized titles are indexed; nothing is fuzzy-matched or invented.
+    """
     out: Dict[str, Dict[str, Any]] = {}
     try:
         db = sqlite3.connect(f"file:{article_perf_db}?mode=ro", uri=True)
@@ -778,18 +825,48 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
         return out
     db.row_factory = sqlite3.Row
     try:
-        cols = {row[1] for row in db.execute("PRAGMA table_info(article_metrics)")}
-        if not {"title", "reads"}.issubset(cols):
-            return out
-        for row in db.execute("SELECT article_id,title,reads,published_at,platform FROM article_metrics"):
-            key = _normalize_title(row["title"])
-            if key and key not in out:
-                out[key] = {
-                    "article_id": str(row["article_id"]),
-                    "reads": int(row["reads"] or 0),
-                    "published_at": str(row["published_at"] or ""),
-                    "platform": str(row["platform"] or ""),
-                }
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "article_metrics" in tables:
+            cols = {row[1] for row in db.execute("PRAGMA table_info(article_metrics)")}
+            if {"title", "reads"}.issubset(cols):
+                for row in db.execute("SELECT article_id,title,reads,published_at,platform FROM article_metrics"):
+                    key = _normalize_title(row["title"])
+                    if key and key not in out:
+                        out[key] = {
+                            "article_id": str(row["article_id"]),
+                            "reads": int(row["reads"] or 0),
+                            "published_at": str(row["published_at"] or ""),
+                            "platform": str(row["platform"] or ""),
+                            "source": "article_metrics",
+                        }
+        if "article_source_metrics" in tables:
+            cols = {row[1] for row in db.execute("PRAGMA table_info(article_source_metrics)")}
+            if {"title", "reads", "channel"}.issubset(cols):
+                totals: Dict[str, Dict[str, Any]] = {}
+                for row in db.execute("SELECT title,channel,reads,published_at FROM article_source_metrics"):
+                    key = _normalize_title(row["title"])
+                    channel = str(row["channel"] or "").strip()
+                    # Skip the exported header row ("内容标题 / 传播渠道 / 发表日期").
+                    if not key or channel == "传播渠道" or key == _normalize_title("内容标题"):
+                        continue
+                    reads = int(row["reads"] or 0)
+                    bucket = totals.setdefault(key, {"reads": 0, "published_at": "", "has_total": False})
+                    if channel in {"全部", "all", "total", "合计"}:
+                        bucket["reads"] = reads
+                        bucket["has_total"] = True
+                    elif not bucket["has_total"]:
+                        bucket["reads"] = max(int(bucket["reads"]), reads)
+                    if not bucket["published_at"]:
+                        bucket["published_at"] = str(row["published_at"] or "")
+                for key, bucket in totals.items():
+                    if key not in out:
+                        out[key] = {
+                            "article_id": "",
+                            "reads": int(bucket["reads"]),
+                            "published_at": str(bucket["published_at"]),
+                            "platform": "",
+                            "source": "article_source_metrics",
+                        }
     except sqlite3.Error:
         return {}
     finally:
@@ -826,14 +903,21 @@ def backfill_outcomes(
 
     Attributes a run to a business outcome only via a strong key: a finance
     revenue transaction whose ``source_ref`` names the run, or an exact
-    normalized title match against measured article reach.  Runs with no such
-    evidence stay ``unmeasured`` (never invented).  Never overwrites a run that
-    already has a recorded outcome.
+    normalized title match against measured article reach (from either
+    ``article_metrics`` or the aggregate ``article_source_metrics`` channel).
+    Runs with no such evidence stay ``unmeasured`` (never invented).  Never
+    overwrites a run that already has a recorded outcome.
+
+    A title that matches a *published* measured article (one carrying a real
+    publish date) is recorded as ``published=1`` and ``accepted=1``: publishing
+    to the official account is an explicit human adoption act, distinct from a
+    result merely delivered to chat.  ``reach`` is the measured read count.
     """
     reach = _load_article_reach(article_perf_db)
     revenue = _load_revenue_transactions(finance_db)
     now = utc_now()
     matched: list[Dict[str, Any]] = []
+    by_source: Dict[str, int] = {}
     unresolved = 0
     db = connect(db_path)
     try:
@@ -855,16 +939,26 @@ def backfill_outcomes(
                     source = "finance-revenue"
                     break
             if fields is None and str(run.get("product_line") or "").startswith("article"):
-                title = _run_article_title(run)
-                hit = reach.get(_normalize_title(title)) if title else None
+                hit: Optional[Dict[str, Any]] = None
+                matched_title = ""
+                for title in _run_article_titles(run):
+                    candidate = reach.get(_normalize_title(title))
+                    if candidate:
+                        hit, matched_title = candidate, title
+                        break
                 if hit:
+                    published_at = str(hit.get("published_at") or "").strip()
                     fields = {
                         "outcome_status": "measured", "published": 1, "reach": hit["reads"],
                         "outcome_notes": (
-                            f"auto-backfill: article_metrics {hit['article_id']} "
-                            f"title='{title}' reads={hit['reads']}"
-                        ),
+                            f"auto-backfill: {hit.get('source') or 'article_metrics'} "
+                            f"{hit.get('article_id') or ''} title='{matched_title}' reads={hit['reads']}"
+                        ).replace("  ", " ").strip(),
                     }
+                    # Publication to the official account is an explicit adoption
+                    # act; a mere reach row with no publish date is not.
+                    if published_at:
+                        fields["accepted"] = 1
                     source = "article-reach"
             if fields is None:
                 unresolved += 1
@@ -873,13 +967,15 @@ def backfill_outcomes(
             if not dry_run:
                 sql = ",".join(f"{key}=?" for key in fields)
                 db.execute(f"UPDATE operational_runs SET {sql} WHERE run_id=?", (*fields.values(), run_id))
+            by_source[source] = by_source.get(source, 0) + 1
             matched.append({"run_id": run_id, "source": source,
                             "reach": fields.get("reach"), "revenue_amount": fields.get("revenue_amount")})
         if not dry_run:
             db.commit()
     finally:
         db.close()
-    return {"dry_run": dry_run, "backfilled": len(matched), "matches": matched, "still_unmeasured": unresolved}
+    return {"dry_run": dry_run, "backfilled": len(matched), "by_source": by_source,
+            "matches": matched, "still_unmeasured": unresolved}
 
 
 def runs_for_period(db_path: Path, period_start: str, period_end: str) -> list[Dict[str, Any]]:

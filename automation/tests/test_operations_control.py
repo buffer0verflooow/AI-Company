@@ -394,6 +394,19 @@ class OutcomeBackfillTests(unittest.TestCase):
         db.commit()
         db.close()
 
+    def _article_source_db(self, path: Path, title: str, reads: int) -> None:
+        db = sqlite3.connect(path)
+        db.execute(
+            """CREATE TABLE article_source_metrics (title TEXT, channel TEXT, reads INTEGER,
+               published_at TEXT)"""
+        )
+        # An exported header row plus per-channel rows; only the aggregate counts.
+        db.execute("INSERT INTO article_source_metrics VALUES (?,?,?,?)", ("内容标题", "传播渠道", 0, "发表日期"))
+        db.execute("INSERT INTO article_source_metrics VALUES (?,?,?,?)", (title, "推荐", reads - 40, "2026-07-05"))
+        db.execute("INSERT INTO article_source_metrics VALUES (?,?,?,?)", (title, "全部", reads, "2026-07-05"))
+        db.commit()
+        db.close()
+
     def _finance_db(self, path: Path, source_ref: str, amount: float) -> None:
         db = sqlite3.connect(path)
         db.execute(
@@ -430,7 +443,78 @@ class OutcomeBackfillTests(unittest.TestCase):
             self.assertEqual(hit["outcome_status"], "measured")
             self.assertEqual(hit["reach"], 250)
             self.assertEqual(hit["published"], 1)
+            # Publication to the official account is recorded as adoption.
+            self.assertEqual(hit["accepted"], 1)
             self.assertEqual(miss["outcome_status"], "unmeasured")  # no evidence -> not invented
+
+    def test_reach_matched_via_non_primary_draft_variant(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "ops.db"
+            title = "Agent 的灵魂只有 120 行代码"
+            # The plain draft H1 was rewritten during humanising; only the
+            # humanized variant carries the published title.
+            plain = root / "draft.md"
+            plain.write_text("# 一个工作草稿标题\n\n正文", encoding="utf-8")
+            humanized = root / "draft-humanized.md"
+            humanized.write_text(f"# {title}\n\n正文", encoding="utf-8")
+            self._seed_run(db_path, "run-variant", "article-production", [str(plain), str(humanized)])
+            perf = root / "perf.db"
+            self._article_perf_db(perf, title, 300)
+
+            out = backfill_outcomes(db_path, finance_db=root / "none.db", article_perf_db=perf)
+            self.assertEqual(out["backfilled"], 1)
+            db = connect(db_path)
+            row = db.execute("SELECT * FROM operational_runs WHERE run_id='run-variant'").fetchone()
+            db.close()
+            self.assertEqual(row["outcome_status"], "measured")
+            self.assertEqual(row["reach"], 300)
+
+    def test_reach_backfilled_from_source_metrics_total_channel(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "ops.db"
+            title = "只在渠道分表里出现的文章"
+            draft = root / "draft-humanized.md"
+            draft.write_text(f"# {title}\n\n正文", encoding="utf-8")
+            self._seed_run(db_path, "run-src", "article-production", [str(draft)])
+            perf = root / "perf.db"
+            # Only article_source_metrics carries this title; the aggregate wins.
+            self._article_source_db(perf, title, 120)
+
+            out = backfill_outcomes(db_path, finance_db=root / "none.db", article_perf_db=perf)
+            self.assertEqual(out["backfilled"], 1)
+            self.assertEqual(out["by_source"]["article-reach"], 1)
+            db = connect(db_path)
+            row = db.execute("SELECT * FROM operational_runs WHERE run_id='run-src'").fetchone()
+            db.close()
+            self.assertEqual(row["reach"], 120)  # aggregate '全部' channel, not '推荐'
+            self.assertEqual(row["published"], 1)
+
+    def test_reach_matched_via_frontmatter_title_when_h1_differs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "ops.db"
+            published = "发布用的最终标题"
+            draft = root / "draft-humanized.md"
+            # Frontmatter title is what wechat_push publishes under; the visible
+            # H1 was left as an earlier working headline.
+            draft.write_text(
+                f"---\ntitle: {published}\nauthor: x\n---\n\n# 一个较早的工作标题\n\n正文",
+                encoding="utf-8",
+            )
+            self._seed_run(db_path, "run-fm", "article-production", [str(draft)])
+            perf = root / "perf.db"
+            self._article_perf_db(perf, published, 77)
+
+            out = backfill_outcomes(db_path, finance_db=root / "none.db", article_perf_db=perf)
+            self.assertEqual(out["backfilled"], 1)
+            db = connect(db_path)
+            row = db.execute("SELECT * FROM operational_runs WHERE run_id='run-fm'").fetchone()
+            db.close()
+            self.assertEqual(row["reach"], 77)
+            self.assertEqual(row["accepted"], 1)
+
 
     def test_revenue_backfilled_on_source_ref_key(self):
         with tempfile.TemporaryDirectory() as td:

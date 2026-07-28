@@ -20,15 +20,18 @@ REPO = Path("/home/pwn/workspace/company")
 
 
 def _run(*args: str) -> tuple[int, str]:
-    proc = subprocess.run(
-        args,
-        cwd=REPO,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=20,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=REPO,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, f"{exc.__class__.__name__}: {exc}"
     # Preserve the two leading porcelain status columns; ``strip()`` would
     # remove the first column of the first dirty path and make scope checks
     # unreliable.

@@ -17,6 +17,20 @@ def _session_files(root: Path) -> Iterable[Path]:
     return root.glob("*/*.jsonl")
 
 
+def _counter(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
 def read_claude_session(path: Path) -> Dict[str, Any]:
     """Return deduplicated counters and metadata for one Claude Code session."""
     result: Dict[str, Any] = {
@@ -42,6 +56,8 @@ def read_claude_session(path: Path) -> Dict[str, Any]:
                 event = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(event, dict):
+                continue
             timestamp = str(event.get("timestamp") or "")
             if timestamp:
                 if not result["started_at"]:
@@ -55,10 +71,10 @@ def read_claude_session(path: Path) -> Dict[str, Any]:
             usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
             if message_id and usage and message_id not in seen_messages:
                 seen_messages.add(message_id)
-                result["input_tokens"] += int(usage.get("input_tokens") or 0)
-                result["output_tokens"] += int(usage.get("output_tokens") or 0)
-                result["cache_read_tokens"] += int(usage.get("cache_read_input_tokens") or 0)
-                result["cache_write_tokens"] += int(usage.get("cache_creation_input_tokens") or 0)
+                result["input_tokens"] += _counter(usage.get("input_tokens"))
+                result["output_tokens"] += _counter(usage.get("output_tokens"))
+                result["cache_read_tokens"] += _counter(usage.get("cache_read_input_tokens"))
+                result["cache_write_tokens"] += _counter(usage.get("cache_creation_input_tokens"))
             content = message.get("content") if isinstance(message.get("content"), list) else []
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -84,4 +100,10 @@ def find_claude_usage(reference: str, root: Path = DEFAULT_CLAUDE_PROJECTS) -> D
             continue
     if not matches:
         return {}
-    return read_claude_session(max(matches, key=lambda item: item.stat().st_mtime_ns))
+    newest = max(matches, key=_mtime_ns)
+    if _mtime_ns(newest) < 0:
+        return {}
+    try:
+        return read_claude_session(newest)
+    except OSError:
+        return {}

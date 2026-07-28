@@ -27,9 +27,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 try:
     from .operations_control import connect as connect_operations
     from .operations_control import latest_origin, update_experiment, utc_now
+    from ._safe_io import sqlite_uri
 except ImportError:  # direct ``python automation/company_operator.py`` invocation
     from operations_control import connect as connect_operations
     from operations_control import latest_origin, update_experiment, utc_now
+    from _safe_io import sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -315,7 +317,7 @@ def discover_opportunities(
         market_db_value = str(config.get("market_signals_db") or "").strip()
         market_db_path = Path(market_db_value) if market_db_value else None
         if market_db_path and market_db_path.is_file():
-            market_db = sqlite3.connect(f"file:{market_db_path}?mode=ro", uri=True)
+            market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
             market_db.row_factory = sqlite3.Row
             try:
                 minimum_market_score = float(config.get("market_min_pulse_score", 60))

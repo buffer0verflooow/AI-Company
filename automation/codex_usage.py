@@ -17,6 +17,20 @@ def _session_files(root: Path) -> Iterable[Path]:
     return root.glob("*/*/*/rollout-*.jsonl")
 
 
+def _counter(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
 def read_codex_session(path: Path) -> Dict[str, Any]:
     """Return final measured counters and metadata for one Codex session."""
     result: Dict[str, Any] = {
@@ -41,6 +55,8 @@ def read_codex_session(path: Path) -> Dict[str, Any]:
                 event = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(event, dict):
+                continue
             timestamp = str(event.get("timestamp") or "")
             if timestamp:
                 result["completed_at"] = timestamp
@@ -62,12 +78,12 @@ def read_codex_session(path: Path) -> Dict[str, Any]:
             }:
                 result["tool_call_count"] += 1
 
-    total_input = int(final_usage.get("input_tokens") or 0)
-    cached_input = int(final_usage.get("cached_input_tokens") or 0)
+    total_input = _counter(final_usage.get("input_tokens"))
+    cached_input = _counter(final_usage.get("cached_input_tokens"))
     result["input_tokens"] = max(0, total_input - cached_input)
     result["cache_read_tokens"] = cached_input
-    result["output_tokens"] = int(final_usage.get("output_tokens") or 0)
-    result["reasoning_tokens"] = int(final_usage.get("reasoning_output_tokens") or 0)
+    result["output_tokens"] = _counter(final_usage.get("output_tokens"))
+    result["reasoning_tokens"] = _counter(final_usage.get("reasoning_output_tokens"))
     return result
 
 
@@ -85,4 +101,10 @@ def find_codex_usage(reference: str, root: Path = DEFAULT_CODEX_SESSIONS) -> Dic
             continue
     if not matches:
         return {}
-    return read_codex_session(max(matches, key=lambda item: item.stat().st_mtime_ns))
+    newest = max(matches, key=_mtime_ns)
+    if _mtime_ns(newest) < 0:
+        return {}
+    try:
+        return read_codex_session(newest)
+    except OSError:
+        return {}

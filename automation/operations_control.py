@@ -19,9 +19,9 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 try:
-    from ._safe_io import file_lock, quote_identifier
+    from ._safe_io import file_lock, quote_identifier, sqlite_uri
 except ImportError:  # direct ``python automation/operations_control.py`` invocation
-    from _safe_io import file_lock, quote_identifier
+    from _safe_io import file_lock, quote_identifier, sqlite_uri
 
 try:
     from . import pricing
@@ -822,7 +822,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
     """
     out: Dict[str, Dict[str, Any]] = {}
     try:
-        db = sqlite3.connect(f"file:{article_perf_db}?mode=ro", uri=True)
+        db = sqlite3.connect(sqlite_uri(article_perf_db, mode="ro"), uri=True)
     except sqlite3.Error:
         return out
     db.row_factory = sqlite3.Row
@@ -879,7 +879,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
 def _load_revenue_transactions(finance_db: Path) -> list[Dict[str, Any]]:
     """Revenue transactions to attribute to a run via an explicit source_ref key."""
     try:
-        db = sqlite3.connect(f"file:{finance_db}?mode=ro", uri=True)
+        db = sqlite3.connect(sqlite_uri(finance_db, mode="ro"), uri=True)
     except sqlite3.Error:
         return []
     db.row_factory = sqlite3.Row

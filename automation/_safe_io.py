@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Collection, Iterator, Optional
@@ -25,6 +26,17 @@ except ImportError:  # pragma: no cover
 
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LOGGER = logging.getLogger(__name__)
+
+__all__ = [
+    "atomic_write_text",
+    "file_lock",
+    "locked_append_text",
+    "locked_atomic_write_text",
+    "quote_identifier",
+    "sqlite_connection",
+    "sqlite_uri",
+]
 
 
 def quote_identifier(identifier: str, *, allowed: Optional[Collection[str]] = None) -> str:
@@ -105,8 +117,8 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
         if temporary is not None:
             try:
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                LOGGER.warning("failed to remove temporary file %s: %s", temporary, exc)
 
 
 def locked_atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
@@ -164,7 +176,7 @@ def sqlite_connection(
         yield db
         if not read_only:
             db.commit()
-    except Exception:
+    except BaseException:
         if db is not None:
             try:
                 if not read_only:

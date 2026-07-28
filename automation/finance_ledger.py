@@ -15,8 +15,10 @@ from typing import Any, Dict, Optional
 
 try:
     from . import pricing
+    from ._safe_io import sqlite_uri
 except ImportError:  # direct ``python automation/finance_ledger.py`` invocation
     import pricing  # type: ignore[no-redef]
+    from _safe_io import sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -238,7 +240,7 @@ def _hermes_cost_snapshot(
     if price_table is None:
         price_table = pricing.load_price_table()
     try:
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True)
     except sqlite3.Error:
         return result
     db.row_factory = sqlite3.Row

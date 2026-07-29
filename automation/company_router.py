@@ -800,6 +800,7 @@ class RouterState:
                     "runner_restarts": "INTEGER DEFAULT 0",
                     "quality_status": "TEXT DEFAULT ''",
                     "dedup_key": "TEXT DEFAULT ''",
+                    "last_heartbeat": "TEXT DEFAULT ''",
                 }
                 for column, definition in migrations.items():
                     if column not in columns:
@@ -955,7 +956,7 @@ class RouterState:
             "error", "delivery_platform", "delivery_chat_id", "delivery_thread_id",
             "delivery_user_id", "proactive_delivered", "delivery_attempts",
             "delivery_error", "last_delivery_at", "runner_restarts",
-            "quality_status", "updated_at",
+            "quality_status", "updated_at", "last_heartbeat",
         }
         if set(fields) - allowed:
             raise ValueError("unsupported route state field")
@@ -1728,6 +1729,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
                 "run_id": str(run.get("run_id") or ""),
                 "request_id": str(run.get("request_id") or ""),
                 "status": "submitted",
+                "last_heartbeat": utc_now(),
             }
             if config.get("auto_run_security", True) and fields["run_id"]:
                 fields["runner_pid"] = launch_runner(config, fields["run_id"], decision.intent)
@@ -1760,7 +1762,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
                         platform=platform,
                     )
                     run = {"run_id": run_id, "status": "running"}
-                    state.update(event_id, run_id=run_id, runner_pid=pid, status="running")
+                    state.update(event_id, run_id=run_id, runner_pid=pid, status="running", last_heartbeat=utc_now())
                 except Exception as exc:
                     state.update(event_id, status="failed", error=str(exc))
                     updates.append(f"- 内容产线自动提交失败：{exc}")

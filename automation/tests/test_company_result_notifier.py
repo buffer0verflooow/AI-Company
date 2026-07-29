@@ -171,6 +171,38 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual(row["delivery_error"], "network down")
             state.close()
 
+    def test_stale_runner_without_heartbeat_is_marked_suspected_dead(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path, event_id = self._setup_event(td)
+            config = self._config(td, db_path)
+            # No restart budget left and a zero heartbeat timeout: the dead runner
+            # (pid 999999 is not a swarm_runner) must be flagged suspected_dead.
+            config["max_runner_restarts"] = 0
+            config["heartbeat_timeout_minutes"] = 0
+            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "running"}):
+                summary = process_once(config)
+            self.assertEqual(summary["suspected_dead"], 1)
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT status,error FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(row["status"], "suspected_dead")
+            self.assertIn("no heartbeat", row["error"])
+            state.close()
+
+    def test_live_runner_refreshes_heartbeat_and_is_not_flagged(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path, event_id = self._setup_event(td)
+            config = self._config(td, db_path)
+            config["max_runner_restarts"] = 0
+            config["heartbeat_timeout_minutes"] = 0
+            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "running"}), \
+                 patch("automation.company_result_notifier.runner_is_alive", return_value=True):
+                summary = process_once(config)
+            self.assertEqual(summary["suspected_dead"], 0)
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT status,last_heartbeat FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertTrue(row["last_heartbeat"])
+            state.close()
     def test_failed_cron_delivery_is_recovered_by_job_name_once(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

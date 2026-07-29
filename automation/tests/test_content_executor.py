@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.content_hermes_executor import build_prompt, build_worker_invocation, worker_usage
+from automation.content_hermes_executor import build_prompt, build_worker_invocation, worker_usage, write_progress
+import json
 import sqlite3
 
 
@@ -89,6 +90,23 @@ class ContentPromptTests(unittest.TestCase):
             usage = worker_usage(root, db_path)
             self.assertEqual(usage["id"], "s1")
             self.assertEqual(usage["input_tokens"], 10)
+
+
+    def test_write_progress_records_stage_percent_and_timestamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = Path(td)
+            write_progress(job_dir, "worker_running", percent=10, detail="article")
+            payload = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage"], "worker_running")
+            self.assertEqual(payload["percent"], 10)
+            self.assertEqual(payload["detail"], "article")
+            self.assertIn("updated_at", payload)
+            # A later stage overwrites the marker; percent is clamped to [0, 100].
+            write_progress(job_dir, "completed", percent=150)
+            payload = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage"], "completed")
+            self.assertEqual(payload["percent"], 100)
+            self.assertNotIn("detail", payload)
 
 
 if __name__ == "__main__":

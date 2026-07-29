@@ -37,6 +37,30 @@ def write_status(job_dir: Path, payload: Dict[str, Any]) -> None:
     )
 
 
+def write_progress(
+    job_dir: Path, stage: str, *, percent: int | None = None, detail: str = ""
+) -> None:
+    """Record a coarse sub-task progress marker for observers of this job.
+
+    Unlike status.json (terminal state for delivery), progress.json is a cheap
+    heartbeat of *where* a long-running job is: stage label, optional percent,
+    and a timestamp. Workers may overwrite it with finer-grained stages.
+    """
+    payload: Dict[str, Any] = {"stage": stage, "updated_at": utc_now()}
+    if percent is not None:
+        payload["percent"] = max(0, min(100, int(percent)))
+    if detail:
+        payload["detail"] = detail
+    try:
+        locked_atomic_write_text(
+            job_dir / "progress.json",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    except OSError:
+        # Progress is advisory; never let a write failure abort the job.
+        pass
+
+
 def pixelle_runtime_ready() -> bool:
     project = COMPANY / "projects" / "Pixelle-Video"
     return bool(shutil.which("uv") and (project / "config.yaml").exists())
@@ -114,6 +138,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 - 不编造链接、数据、测试或已完成动作；无法核验的内容明确标注。
 - 不修改公司已有正式文章，只在本任务产物目录写文件。
 - 只能使用当前隔离工具集；不得调用 terminal、process、execute_code 或 delegate_task。
+- 可选：在关键阶段把进度写入 `{job_dir / 'progress.json'}`（字段 stage、percent、updated_at），便于观察长任务进度，不计入交付物。
 - 最终回复只总结完成情况、质量门结果、产物绝对路径和仍需人工决定的事项。
 """
         return prompt, expected
@@ -142,6 +167,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 - 不执行公开发布、上传、付款、外部消息、删除数据、不可逆操作或未明确授权的外部安全测试。
 - 如任务必须越过边界，将 status 设为 needs_approval，生成 `{job_dir / 'approval-request.md'}` 后停止。
 - 不编造完成结果、测试、数据或文件修改；无法验证的内容明确标注。
+- 可选：在关键阶段把进度写入 `{job_dir / 'progress.json'}`（字段 stage、percent、updated_at），便于观察长任务进度。
 - 最终回复只总结完成状态、验证结果、改动文件和产物绝对路径。
 """
         return prompt, expected
@@ -172,6 +198,7 @@ Pixelle-Video 运行时：{runtime}
 - 不下载未授权素材，不编造生成结果。
 - 不修改公司已有正式内容，只在本任务产物目录写文件。
 - 此隔离 Worker 不提供 terminal/execute_code；只交付文案、分镜和制作计划，不声称已渲染 MP4。
+- 可选：在关键阶段把进度写入 `{job_dir / 'progress.json'}`（字段 stage、percent、updated_at），便于观察长任务进度。
 - 最终回复只总结完成情况、产物绝对路径、渲染状态和仍需人工决定的事项。
 """
     return prompt, expected
@@ -239,6 +266,7 @@ def main() -> int:
             raise ValueError(f"unsupported content route: {request.get('route')!r}")
     except Exception as exc:
         write_status(job_dir, {"status": "failed", "error": f"invalid request: {exc}", "artifacts": []})
+        write_progress(job_dir, "failed", percent=100, detail="invalid request")
         return 0
 
     prompt, expected = build_prompt(request, job_dir)
@@ -249,6 +277,7 @@ def main() -> int:
         "started_at": utc_now(),
         "artifacts": [],
     })
+    write_progress(job_dir, "worker_running", percent=10, detail=str(request["route"]))
     command, worker_cwd, env = build_worker_invocation(request, job_dir, prompt)
     try:
         proc = subprocess.run(
@@ -268,13 +297,15 @@ def main() -> int:
             "error": str(exc),
             "artifacts": [],
         })
+        write_progress(job_dir, "failed", percent=100, detail="worker launch failed")
         return 0
 
+    write_progress(job_dir, "post_processing", percent=80)
     try:
         artifacts = [
             str(path) for path in sorted(job_dir.iterdir())
             if not path.is_symlink() and path.is_file()
-            and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log"}
+            and path.name not in {"request.json", "status.json", "status.json.tmp", "executor.log", "progress.json", "progress.json.tmp"}
         ]
     except OSError as exc:
         write_status(job_dir, {
@@ -282,6 +313,7 @@ def main() -> int:
             "run_id": request.get("run_id"), "error": f"artifact scan failed: {exc}",
             "artifacts": [],
         })
+        write_progress(job_dir, "failed", percent=100, detail="artifact scan failed")
         return 0
     usage = worker_usage(job_dir)
     missing = [name for name in expected if not (job_dir / name).is_file()]
@@ -314,6 +346,7 @@ def main() -> int:
             "worker_session_id": str(usage.get("id") or ""),
             "usage": usage,
         })
+        write_progress(job_dir, "failed", percent=100, detail="; ".join(reasons)[:200])
         return 0
 
     if request["route"] == "company":
@@ -330,6 +363,7 @@ def main() -> int:
                 "worker_session_id": str(usage.get("id") or ""),
                 "usage": usage,
             })
+            write_progress(job_dir, "failed", percent=100, detail="worker reported failed")
             return 0
         write_status(job_dir, {
             "status": worker_status,
@@ -343,6 +377,7 @@ def main() -> int:
             "completed_at": utc_now(),
             "error": "",
         })
+        write_progress(job_dir, worker_status, percent=100)
         return 0
 
     write_status(job_dir, {
@@ -356,6 +391,7 @@ def main() -> int:
         "completed_at": utc_now(),
         "error": "",
     })
+    write_progress(job_dir, "completed", percent=100)
     return 0
 
 

@@ -182,6 +182,42 @@ def _age_minutes(created_at: str) -> float:
         return 0.0
 
 
+def _beat_heartbeat(state: "RouterState", event_id: str, alive: bool) -> None:
+    """Refresh the run heartbeat on behalf of a live runner (1-minute cron)."""
+    if alive:
+        state.update(event_id, last_heartbeat=utc_now())
+
+
+def _mark_suspected_dead_if_stale(
+    state: "RouterState",
+    config: Dict[str, Any],
+    row: Any,
+    event_id: str,
+    *,
+    alive: bool,
+    restarts: int,
+    max_restarts: int,
+) -> bool:
+    """Flag a run whose heartbeat has gone silent past the restart budget.
+
+    Detection only: the suspected_dead status makes the failing run visible to the
+    daily readout and stops us restarting it forever, which is the degradation the
+    heartbeat is meant to trigger.
+    """
+    if alive or restarts < max_restarts:
+        return False
+    reference = str(row["last_heartbeat"] or row["created_at"] or "")
+    timeout = float(config.get("heartbeat_timeout_minutes", 15))
+    if _age_minutes(reference) < timeout:
+        return False
+    state.update(
+        event_id,
+        status="suspected_dead",
+        error="no heartbeat; runner presumed dead after restart budget exhausted",
+    )
+    return True
+
+
 def _delivery_retry_ready(config: Dict[str, Any], row: Any) -> bool:
     attempts = int(row["delivery_attempts"] or 0)
     last = str(row["last_delivery_at"] or "")
@@ -757,7 +793,7 @@ def process_once(
     """Reconcile run state, recover dead runners, and deliver terminal results."""
     summary = {
         "checked": 0, "running": 0, "restarted": 0, "delivered": 0,
-        "failed": 0, "waiting_target": 0, "terminal": 0,
+        "failed": 0, "waiting_target": 0, "terminal": 0, "suspected_dead": 0,
         "outbox_enqueued": 0, "outbox_checked": 0,
         "outbox_delivered": 0, "outbox_failed": 0, "outbox_dead_letter": 0,
     }
@@ -793,24 +829,28 @@ def process_once(
             state.update(event_id, status=status)
             if status in {"submitted", "running"}:
                 summary["running"] += 1
+                alive = runner_is_alive(row["runner_pid"], run_id)
+                _beat_heartbeat(state, event_id, alive)
                 stale = _age_minutes(str(row["created_at"] or "")) >= float(config.get("stale_run_minutes", 15))
                 restarts = int(row["runner_restarts"] or 0)
-                if (
-                    stale
-                    and not runner_is_alive(row["runner_pid"], run_id)
-                    and restarts < int(config.get("max_runner_restarts", 2))
-                ):
+                max_restarts = int(config.get("max_runner_restarts", 2))
+                if stale and not alive and restarts < max_restarts:
                     try:
                         raw_decision = json.loads(row["decision_json"])
                         if not isinstance(raw_decision, dict):
                             raise ValueError("decision_json root must be an object")
                         decision = RouteDecision(**raw_decision)
                         pid = launch_runner(config, run_id, decision.intent)
-                        state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, error="")
+                        state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
                     except Exception as exc:
                         state.update(event_id, error=f"runner recovery failed: {exc}")
                         summary["failed"] += 1
+                elif _mark_suspected_dead_if_stale(
+                    state, config, row, event_id,
+                    alive=alive, restarts=restarts, max_restarts=max_restarts,
+                ):
+                    summary["suspected_dead"] += 1
                 continue
 
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
@@ -940,20 +980,24 @@ def process_once(
             state.update(event_id, status=status)
             if status in {"submitted", "running"}:
                 summary["running"] += 1
+                alive = content_runner_is_alive(row["runner_pid"], run_id)
+                _beat_heartbeat(state, event_id, alive)
                 stale = _age_minutes(str(row["created_at"] or "")) >= float(config.get("stale_run_minutes", 15))
                 restarts = int(row["runner_restarts"] or 0)
-                if (
-                    stale
-                    and not content_runner_is_alive(row["runner_pid"], run_id)
-                    and restarts < int(config.get("max_runner_restarts", 2))
-                ):
+                max_restarts = int(config.get("max_runner_restarts", 2))
+                if stale and not alive and restarts < max_restarts:
                     try:
                         pid = launch_content_job(config, run_id)
-                        state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, error="")
+                        state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
                     except Exception as exc:
                         state.update(event_id, error=f"content runner recovery failed: {exc}")
                         summary["failed"] += 1
+                elif _mark_suspected_dead_if_stale(
+                    state, config, row, event_id,
+                    alive=alive, restarts=restarts, max_restarts=max_restarts,
+                ):
+                    summary["suspected_dead"] += 1
                 continue
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
                 continue

@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from automation.company_router import RouterState, build_context, classify_message, classify_with_fallback, handle_hook, select_company_result, submit_security
 from automation.operations_control import business_period, create_review, import_proposals
-from datetime import date
+from automation.operations_control import connect as connect_operations
+from datetime import date, datetime, timezone
 
 
 class ClassificationTests(unittest.TestCase):
@@ -189,6 +190,78 @@ class HookTests(unittest.TestCase):
             self.assertTrue(row["run_id"])
             self.assertEqual(row["runner_pid"], 8765)
             self.assertEqual(row["status"], "running")
+            state.close()
+
+    def _seed_failures(self, operations_db: Path, product_line: str, count: int) -> None:
+        db = connect_operations(operations_db)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db.executemany(
+            """INSERT INTO operational_runs
+               (run_id,product_line,source_type,status,completed_at,created_at,updated_at)
+               VALUES (?,?,?,'failed',?,?,?)""",
+            [(f"run-{product_line}-{i}", product_line, "content", now, now, now) for i in range(count)],
+        )
+        db.commit()
+        db.close()
+
+    def test_circuit_breaker_downgrades_failing_product_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = {
+                "enabled": True,
+                "dispatch_security": False,
+                "auto_run_article": True,
+                "auto_run_video": True,
+                "state_db": str(Path(td) / "router.db"),
+                "operations_db": str(Path(td) / "operations.db"),
+                "swarm_repo": td,
+                "swarm_db": str(Path(td) / "swarm.db"),
+                "log_dir": str(Path(td) / "logs"),
+                "content_executor": "/bin/false",
+                "content_job_dir": str(Path(td) / "content-jobs"),
+                "gateway_sessions_index": str(Path(td) / "sessions.json"),
+                "max_active_runs_per_session": 2,
+                "max_active_content_jobs_per_session": 2,
+                "circuit_breaker_threshold": 3,
+            }
+            self._seed_failures(Path(config["operations_db"]), "article-production", 3)
+            payload = {"session_id": "article-session", "extra": {"user_message": "写一篇 Agent 工程公众号文章", "platform": "cli"}}
+            with patch("automation.company_router.launch_content_job") as launch:
+                result = handle_hook(payload, config)
+            launch.assert_not_called()
+            self.assertIn("熔断", result["context"])
+            state = RouterState(config["state_db"])
+            row = state.db.execute("SELECT status,error FROM route_events").fetchone()
+            self.assertEqual(row["status"], "skipped")
+            self.assertIn("circuit breaker open", row["error"])
+            state.close()
+
+    def test_circuit_breaker_stays_closed_for_healthy_product_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = {
+                "enabled": True,
+                "dispatch_security": False,
+                "auto_run_article": True,
+                "auto_run_video": True,
+                "state_db": str(Path(td) / "router.db"),
+                "operations_db": str(Path(td) / "operations.db"),
+                "swarm_repo": td,
+                "swarm_db": str(Path(td) / "swarm.db"),
+                "log_dir": str(Path(td) / "logs"),
+                "content_executor": "/bin/false",
+                "content_job_dir": str(Path(td) / "content-jobs"),
+                "gateway_sessions_index": str(Path(td) / "sessions.json"),
+                "max_active_runs_per_session": 2,
+                "max_active_content_jobs_per_session": 2,
+                "circuit_breaker_threshold": 3,
+            }
+            # Failures on a different product line must not trip the article breaker.
+            self._seed_failures(Path(config["operations_db"]), "security-exploration", 5)
+            payload = {"session_id": "article-session", "extra": {"user_message": "写一篇 Agent 工程公众号文章", "platform": "cli"}}
+            with patch("automation.company_router.launch_content_job", return_value=4321):
+                result = handle_hook(payload, config)
+            self.assertIn("任务已自动分发至文章产线", result["context"])
+            state = RouterState(config["state_db"])
+            self.assertEqual(state.db.execute("SELECT status FROM route_events").fetchone()[0], "running")
             state.close()
 
     def test_internal_worker_message_bypasses_router_without_global_env(self):

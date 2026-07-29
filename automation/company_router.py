@@ -23,7 +23,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 try:
     from ._safe_io import (
@@ -1486,6 +1486,53 @@ def _pre_evaluate_task(
     return "proceed"
 
 
+# Canonical product-line names as recorded in operational_runs; mirrors the map
+# in operations_control so the circuit breaker keys on the same dimension.
+_ROUTE_PRODUCT_LINE = {
+    "article": "article-production",
+    "video": "video-production",
+    "security": "security-exploration",
+    "company": "company",
+}
+
+
+def _route_product_line(route: str) -> str:
+    return _ROUTE_PRODUCT_LINE.get(route, route or "unknown")
+
+
+def _circuit_breaker_state(
+    config: Dict[str, Any], route: str, *, now: Optional[datetime] = None
+) -> Optional[Tuple[str, int]]:
+    """Return ``(product_line, failures)`` when a product line should be tripped.
+
+    Reuses the digest's failure clustering so the breaker keys on the exact same
+    recent-failure signal the daily readout reports. Only consulted when an
+    operations DB is configured, so classification and tests stay unaffected.
+    """
+    if not config.get("circuit_breaker_enabled", True):
+        return None
+    threshold = int(config.get("circuit_breaker_threshold", 3))
+    if threshold <= 0:
+        return None
+    operations_db_value = str(config.get("operations_db") or "").strip()
+    if not operations_db_value:
+        return None
+    window_hours = int(config.get("circuit_breaker_window_hours", 24))
+    product_line = _route_product_line(route)
+    current = now or datetime.now(timezone.utc)
+    try:
+        from .company_daily_digest import _failure_clusters
+    except ImportError:
+        from company_daily_digest import _failure_clusters
+    _lines, payload = _failure_clusters(
+        Path(operations_db_value), current, window_hours=window_hours
+    )
+    failures = sum(
+        int(entry["count"]) for entry in payload if entry["product_line"] == product_line
+    )
+    return (product_line, failures) if failures >= threshold else None
+
+
 def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
     if not config.get("enabled", True):
         return {}
@@ -1644,6 +1691,28 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
                 "- [预评估] 此任务被标记为需要用户审批，已暂停派发。"
             ],
         )}
+
+    # Circuit breaker: a product line that has failed repeatedly in the recent
+    # window is short-circuited to the main agent instead of burning more tokens
+    # on autonomous dispatch until the failure cluster is cleared.
+    if decision.action in {"dispatch_swarm", "dispatch_article", "dispatch_video", "dispatch_company"}:
+        breaker = _circuit_breaker_state(config, decision.route)
+        if breaker is not None:
+            product_line, failures = breaker
+            state.update(
+                event_id, status="skipped",
+                error=f"circuit breaker open: {product_line} {failures} recent failures",
+            )
+            return {"context": build_context(
+                RouteDecision(**{
+                    **asdict(decision), "action": "main_agent",
+                    "reason": f"该产线频繁失败，已降级（{product_line} 近窗口 {failures} 次失败）",
+                }),
+                status_updates=updates + [
+                    f"- [熔断] 产线 {product_line} 近窗口连续失败 {failures} 次，已降级由主 Agent 处理，"
+                    "避免持续消耗 Token。"
+                ],
+            )}
 
     if decision.action == "dispatch_swarm" and config.get("dispatch_security", True):
         active = [row for row in state.active_for_session(session_id) if row["status"] in {"submitted", "running"}]

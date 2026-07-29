@@ -43,6 +43,50 @@ INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
 WorkerFn = Callable[[Dict[str, Any], Path, Dict[str, Any]], Dict[str, Any]]
 DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
 
+# Retry ladder: the higher an opportunity's retry_count, the cheaper the model we
+# fall back to. The first entry is the primary model used on the initial attempt.
+DEFAULT_WORKER_MODEL_LADDER = ["deepseek-v4-sol", "deepseek-v4-flash"]
+DEFAULT_AUTO_RETRY_MAX = 1
+
+
+def _int_config(config: Dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _worker_model(config: Dict[str, Any], retry_count: int) -> str:
+    """Resolve the model slug for this attempt, degrading with each retry."""
+    ladder = config.get("worker_model_ladder")
+    if ladder is None:
+        ladder = DEFAULT_WORKER_MODEL_LADDER
+    if not isinstance(ladder, (list, tuple)) or not ladder:
+        return ""
+    index = min(max(0, int(retry_count or 0)), len(ladder) - 1)
+    return str(ladder[index] or "")
+
+
+def _is_empty_output(result: Dict[str, Any], artifacts: list[str]) -> bool:
+    """A nominally completed run that produced no usable output is empty_output."""
+    if result.get("status") != "completed":
+        return False
+    if str(result.get("summary") or "").strip():
+        return False
+    # request.json / result.json / action-report.md are scaffolding the worker
+    # always writes; ignore them when deciding whether real output exists.
+    scaffold = {"request.json", "result.json", "action-report.md"}
+    return not [path for path in artifacts if Path(path).name not in scaffold]
+
+
+def _should_auto_retry(config: Dict[str, Any], retry_count: int, failed: bool) -> bool:
+    if not failed:
+        return False
+    if not config.get("auto_retry_enabled", True):
+        return False
+    return int(retry_count or 0) < _int_config(config, "auto_retry_max", DEFAULT_AUTO_RETRY_MAX)
+
+
 
 def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
@@ -106,7 +150,8 @@ def connect(path: Path = DEFAULT_OPERATIONS_DB) -> sqlite3.Connection:
             updated_at TEXT NOT NULL,
             selected_at TEXT DEFAULT '',
             completed_at TEXT DEFAULT '',
-            last_error TEXT DEFAULT ''
+            last_error TEXT DEFAULT '',
+            retry_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_autonomy_opportunities_queue
         ON autonomy_opportunities(status, requires_approval, score DESC, created_at);
@@ -150,6 +195,10 @@ def connect(path: Path = DEFAULT_OPERATIONS_DB) -> sqlite3.Connection:
         );
             """
         )
+        # Older databases predate the auto-retry ladder; add the counter in place.
+        opp_columns = {row[1] for row in db.execute("PRAGMA table_info(autonomy_opportunities)")}
+        if "retry_count" not in opp_columns:
+            db.execute("ALTER TABLE autonomy_opportunities ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
         db.commit()
         return db
     except BaseException:
@@ -631,13 +680,17 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
         "created_at": utc_now(),
     }, ensure_ascii=False, indent=2))
     sandbox_baseline = time.time()
+    model = _worker_model(config, opportunity.get("retry_count", 0))
+    cmd = [
+        str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
+        "--source", "tool", "--max-turns", str(int(config.get("operator_max_turns", 30))),
+        "--pass-session-id",
+    ]
+    if model:
+        cmd += ["--model", model]
     try:
         proc = subprocess.run(
-            [
-                str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
-                "--source", "tool", "--max-turns", str(int(config.get("operator_max_turns", 30))),
-                "--pass-session-id",
-            ],
+            cmd,
             cwd=str(run_dir),
             env=worker_env,
             capture_output=True,
@@ -825,6 +878,12 @@ def execute_opportunity(
     completed = utc_now()
     artifacts = [str(path) for path in _regular_artifacts(run_dir)]
     final_status = "completed" if result["status"] == "completed" else "waiting_approval" if result["status"] == "needs_approval" else "failed"
+    retry_count = int(opportunity.get("retry_count") or 0)
+    # A nominally completed run that produced nothing is treated as a failure so
+    # the auto-retry ladder can take another (cheaper) pass at it.
+    empty_output = _is_empty_output(result, artifacts)
+    failed = final_status == "failed" or empty_output
+    retrying = _should_auto_retry(config, retry_count, failed)
     db = connect(db_path)
     try:
         db.execute(
@@ -836,19 +895,38 @@ def execute_opportunity(
                 result.get("error", ""), completed, completed, run_id,
             ),
         )
-        db.execute(
-            """UPDATE autonomy_opportunities SET status=?,completed_at=?,last_error=?,updated_at=?
-               WHERE opportunity_id=?""",
-            (final_status, completed, result.get("error", ""), completed, opportunity["opportunity_id"]),
-        )
+        if retrying:
+            # Re-open for a degraded retry instead of parking the opportunity as
+            # failed; the bumped retry_count selects the next model in the ladder.
+            retry_error = result.get("error", "") or ("empty_output" if empty_output else "")
+            db.execute(
+                """UPDATE autonomy_opportunities
+                   SET status='open',selected_at='',completed_at='',last_error=?,
+                       retry_count=retry_count+1,updated_at=?
+                   WHERE opportunity_id=?""",
+                (retry_error, completed, opportunity["opportunity_id"]),
+            )
+        else:
+            db.execute(
+                """UPDATE autonomy_opportunities SET status=?,completed_at=?,last_error=?,updated_at=?
+                   WHERE opportunity_id=?""",
+                (
+                    "failed" if failed else final_status, completed,
+                    result.get("error", "") or ("empty_output" if empty_output else ""),
+                    completed, opportunity["opportunity_id"],
+                ),
+            )
         _record_operational_run(db, run_id, opportunity, run_dir, result, usage, now, completed)
         db.commit()
     finally:
         db.close()
 
-    if result["status"] in {"completed", "needs_approval"} and opportunity["action_kind"] == "kickoff_experiment":
+    # Downstream state (experiment kickoff, market-pulse marking) must only fire on
+    # a genuinely productive completion — never on an empty_output/retrying run.
+    postprocess_ok = result["status"] in {"completed", "needs_approval"} and not failed
+    if postprocess_ok and opportunity["action_kind"] == "kickoff_experiment":
         update_experiment(db_path, opportunity["source_ref"], status="running")
-    if result["status"] in {"completed", "needs_approval"} and opportunity["source_type"] == "market_pulse":
+    if postprocess_ok and opportunity["source_type"] == "market_pulse":
         try:
             try:
                 from .market_radar import mark_pulse
@@ -878,7 +956,11 @@ def execute_opportunity(
                     post_db.close()
             except (OSError, sqlite3.Error):
                 pass
-    return {"run_id": run_id, "run_dir": str(run_dir), **result}
+    return {
+        "run_id": run_id, "run_dir": str(run_dir),
+        "auto_retry": retrying, "retry_count": retry_count + (1 if retrying else 0),
+        "empty_output": empty_output, **result,
+    }
 
 
 def format_cycle_message(summary: Dict[str, Any], limit: int = 1400) -> str:

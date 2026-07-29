@@ -18,6 +18,7 @@ from automation.company_operator import (
     run_cycle,
     select_executable,
     worker_usage,
+    _worker_model,
 )
 from automation.operations_control import (
     apply_user_decision,
@@ -585,10 +586,62 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertEqual(usage["id"], "worker-1")
             self.assertEqual(usage["tool_call_count"], 4)
 
-    def test_failed_worker_does_not_claim_success(self):
+    def test_failed_worker_auto_retries_with_degradation_then_exhausts(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             config = self._config(root)
+            config["auto_retry_enabled"] = True
+            config["auto_retry_max"] = 1
+            db_path = Path(config["operations_db"])
+
+            def failed_worker(_opportunity, _run_dir, _config):
+                return {"status": "failed", "summary": "", "next_action": "", "metrics": {}, "error": "boom"}
+
+            # First failure: re-opened for a degraded retry rather than parked failed.
+            result = run_cycle(
+                config,
+                now=datetime(2026, 7, 15, 1, tzinfo=timezone.utc),
+                worker=failed_worker,
+            )
+            self.assertEqual(result["executions"][0]["status"], "failed")
+            self.assertTrue(result["executions"][0]["auto_retry"])
+            opportunity_id = result["executions"][0]["opportunity_id"]
+            db = connect(db_path)
+            row = db.execute(
+                "SELECT status,retry_count FROM autonomy_opportunities WHERE opportunity_id=?",
+                (opportunity_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "open")
+            self.assertEqual(row["retry_count"], 1)
+            self.assertEqual(db.execute("SELECT status FROM operational_runs").fetchone()[0], "failed")
+            db.close()
+
+            # Second failure exhausts the ladder: the opportunity is now failed.
+            result2 = run_cycle(
+                config,
+                now=datetime(2026, 7, 15, 2, tzinfo=timezone.utc),
+                worker=failed_worker,
+            )
+            self.assertFalse(result2["executions"][0]["auto_retry"])
+            db = connect(db_path)
+            self.assertEqual(db.execute(
+                "SELECT status FROM autonomy_opportunities WHERE opportunity_id=?", (opportunity_id,)
+            ).fetchone()[0], "failed")
+            db.close()
+
+            # A parked failed opportunity can still be requeued manually.
+            self.assertTrue(requeue_failed(db_path, opportunity_id))
+            db = connect(db_path)
+            self.assertEqual(db.execute(
+                "SELECT status FROM autonomy_opportunities WHERE opportunity_id=?", (opportunity_id,)
+            ).fetchone()[0], "open")
+            db.close()
+
+    def test_failed_worker_parks_immediately_when_auto_retry_disabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["auto_retry_enabled"] = False
             db_path = Path(config["operations_db"])
 
             def failed_worker(_opportunity, _run_dir, _config):
@@ -601,18 +654,46 @@ class CompanyOperatorTests(unittest.TestCase):
             )
 
             self.assertEqual(result["executions"][0]["status"], "failed")
+            self.assertFalse(result["executions"][0]["auto_retry"])
             db = connect(db_path)
             self.assertEqual(db.execute("SELECT status FROM autonomy_opportunities").fetchone()[0], "failed")
-            self.assertEqual(db.execute("SELECT status FROM operational_runs").fetchone()[0], "failed")
             db.close()
 
-            opportunity_id = result["executions"][0]["opportunity_id"]
-            self.assertTrue(requeue_failed(db_path, opportunity_id))
+    def test_empty_output_completion_is_retried_and_not_marked_evaluated(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["auto_retry_enabled"] = True
+            config["auto_retry_max"] = 1
+            db_path = Path(config["operations_db"])
+
+            def empty_worker(_opportunity, run_dir, _config):
+                (run_dir / "action-report.md").write_text("", encoding="utf-8")
+                (run_dir / "result.json").write_text("{}", encoding="utf-8")
+                return {"status": "completed", "summary": "", "next_action": "", "metrics": {}, "error": ""}
+
+            result = run_cycle(
+                config,
+                now=datetime(2026, 7, 15, 1, tzinfo=timezone.utc),
+                worker=empty_worker,
+            )
+
+            self.assertTrue(result["executions"][0]["empty_output"])
+            self.assertTrue(result["executions"][0]["auto_retry"])
             db = connect(db_path)
-            self.assertEqual(db.execute(
-                "SELECT status FROM autonomy_opportunities WHERE opportunity_id=?", (opportunity_id,)
-            ).fetchone()[0], "open")
+            row = db.execute("SELECT status,retry_count FROM autonomy_opportunities").fetchone()
+            self.assertEqual(row["status"], "open")
+            self.assertEqual(row["retry_count"], 1)
             db.close()
+
+    def test_worker_model_degrades_along_ladder(self):
+        config = {"worker_model_ladder": ["primary", "flash"]}
+        self.assertEqual(_worker_model(config, 0), "primary")
+        self.assertEqual(_worker_model(config, 1), "flash")
+        # Beyond the ladder length we stay on the cheapest tier.
+        self.assertEqual(_worker_model(config, 5), "flash")
+        # An empty ladder disables model override entirely.
+        self.assertEqual(_worker_model({"worker_model_ladder": []}, 0), "")
 
 
 if __name__ == "__main__":

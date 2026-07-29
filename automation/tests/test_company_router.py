@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -577,6 +578,37 @@ class LowConfidenceFallbackTests(unittest.TestCase):
         )
         self.assertEqual(decision.action, "main_agent")
         self.assertEqual(called, [])
+
+
+class RoutingTermConfigTests(unittest.TestCase):
+    def test_router_config_terms_match_builtin_defaults(self):
+        # The shipped router_config.json must reproduce the built-in defaults so
+        # extracting the tables to config does not change classification.
+        import automation.company_router as router
+        loaded = router._load_routing_terms(router.DEFAULT_CONFIG)
+        for key, value in router._DEFAULT_ROUTING_TERMS.items():
+            self.assertEqual(loaded[key], set(value), key)
+
+    def test_missing_config_falls_back_to_defaults(self):
+        import automation.company_router as router
+        with tempfile.TemporaryDirectory() as td:
+            loaded = router._load_routing_terms(Path(td) / "does-not-exist.json")
+        self.assertEqual(loaded["security"], set(router._DEFAULT_ROUTING_TERMS["security"]))
+
+    def test_reload_routing_terms_from_file_changes_classification(self):
+        import automation.company_router as router
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "router_config.json"
+            cfg.write_text(json.dumps({"routing_terms": {"video": ["自定义视频词"]}}), encoding="utf-8")
+            try:
+                router.reload_routing_terms(cfg)
+                # Overridden table replaces the default; omitted tables stay default.
+                self.assertEqual(router.VIDEO_TERMS, {"自定义视频词"})
+                self.assertEqual(router.ARTICLE_TERMS, set(router._DEFAULT_ROUTING_TERMS["article"]))
+            finally:
+                router.reload_routing_terms(router.DEFAULT_CONFIG)
+        # Defaults restored for the rest of the suite.
+        self.assertIn("视频", router.VIDEO_TERMS)
 
 
 if __name__ == "__main__":

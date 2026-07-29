@@ -89,16 +89,115 @@ PRE_EVAL_MIN_PRIOR_MESSAGES = 3  # user+assistant messages before this dispatch
 PRE_EVAL_MIN_PRIOR_USER_MESSAGES = 1  # the current message doesn't count
 
 
-SECURITY_TERMS = {
-    "安全", "漏洞", "赏金", "hackerone", "bug bounty", "渗透", "红队",
-    "recon", "exploit", "cve", "apk", "逆向", "攻击面", "扫描", "蜂群",
-    "swarm", "poc", "idor", "xss", "sqli", "ssrf", "jwt", "cors",
+# ── Routing term tables ──────────────────────────────────────────────────────
+# These word lists drive classify_message. They live in router_config.json under
+# "routing_terms" so they can be tuned without code changes; the built-in
+# defaults below are the exact previous values and act as a fallback when the
+# file omits a table, so classification behaviour is unchanged if the config is
+# absent or partial.
+_DEFAULT_ROUTING_TERMS: Dict[str, list] = {
+    "security": [
+        "安全", "漏洞", "赏金", "hackerone", "bug bounty", "渗透", "红队",
+        "recon", "exploit", "cve", "apk", "逆向", "攻击面", "扫描", "蜂群",
+        "swarm", "poc", "idor", "xss", "sqli", "ssrf", "jwt", "cors",
+    ],
+    "article": ["文章", "公众号", "写稿", "排版", "选题", "草稿箱", "润色", "发布文章"],
+    # Compatibility export for existing operators/tests.  The classifier no
+    # longer treats these words as a blanket veto; it uses the action/object
+    # gates below so a real research article request is not discarded.
+    "article_blocking": ["研究", "调研", "分析报告", "codex", "研究报告", "蜂群", "swarm"],
+    "video": ["视频", "pixelle", "b站", "分镜", "配音", "tts", "字幕", "剪辑"],
+    "company": ["公司", "战略", "财务", "销售", "运营", "产品", "流程", "知识库", "仪表盘"],
+    "management": ["状态", "进度", "流程", "路由", "架构", "能力", "管理", "如何", "怎么", "是否", "当前"],
+    "company_execution": [
+        "开始", "执行", "修改", "实现", "开发", "完善", "更新", "新增", "接入",
+        "搭建", "创建", "生成", "整理", "迁移", "重构", "验证", "落地", "推进",
+        "调研", "排查", "修复", "诊断", "制定", "编写", "补充", "删除",
+        "implement", "build", "update", "create", "refactor",
+    ],
+    # Unioned with the company terms to form COMPANY_TASK_TERMS.
+    "company_task_extra": [
+        "项目", "任务", "路由", "代码", "测试", "仓库", "配置", "系统", "文件",
+        "文档", "竞品", "市场", "需求", "方案", "计划", "bug", "问题", "错误",
+        "模型", "会话", "hermes", "codex", "sandbox", "规则", "分支", "自动化",
+    ],
+    "active_security": [
+        "扫描", "探测", "枚举", "爆破", "利用", "攻击", "绕过", "验证漏洞",
+        "recon", "scan", "exploit", "brute", "probe", "fuzz",
+    ],
+    # retained for reference only — NOT trusted for authorization (see classify_message)
+    "authorization": [
+        "已授权", "明确授权", "授权范围", "in scope", "in-scope", "scope内",
+        "hackerone项目", "hackerone program", "赏金项目", "自有系统", "本地靶场",
+    ],
+    "external_action": ["发布", "推送", "提交hackerone", "发送", "删除", "付款", "转账", "上线"],
 }
-ARTICLE_TERMS = {"文章", "公众号", "写稿", "排版", "选题", "草稿箱", "润色", "发布文章"}
-# Compatibility export for existing operators/tests.  The classifier no
-# longer treats these words as a blanket veto; it uses the action/object gates
-# below so a real research article request is not discarded accidentally.
-ARTICLE_BLOCKING_TERMS = {"研究", "调研", "分析报告", "codex", "研究报告", "蜂群", "swarm"}
+
+
+def _load_routing_terms(path: Optional[Path] = None) -> Dict[str, set]:
+    """Load routing term tables from router_config.json, over built-in defaults.
+
+    A missing file, unreadable JSON, or a missing/renamed table all fall back to
+    the defaults so a malformed config can never silently empty a classifier gate.
+    """
+    resolved: Dict[str, list] = {key: list(value) for key, value in _DEFAULT_ROUTING_TERMS.items()}
+    target = Path(path) if path is not None else DEFAULT_CONFIG
+    try:
+        data = json.loads(read_text_limited(target, max_bytes=5 * 1024 * 1024))
+        table = data.get("routing_terms") if isinstance(data, dict) else None
+        if isinstance(table, dict):
+            for key, value in table.items():
+                if key in resolved and isinstance(value, list):
+                    resolved[key] = [str(item) for item in value]
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        pass
+    return {key: set(value) for key, value in resolved.items()}
+
+
+def _apply_routing_terms(terms: Dict[str, set]) -> None:
+    """Publish resolved term tables (and their derived regexes) as module globals."""
+    global SECURITY_TERMS, ARTICLE_TERMS, ARTICLE_BLOCKING_TERMS, VIDEO_TERMS
+    global COMPANY_TERMS, MANAGEMENT_TERMS, COMPANY_EXECUTION_TERMS, COMPANY_TASK_TERMS
+    global ACTIVE_SECURITY_TERMS, AUTHORIZATION_TERMS, EXTERNAL_ACTION_TERMS
+    global COMPANY_EXECUTION_PATTERN, COMPANY_DIRECTIVE_RE, NEGATED_EXTERNAL_ACTION_RE
+    SECURITY_TERMS = terms["security"]
+    ARTICLE_TERMS = terms["article"]
+    ARTICLE_BLOCKING_TERMS = terms["article_blocking"]
+    VIDEO_TERMS = terms["video"]
+    COMPANY_TERMS = terms["company"]
+    MANAGEMENT_TERMS = terms["management"]
+    COMPANY_EXECUTION_TERMS = terms["company_execution"]
+    COMPANY_TASK_TERMS = COMPANY_TERMS | terms["company_task_extra"]
+    ACTIVE_SECURITY_TERMS = terms["active_security"]
+    AUTHORIZATION_TERMS = terms["authorization"]
+    EXTERNAL_ACTION_TERMS = terms["external_action"]
+    COMPANY_EXECUTION_PATTERN = "|".join(
+        re.escape(term) for term in sorted(COMPANY_EXECUTION_TERMS, key=len, reverse=True)
+    )
+    COMPANY_DIRECTIVE_RE = re.compile(
+        rf"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|继续|先|着手|需要你|让你|让(?:codex|code|你|它))\s*)*"
+        rf"(?:开始\s*)?(?:{COMPANY_EXECUTION_PATTERN})",
+        re.I,
+    )
+    external_pattern = "|".join(
+        re.escape(term) for term in sorted(EXTERNAL_ACTION_TERMS, key=len, reverse=True)
+    )
+    # Only strip an external-action term when the negator is directly attached
+    # ("不发布", "禁止推送"). A wide window used to swallow "不要忘记发布" and let a
+    # real publish slip through; a near-miss now stays flagged (fail toward approval).
+    NEGATED_EXTERNAL_ACTION_RE = re.compile(
+        rf"(?:不|不要|无需|禁止|不得|暂不|先不|仅生成|只生成)[^，。；\n]{{0,1}}(?:{external_pattern})",
+        re.I,
+    )
+
+
+def reload_routing_terms(path: Optional[Path] = None) -> None:
+    """Re-read routing term tables from disk (called at startup and on demand)."""
+    _apply_routing_terms(_load_routing_terms(path))
+
+
+# Load the term tables at import so classify_message sees config-driven values.
+_apply_routing_terms(_load_routing_terms())
 # 检测用户抱怨、纠错或清理误生成文章的元模式（非文章生产请求）。
 ARTICLE_NEGATION_PATTERNS = re.compile(
     r"(?:怎么|为什么|为何)又?[^。；\n]{0,24}(?:文章产线|写(?:了|成)?[^。；\n]{0,4}文章|生成[^。；\n]{0,4}文章)"
@@ -123,7 +222,6 @@ ARTICLE_DESTINATION_RE = re.compile(
     rf"(?:改|整理|转换|转化|加工)[^。；\n]{{0,8}}(?:成|为)[^。；\n]{{0,8}}{ARTICLE_OBJECT_PATTERN}",
     re.I,
 )
-VIDEO_TERMS = {"视频", "pixelle", "b站", "分镜", "配音", "tts", "字幕", "剪辑"}
 VIDEO_DATA_CONTEXT_RE = re.compile(
     r"音视频(?:数据|流|内容|传输)?|视频(?:数据|流|传输|通话|会议|联网)",
     re.I,
@@ -132,27 +230,6 @@ VIDEO_OBJECT_PATTERN = r"(?:视频|短片|短视频|成片|分镜|口播稿|配�
 VIDEO_REQUEST_RE = re.compile(
     rf"(?:生成|制作|创作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)[^。；\n]{{0,24}}{VIDEO_OBJECT_PATTERN}"
     rf"|{VIDEO_OBJECT_PATTERN}[^。；\n]{{0,16}}(?:制作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)",
-    re.I,
-)
-COMPANY_TERMS = {"公司", "战略", "财务", "销售", "运营", "产品", "流程", "知识库", "仪表盘"}
-MANAGEMENT_TERMS = {"状态", "进度", "流程", "路由", "架构", "能力", "管理", "如何", "怎么", "是否", "当前"}
-COMPANY_EXECUTION_TERMS = {
-    "开始", "执行", "修改", "实现", "开发", "完善", "更新", "新增", "接入",
-    "搭建", "创建", "生成", "整理", "迁移", "重构", "验证", "落地", "推进",
-    "调研", "排查", "修复", "诊断", "制定", "编写", "补充", "删除",
-    "implement", "build", "update", "create", "refactor",
-}
-COMPANY_TASK_TERMS = COMPANY_TERMS | {
-    "项目", "任务", "路由", "代码", "测试", "仓库", "配置", "系统", "文件",
-    "文档", "竞品", "市场", "需求", "方案", "计划", "bug", "问题", "错误",
-    "模型", "会话", "hermes", "codex", "sandbox", "规则", "分支", "自动化",
-}
-COMPANY_EXECUTION_PATTERN = "|".join(
-    re.escape(term) for term in sorted(COMPANY_EXECUTION_TERMS, key=len, reverse=True)
-)
-COMPANY_DIRECTIVE_RE = re.compile(
-    rf"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|继续|先|着手|需要你|让你|让(?:codex|code|你|它))\s*)*"
-    rf"(?:开始\s*)?(?:{COMPANY_EXECUTION_PATTERN})",
     re.I,
 )
 COMPANY_OBJECT_FIRST_RE = re.compile(
@@ -173,26 +250,6 @@ SECURITY_ANALYSIS_RE = re.compile(
 )
 SECURITY_REPORT_RE = re.compile(
     r"(?:生成|写|整理|输出|出)[^。；\n]{0,8}(?:安全|漏洞|渗透|赏金|逆向)[^。；\n]{0,8}报告",
-    re.I,
-)
-
-ACTIVE_SECURITY_TERMS = {
-    "扫描", "探测", "枚举", "爆破", "利用", "攻击", "绕过", "验证漏洞",
-    "recon", "scan", "exploit", "brute", "probe", "fuzz",
-}
-AUTHORIZATION_TERMS = {
-    "已授权", "明确授权", "授权范围", "in scope", "in-scope", "scope内",
-    "hackerone项目", "hackerone program", "赏金项目", "自有系统", "本地靶场",
-}  # retained for reference only — NOT trusted for authorization (see classify_message)
-EXTERNAL_ACTION_TERMS = {
-    "发布", "推送", "提交hackerone", "发送", "删除", "付款", "转账", "上线",
-}
-# Only strip an external-action term when the negator is directly attached
-# ("不发布", "禁止推送"). A wide window used to swallow "不要忘记发布" and let a
-# real publish slip through; a near-miss now stays flagged (fail toward approval).
-NEGATED_EXTERNAL_ACTION_RE = re.compile(
-    r"(?:不|不要|无需|禁止|不得|暂不|先不|仅生成|只生成)[^，。；\n]{0,1}"
-    r"(?:发布|推送|提交hackerone|发送|删除|付款|转账|上线)",
     re.I,
 )
 

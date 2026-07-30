@@ -768,13 +768,20 @@ def classify_with_fallback(
     decision = classify_message(message, authorized_targets)
     if not config.get("llm_fallback_enabled", True):
         return decision
-    threshold = float(config.get("llm_fallback_confidence", 0.5))
-    # Only the genuine "unrecognised" verdict (0.45) is worth a paid tie-break.
-    # Empty/synthetic turns (0.0) and messages requesting external actions are
-    # left exactly as the deterministic classifier decided.
-    if decision.confidence <= 0.0 or decision.confidence >= threshold or decision.external_action:
+
+    router_mode = str(config.get("router_mode", "keyword")).strip().lower()
+
+    # Common fast paths for both modes: empty/synthetic (0.0) and external action
+    if decision.confidence <= 0.0 or decision.external_action:
         return decision
     if not " ".join((message or "").split()):
+        return decision
+
+    if router_mode == "hybrid":
+        skip_threshold = float(config.get("hybrid_high_confidence_skip", 0.86))
+    else:
+        skip_threshold = float(config.get("llm_fallback_confidence", 0.5))
+    if decision.confidence >= skip_threshold:
         return decision
 
     classifier = fallback or _llm_fallback_classify
@@ -790,10 +797,18 @@ def classify_with_fallback(
     except (TypeError, ValueError):
         return decision
     prefix = _LLM_FALLBACK_PREFIX.get(route)
+    threshold = float(config.get("llm_fallback_confidence", 0.5))
     if not prefix or llm_confidence < threshold:
         return decision
 
     upgraded = classify_message(prefix + message, authorized_targets)
+
+    # Security dispatch gate: if the security product line is disabled,
+    # keep the original low-confidence decision even if LLM says security.
+    # Prevents misclassification of management/stop instructions as security.
+    if route == "security" and not config.get("dispatch_security", True):
+        return decision
+
     if upgraded.action in {"main_agent", "approval_required"} and route != "security":
         # The LLM chose a line the explicit prefix still would not auto-dispatch
         # (e.g. an external action surfaced): trust the deterministic outcome.

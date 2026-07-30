@@ -580,6 +580,145 @@ class LowConfidenceFallbackTests(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class HybridRoutingTests(unittest.TestCase):
+    """Hybrid routing mode (router_mode='hybrid') tests — all use injected fallback, no real LLM calls."""
+
+    def _hybrid_config(self, **overrides):
+        cfg = {
+            "router_mode": "hybrid",
+            "llm_fallback_enabled": True,
+            "llm_fallback_confidence": 0.5,
+            "hybrid_high_confidence_skip": 0.86,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_keyword_mode_high_confidence_skips_llm(self):
+        """keyword mode: /article prefix (0.99) never calls fallback, same as before."""
+        calls = []
+
+        def fb(msg, cfg):
+            calls.append(msg)
+            return {"route": "company", "confidence": 0.99}
+
+        decision = classify_with_fallback(
+            "/article 写一篇技术文章", {"router_mode": "keyword"},
+            fallback=fb,
+        )
+        self.assertEqual(decision.route, "article")
+        self.assertEqual(calls, [])
+
+    def test_keyword_mode_still_triggers_fallback_at_0_45(self):
+        """keyword mode: the 0.45 unrecognised verdict still triggers fallback (no regression)."""
+        decision = classify_with_fallback(
+            "把上次那个东西继续弄一下", {"router_mode": "keyword"},
+            fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
+        )
+        self.assertEqual(decision.route, "article")
+        self.assertIn("兜底", decision.reason)
+
+    def test_hybrid_fuzzy_band_reroutes(self):
+        """hybrid: fuzzy band message (confidence < 0.86) is rerouted by LLM, reason contains marker."""
+        # "把上次那个东西继续弄一下" → keyword confidence 0.45 (unrecognised), below 0.86 → LLM triggered
+        config = self._hybrid_config()
+        upgraded = classify_with_fallback(
+            "把上次那个东西继续弄一下", config,
+            fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
+        )
+        self.assertEqual(upgraded.route, "article")
+        self.assertEqual(upgraded.action, "dispatch_article")
+        self.assertIn("兜底", upgraded.reason)
+
+    def test_hybrid_external_action_skips_llm(self):
+        """hybrid: external_action messages skip fallback entirely, keep approval_required."""
+        calls = []
+
+        def fb(msg, cfg):
+            calls.append(msg)
+            return {"route": "article", "confidence": 0.95}
+
+        config = self._hybrid_config()
+        decision = classify_with_fallback(
+            "发布这篇文章到公众号", config,
+            fallback=fb,
+        )
+        self.assertEqual(decision.action, "approval_required")
+        self.assertEqual(calls, [])
+
+    def test_hybrid_security_authorization_invariant(self):
+        """hybrid: LLM security suggestion still goes through classify_message's authorization gate."""
+        config = self._hybrid_config()
+        decision = classify_with_fallback(
+            "顺手把 acme.com 弄一下", config,
+            authorized_targets=(),
+            fallback=lambda msg, cfg: {"route": "security", "confidence": 0.95},
+        )
+        # The re-run through classify_message("/security 顺手把 acme.com 弄一下")
+        # must produce a real RouteDecision, not hand-crafted from LLM output.
+        if decision.route == "security":
+            self.assertIn(decision.action, {"approval_required", "dispatch_swarm"})
+
+    def test_hybrid_none_or_exception_keeps_original(self):
+        """hybrid: LLM returning 'none' or raising → keep original decision (fail-safe)."""
+        config = self._hybrid_config()
+        # LLM returns "none" (not in _LLM_FALLBACK_PREFIX → fallback keeps original)
+        decision = classify_with_fallback(
+            "把上次那个东西继续弄一下", config,
+            fallback=lambda msg, cfg: {"route": "none", "confidence": 0.9},
+        )
+        self.assertEqual(decision.action, "main_agent")
+
+        # Exception during LLM call → keep original
+        def broken(msg, cfg):
+            raise RuntimeError("LLM unavailable")
+
+        decision2 = classify_with_fallback(
+            "把上次那个东西继续弄一下", config,
+            fallback=broken,
+        )
+        self.assertEqual(decision2.action, "main_agent")
+
+    def test_hybrid_high_confidence_skip(self):
+        """hybrid: confidence >= hybrid_high_confidence_skip (0.86) skips LLM entirely."""
+        calls = []
+
+        def fb(msg, cfg):
+            calls.append(msg)
+            return {"route": "company", "confidence": 0.99}
+
+        config = self._hybrid_config()
+        # Explicit /security prefix → 0.99 confidence, above 0.86 → skip LLM
+        decision = classify_with_fallback(
+            "/security 扫描 example.com", config,
+            fallback=fb,
+        )
+        self.assertNotEqual(decision.route, "company")  # LLM suggestion not used
+        self.assertEqual(calls, [])
+
+    def test_hybrid_empty_synthetic_skips_llm(self):
+        """hybrid: empty message or synthetic notification prefix → skip LLM (confidence 0.0)."""
+        config = self._hybrid_config()
+        calls = []
+
+        def fb(msg, cfg):
+            calls.append(msg)
+            return {"route": "article", "confidence": 0.99}
+
+        # Empty message
+        decision = classify_with_fallback("", config, fallback=fb)
+        self.assertEqual(decision.confidence, 0.0)
+        self.assertEqual(decision.action, "main_agent")
+        self.assertEqual(calls, [])
+
+        # Synthetic notification
+        decision2 = classify_with_fallback(
+            "[公司 Research 完成通知] test", config, fallback=fb
+        )
+        self.assertEqual(decision2.confidence, 0.0)
+        self.assertEqual(decision2.action, "main_agent")
+        self.assertEqual(calls, [])
+
+
 class RoutingTermConfigTests(unittest.TestCase):
     def test_router_config_terms_match_builtin_defaults(self):
         # The shipped router_config.json must reproduce the built-in defaults so

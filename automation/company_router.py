@@ -1522,7 +1522,7 @@ def _pre_evaluate_task(
         if conv_hits >= 2:
             return "skip"
         # Long meandering text (3+ sentences without a clear target) is likely chat
-        sentence_count = len(re.split(r'[。！？\\n]', message))
+        sentence_count = len(re.split(r'[。！？\n]', message))
         words = len(message.split())
         if sentence_count >= 3 and words >= 15 and conv_hits >= 1:
             return "skip"

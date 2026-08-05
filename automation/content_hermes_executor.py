@@ -8,6 +8,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -51,14 +52,12 @@ def write_progress(
         payload["percent"] = max(0, min(100, int(percent)))
     if detail:
         payload["detail"] = detail
-    try:
+    with suppress(OSError):
+        # Progress is advisory; never let a write failure abort the job.
         locked_atomic_write_text(
             job_dir / "progress.json",
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
-    except OSError:
-        # Progress is advisory; never let a write failure abort the job.
-        pass
 
 
 def pixelle_runtime_ready() -> bool:

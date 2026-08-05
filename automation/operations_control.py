@@ -14,6 +14,7 @@ import json
 import math
 import re
 import sqlite3
+from contextlib import suppress
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -371,10 +372,8 @@ def _classify_security_findings(
     # Runner log
     log_file = log_dir / f"swarm-{run_id}.log"
     if log_file.is_file():
-        try:
+        with suppress(OSError, ValueError):
             fragments.append(read_text_limited(log_file, max_bytes=10 * 1024 * 1024, errors="replace"))
-        except (OSError, ValueError):
-            pass
 
     # Swarm DB — agent_tasks result_summary
     if swarm_db.is_file():
@@ -613,10 +612,8 @@ def sync_operational_runs(
                 artifact_paths = _artifact_paths(job_dir, status.get("artifacts"))
                 artifacts = [str(path) for path in artifact_paths]
                 for path in artifact_paths:
-                    try:
+                    with suppress(OSError):
                         output_bytes += path.stat().st_size
-                    except OSError:
-                        pass
 
             worker = _find_worker_session(hermes_db, job_dir) if job_dir else {}
             usage_source = "hermes" if worker else ""

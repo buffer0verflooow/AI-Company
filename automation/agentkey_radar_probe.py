@@ -20,6 +20,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -211,10 +212,8 @@ def _run_one_query(theme_title: str, query: str, output_dir: Path) -> list[dict]
             valid.append({"error": "agentkey worker output contained non-object items"})
         return valid
     finally:
-        try:
+        with suppress(OSError):
             output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _parse_agentkey_result(raw: dict, theme: str, theme_title: str,

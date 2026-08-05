@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Collection, Iterator, Mapping, Optional
 from urllib.parse import quote
@@ -178,10 +178,8 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing_mode: Optional[int] = None
-    try:
+    with suppress(OSError):
         existing_mode = path.stat().st_mode & 0o7777
-    except OSError:
-        pass
     temporary: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -206,13 +204,11 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
             directory_fd = None
         if directory_fd is not None:
             try:
-                try:
-                    os.fsync(directory_fd)
-                except OSError:
+                with suppress(OSError):
                     # Some network/virtual filesystems do not support syncing
                     # directory descriptors.  The replace itself has already
                     # succeeded, so do not report a false write failure.
-                    pass
+                    os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
     finally:
@@ -242,11 +238,10 @@ def locked_append_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with file_lock(path):
-        with path.open("a", encoding=encoding) as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
+    with file_lock(path), path.open("a", encoding=encoding) as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 @contextmanager

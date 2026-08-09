@@ -1081,7 +1081,7 @@ def _parse_json_output(output: str) -> Dict[str, Any]:
 def swarm_command(config: Dict[str, Any], *args: str, timeout: int = 30) -> Dict[str, Any]:
     cmd = [
         sys.executable,
-        str(Path(config["swarm_repo"]) / "swarmctl.py"),
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
         "--db", config["swarm_db"],
         *args,
         "--json",

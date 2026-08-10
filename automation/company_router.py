@@ -1168,11 +1168,14 @@ def runner_role_counts(intent: str) -> str:
     }.get(intent, "analyst=1,reporter=1")
 
 
-def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
-    log_dir = Path(config["log_dir"])
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"swarm-{run_id}.log"
-    cmd = [
+def build_runner_cmd(config: Dict[str, Any], run_id: str, intent: str) -> list:
+    """构造 swarm runner 启动命令 (纯函数, 可测)。
+
+    2026-08-10 教训: swarm_runner.py 从仓库根目录移到 scripts/ 后,
+    此处引用未同步, 导致 dispatch_swarm 全部失败 (can't open file)。
+    该函数由集成测试覆盖路径有效性, 防止重构回归。
+    """
+    return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarm_runner.py"),
         "--db", config["swarm_db"],
@@ -1183,6 +1186,13 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
         "--idle-rounds", "2",
         "--json",
     ]
+
+
+def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
+    log_dir = Path(config["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"swarm-{run_id}.log"
+    cmd = build_runner_cmd(config, run_id, intent)
     runner_env, _dropped = scrub_environment()
     runner_env["COMPANY_ROUTER_BYPASS"] = "1"
     runner_env["HERMES_SESSION_SOURCE"] = "tool"

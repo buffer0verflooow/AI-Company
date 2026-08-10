@@ -758,6 +758,29 @@ def classify_with_fallback(
 ) -> RouteDecision:
     """Keyword classification, backed by a cheap LLM tie-break when unsure.
 
+    两段式路由机制（用户可见行为）：
+    1. 第一段 = 确定性业务线判定（``classify_message``）：纯正则/规则匹配，
+       显式前缀（/article、文章：、/security 等）与意图规则（写/生成/排版+
+       文章对象）直接产出 route + 置信度（写文章→article 0.86 等）。
+    2. 第二段 = LLM 兜底（仅当第一段置信度低于阈值时触发）：把完整用户
+       消息原文塞进提示词，让 LLM 从 security/article/video/company/none
+       五选一，输出 {route, confidence}。LLM 看的是整句话语义，不是关键字。
+
+    为什么 LLM 兜底会误判（2026-08-09 修复的历史教训，勿回退）：
+    - 误判不是"信息不足"所致：LLM 对高频词做语义联想过度。实测案例
+      "你能自动下载公众号统计信息吗" → LLM 判 article 0.95（高置信误判），
+      真实意图是运营数据动作。信息完全充足时照样误判。
+    - 二次放大机制（原 bug）：确定性规则判 company 0.84（正确）→ hybrid
+      阈值 0.86 触发 LLM 兜底 → LLM 判 article → 代码用 "/article " 显式
+      前缀重跑确定性规则 → 前缀强制命中 article 0.99 → 正确判定被覆盖，
+      任务被送进文章产线。规则是对的，LLM 是错的，结果 LLM 赢了。
+    - 修复原则：规则说了算，直觉只负责规则没认出来的情况。
+      (a) 确定性业务线判定（0.84+）直接信任，不再触发 LLM；
+      (b) main_agent 但置信度 ≥0.6（公司相关/管理/数据问题）也不走 LLM；
+      (c) LLM 兜底禁止产生 article/video 路由——内容生产必须由规则识别，
+          真正的文章请求（"写一篇关于 JWT 安全的公众号文章"）确定性规则
+          已能 0.86 识别，无需 LLM 直觉。
+
     When the deterministic classifier lands on its low-confidence "unrecognised"
     verdict, ask an LLM which product line the message belongs to.  A confident
     answer is applied by re-running ``classify_message`` with that route's
@@ -775,6 +798,17 @@ def classify_with_fallback(
     if decision.confidence <= 0.0 or decision.external_action:
         return decision
     if not " ".join((message or "").split()):
+        return decision
+
+    # 确定性判定已锁定业务线（article/video/security/company 均为强模式匹配
+    # 结果，置信度 0.84-0.99），不允许 LLM 兜底推翻。
+    # 历史教训：hybrid 模式下 0.84 的 company 判定被 LLM 兜底改判为 article
+    # （“先将公司文章产线整理好”→article 0.95），造成产线被误分发污染。
+    if decision.route != "main_agent":
+        return decision
+    # main_agent 判定但置信度不低（≥0.6，即已识别为公司相关但缺执行指令，
+    # 或管理/数据/流程问题），同样保持主 Agent 处理，不交给 LLM 改判。
+    if decision.confidence >= 0.6:
         return decision
 
     if router_mode == "hybrid":
@@ -799,6 +833,13 @@ def classify_with_fallback(
     prefix = _LLM_FALLBACK_PREFIX.get(route)
     threshold = float(config.get("llm_fallback_confidence", 0.5))
     if not prefix or llm_confidence < threshold:
+        return decision
+
+    # LLM 兜底不允许产生 article/video 路由：内容生产是产线级动作，必须由
+    # 确定性规则（写/生成/排版等强模式）识别。历史误分发全部由此产生
+    # （“你能自动下载公众号统计信息吗”→“文章”→article 0.95），而真正
+    # 的文章请求确定性规则已能识别（0.86+），无需 LLM 兜底。
+    if route in ("article", "video"):
         return decision
 
     upgraded = classify_message(prefix + message, authorized_targets)
@@ -1133,7 +1174,7 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
     log_path = log_dir / f"swarm-{run_id}.log"
     cmd = [
         sys.executable,
-        str(Path(config["swarm_repo"]) / "swarm_runner.py"),
+        str(Path(config["swarm_repo"]) / "scripts" / "swarm_runner.py"),
         "--db", config["swarm_db"],
         "--run-id", run_id,
         "--executor-command", config["executor"],

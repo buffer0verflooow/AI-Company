@@ -115,6 +115,15 @@ _DEFAULT_ROUTING_TERMS: Dict[str, list] = {
         "调研", "排查", "修复", "诊断", "制定", "编写", "补充", "删除",
         "implement", "build", "update", "create", "refactor",
     ],
+    # 蜂群研究路由 (2026-08-10): 公司职能研究/调研类任务 → dispatch_swarm。
+    # 与 security 的区别: research 不涉及外部目标授权 (analyze/report intent,
+    # 无 scope 概念); 与 company 的区别: research 是多 agent 并行研究 (蜂群
+    # benchmark 证明: 研究/分析类任务蜂群 > 单 agent)。
+    "research": [
+        "竞品", "调研", "研究", "分析报告", "对比", "评估", "趋势", "选型",
+        "市场机会", "技术调研", "行业分析", "情报", "benchmark", "survey",
+        "竞品分析", "可行性", "方案对比", "技术选型",
+    ],
     # Unioned with the company terms to form COMPANY_TASK_TERMS.
     "company_task_extra": [
         "项目", "任务", "路由", "代码", "测试", "仓库", "配置", "系统", "文件",
@@ -159,6 +168,7 @@ def _apply_routing_terms(terms: Dict[str, set]) -> None:
     global SECURITY_TERMS, ARTICLE_TERMS, ARTICLE_BLOCKING_TERMS, VIDEO_TERMS
     global COMPANY_TERMS, MANAGEMENT_TERMS, COMPANY_EXECUTION_TERMS, COMPANY_TASK_TERMS
     global ACTIVE_SECURITY_TERMS, AUTHORIZATION_TERMS, EXTERNAL_ACTION_TERMS
+    global RESEARCH_TERMS
     global COMPANY_EXECUTION_PATTERN, COMPANY_DIRECTIVE_RE, NEGATED_EXTERNAL_ACTION_RE
     SECURITY_TERMS = terms["security"]
     ARTICLE_TERMS = terms["article"]
@@ -171,6 +181,7 @@ def _apply_routing_terms(terms: Dict[str, set]) -> None:
     ACTIVE_SECURITY_TERMS = terms["active_security"]
     AUTHORIZATION_TERMS = terms["authorization"]
     EXTERNAL_ACTION_TERMS = terms["external_action"]
+    RESEARCH_TERMS = terms.get("research") or set()
     COMPANY_EXECUTION_PATTERN = "|".join(
         re.escape(term) for term in sorted(COMPANY_EXECUTION_TERMS, key=len, reverse=True)
     )
@@ -349,6 +360,21 @@ def _is_security_request(text: str) -> bool:
     if SECURITY_REPORT_RE.search(text):
         return True
     return bool(has_security_context and SECURITY_ANALYSIS_RE.search(text))
+
+
+def _is_research_request(text: str) -> bool:
+    """蜂群研究路由 (2026-08-10): 公司职能研究/调研类任务 → dispatch_swarm。
+
+    判定: 研究词 + 执行意图 (不要只问"竞品是谁"——那走 main_agent 问答)。
+    与 security 的区分: 研究任务不含外部目标 (无 scope 授权概念);
+    与 company 的区分: 研究是明确的分析产出任务, 交给蜂群多 agent 并行。
+    """
+    if not _contains_any(text, RESEARCH_TERMS):
+        return False
+    if _contains_any(text, {"调研", "研究", "分析", "评估", "对比", "选型", "survey"}):
+        return True
+    # 研究词 + 公司执行动作 (如 "做一份竞品分析报告")
+    return bool(_contains_any(text, COMPANY_EXECUTION_TERMS) and _contains_any(text, {"报告", "方案", "分析", "梳理", "总结"}))
 
 
 def _is_company_execution_request(text: str) -> bool:
@@ -600,6 +626,9 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     elif _is_security_request(text):
         route = "security"
         confidence = 0.86
+    elif _is_research_request(text):
+        route = "research"
+        confidence = 0.84
     elif _is_company_execution_request(text):
         route = "company"
         confidence = 0.84
@@ -628,17 +657,26 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
         action = {
             "article": "dispatch_article",
             "video": "dispatch_video",
+            "research": "dispatch_swarm",  # 蜂群研究路由 (2026-08-10): 复用蜂群执行链路
         }.get(route, "main_agent")
         if route == "company" and _is_company_execution_request(text):
             action = "dispatch_company"
         if external_action:
             action = "approval_required"
+        extra = {}
+        if route == "research":
+            # 研究任务: 含"报告/汇总"→ report, 否则 analyze (多 agent 并行分析)
+            extra = {
+                "intent": "report" if any(t in text for t in ("报告", "汇总", "总结", "简报")) else "analyze",
+                "target_type": "unknown",
+            }
         return RouteDecision(
             route=route,
             confidence=confidence,
             action=action,
             reason=f"matched {route} product-line vocabulary",
             external_action=external_action,
+            **extra,
         )
 
     targets = extract_target(text)
@@ -1133,10 +1171,10 @@ def swarm_command(config: Dict[str, Any], *args: str, timeout: int = 30) -> Dict
     return _parse_json_output(proc.stdout)
 
 
-def submit_security(config: Dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision) -> Dict[str, Any]:
+def submit_security(config: Dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> Dict[str, Any]:
     metadata = json.dumps(
         {
-            "company_product_line": "security-exploration",
+            "company_product_line": product_line,
             "company_session_id": session_id,
             "company_platform": platform,
             "router_version": 1,
@@ -1165,6 +1203,8 @@ def runner_role_counts(intent: str) -> str:
         "exploit": "analyst=1,exploiter=1,reporter=1",
         "report": "reporter=1",
         "analyze": "analyst=1,reporter=1",
+        # 蜂群研究路由 (2026-08-10): 研究类任务以并行分析为主
+        "research": "analyst=2,reporter=1",
     }.get(intent, "analyst=1,reporter=1")
 
 
@@ -1838,29 +1878,42 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
                 ],
             )}
 
-    if decision.action == "dispatch_swarm" and config.get("dispatch_security", True):
-        active = [row for row in state.active_for_session(session_id) if row["status"] in {"submitted", "running"}]
-        if len(active) >= int(config.get("max_active_runs_per_session", 2)):
-            state.update(event_id, status="deferred", error="active run limit reached")
-            return {"context": build_context(
-                RouteDecision(**{**asdict(decision), "action": "main_agent", "reason": "active run limit reached"}),
-                status_updates=updates + ["- 已达到本会话并发蜂群上限，新任务暂未提交。"],
-            )}
-        try:
-            run = submit_security(config, session_id, platform, message, decision)
-            fields: Dict[str, Any] = {
-                "run_id": str(run.get("run_id") or ""),
-                "request_id": str(run.get("request_id") or ""),
-                "status": "submitted",
-                "last_heartbeat": utc_now(),
-            }
-            if config.get("auto_run_security", True) and fields["run_id"]:
-                fields["runner_pid"] = launch_runner(config, fields["run_id"], decision.intent)
-                fields["status"] = "running"
-            state.update(event_id, **fields)
-        except Exception as exc:
-            state.update(event_id, status="failed", error=str(exc))
-            updates.append(f"- 自动提交失败：{exc}")
+    if decision.action == "dispatch_swarm":
+        # 2026-08-10: research 路由复用蜂群链路, 由独立开关控制
+        enabled = config.get(
+            "dispatch_research" if decision.route == "research" else "dispatch_security", True
+        )
+        if not enabled:
+            state.update(event_id, status="deferred", error="product line dispatch disabled")
+            updates.append(
+                f"- {decision.route} 自动分发已禁用 (dispatch_{decision.route}=false)，已交由主 Agent。"
+            )
+        else:
+            active = [row for row in state.active_for_session(session_id) if row["status"] in {"submitted", "running"}]
+            if len(active) >= int(config.get("max_active_runs_per_session", 2)):
+                state.update(event_id, status="deferred", error="active run limit reached")
+                return {"context": build_context(
+                    RouteDecision(**{**asdict(decision), "action": "main_agent", "reason": "active run limit reached"}),
+                    status_updates=updates + ["- 已达到本会话并发蜂群上限，新任务暂未提交。"],
+                )}
+            try:
+                run = submit_security(
+                    config, session_id, platform, message, decision,
+                    product_line="research" if decision.route == "research" else "security-exploration",
+                )
+                fields: Dict[str, Any] = {
+                    "run_id": str(run.get("run_id") or ""),
+                    "request_id": str(run.get("request_id") or ""),
+                    "status": "submitted",
+                    "last_heartbeat": utc_now(),
+                }
+                if config.get("auto_run_security", True) and fields["run_id"]:
+                    fields["runner_pid"] = launch_runner(config, fields["run_id"], decision.intent)
+                    fields["status"] = "running"
+                state.update(event_id, **fields)
+            except Exception as exc:
+                state.update(event_id, status="failed", error=str(exc))
+                updates.append(f"- 自动提交失败：{exc}")
     elif decision.action in {"dispatch_article", "dispatch_video", "dispatch_company"}:
         enabled_key = {
             "dispatch_article": "auto_run_article",

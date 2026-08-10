@@ -115,6 +115,31 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(decision.route, "article")
         self.assertEqual(decision.action, "dispatch_article")
 
+    def test_research_request_routes_to_swarm(self):
+        # 蜂群研究路由 (2026-08-10): 公司职能研究任务 → dispatch_swarm
+        cases = (
+            ("调研一下竞品 X 的技术方案", "analyze"),
+            ("做一份 AI 眼镜行业竞品分析报告", "report"),
+            ("对比一下 Codex 和 Claude Code 的优缺点", "analyze"),
+        )
+        for message, intent in cases:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "research")
+                self.assertEqual(decision.action, "dispatch_swarm")
+                self.assertEqual(decision.intent, intent)
+
+    def test_research_question_stays_with_main_agent(self):
+        # 纯问答不走蜂群 (无执行意图)
+        decision = classify_message("我们的竞品是谁？")
+        self.assertNotEqual(decision.action, "dispatch_swarm")
+
+    def test_security_request_not_swallowed_by_research(self):
+        # research 词表含"分析/评估"等, 不得抢走 security 判定
+        decision = classify_message("扫描并分析 10.0.0.5 的漏洞")
+        self.assertEqual(decision.route, "security")
+        self.assertEqual(decision.action, "dispatch_swarm")
+
     def test_article_pipeline_complaints_are_not_article_production(self):
         messages = (
             "为什么写了篇文章？现在不是在调研研究吗？",
@@ -523,13 +548,14 @@ class LowConfidenceFallbackTests(unittest.TestCase):
 
     def test_confident_llm_verdict_promotes_route(self):
         message = self._ambiguous()
+        # LLM 兜底不再允许产生 article/video 路由：内容生产必须由确定性规则
+        # 识别（历史误分发：“你能自动下载公众号统计信息吗”→article 0.95）。
         upgraded = classify_with_fallback(
             message, {},
             fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
         )
-        self.assertEqual(upgraded.route, "article")
-        self.assertEqual(upgraded.action, "dispatch_article")
-        self.assertIn("兜底", upgraded.reason)
+        self.assertEqual(upgraded.action, "main_agent")
+        self.assertNotEqual(upgraded.route, "article")
 
     def test_none_verdict_keeps_main_agent(self):
         message = self._ambiguous()
@@ -609,25 +635,25 @@ class HybridRoutingTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_keyword_mode_still_triggers_fallback_at_0_45(self):
-        """keyword mode: the 0.45 unrecognised verdict still triggers fallback (no regression)."""
+        """keyword mode: 0.45 unrecognised verdict keeps main_agent — LLM cannot reroute to article."""
         decision = classify_with_fallback(
             "把上次那个东西继续弄一下", {"router_mode": "keyword"},
             fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
         )
-        self.assertEqual(decision.route, "article")
-        self.assertIn("兜底", decision.reason)
+        self.assertEqual(decision.action, "main_agent")
+        self.assertNotEqual(decision.route, "article")
 
     def test_hybrid_fuzzy_band_reroutes(self):
-        """hybrid: fuzzy band message (confidence < 0.86) is rerouted by LLM, reason contains marker."""
-        # "把上次那个东西继续弄一下" → keyword confidence 0.45 (unrecognised), below 0.86 → LLM triggered
+        """hybrid: fuzzy band message (confidence < 0.86) keeps main_agent — LLM cannot reroute to article."""
+        # "把上次那个东西继续弄一下" → keyword confidence 0.45 (unrecognised), below 0.86 → LLM triggered,
+        # but article/video rerouting is disabled: content production needs deterministic rules.
         config = self._hybrid_config()
         upgraded = classify_with_fallback(
             "把上次那个东西继续弄一下", config,
             fallback=lambda msg, cfg: {"route": "article", "confidence": 0.82},
         )
-        self.assertEqual(upgraded.route, "article")
-        self.assertEqual(upgraded.action, "dispatch_article")
-        self.assertIn("兜底", upgraded.reason)
+        self.assertEqual(upgraded.action, "main_agent")
+        self.assertNotEqual(upgraded.route, "article")
 
     def test_hybrid_external_action_skips_llm(self):
         """hybrid: external_action messages skip fallback entirely, keep approval_required."""

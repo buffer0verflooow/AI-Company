@@ -80,7 +80,7 @@ class SwarmIntegrationPathTests(unittest.TestCase):
 
     def test_runner_role_counts_are_valid(self):
         """role_counts 字符串必须能被 runner 解析 (key=value 对)"""
-        for intent in ["recon", "exploit", "report", "analyze", "custom"]:
+        for intent in ["recon", "exploit", "report", "analyze", "custom", "research"]:
             rc = runner_role_counts(intent)
             for part in rc.split(","):
                 key, _, val = part.partition("=")

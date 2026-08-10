@@ -3,6 +3,7 @@
   "timezone": "Asia/Shanghai",
   "dispatch_security": true,
   "auto_run_security": true,
+  "dispatch_research": true,
   "authorized_targets": [],
   "swarm_repo": "/home/pwn/workspace/research/swarm-knowledge",
   "swarm_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db",

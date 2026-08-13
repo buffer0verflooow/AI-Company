@@ -116,11 +116,12 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(decision.action, "dispatch_article")
 
     def test_research_request_routes_to_swarm(self):
-        # 蜂群研究路由 (2026-08-10): 公司职能研究任务 → dispatch_swarm
+        # 蜂群研究路由 (2026-08-12): 公司职能研究任务 → dispatch_swarm,
+        # intent 统一为 research (由蜂群侧按 research 产品线播种)。
         cases = (
-            ("调研一下竞品 X 的技术方案", "analyze"),
-            ("做一份 AI 眼镜行业竞品分析报告", "report"),
-            ("对比一下 Codex 和 Claude Code 的优缺点", "analyze"),
+            ("调研一下竞品 X 的技术方案", "research"),
+            ("做一份 AI 眼镜行业竞品分析报告", "research"),
+            ("对比一下 Codex 和 Claude Code 的优缺点", "research"),
         )
         for message, intent in cases:
             with self.subTest(message=message):
@@ -128,6 +129,7 @@ class ClassificationTests(unittest.TestCase):
                 self.assertEqual(decision.route, "research")
                 self.assertEqual(decision.action, "dispatch_swarm")
                 self.assertEqual(decision.intent, intent)
+                self.assertEqual(decision.target_type, "unknown")
 
     def test_research_question_stays_with_main_agent(self):
         # 纯问答不走蜂群 (无执行意图)
@@ -139,6 +141,55 @@ class ClassificationTests(unittest.TestCase):
         decision = classify_message("扫描并分析 10.0.0.5 的漏洞")
         self.assertEqual(decision.route, "security")
         self.assertEqual(decision.action, "dispatch_swarm")
+
+    def test_technical_methodology_routes_to_research(self):
+        # 方法论研究门控 (2026-08-12): 讨论"怎么做"的技术陈述句,
+        # 即使含 fuzz/漏洞/反编译 等 security 词, 也不得被派成 recon 扫描。
+        cases = (
+            "现在方法是将二进制反编译成伪代码，然后使用SAST/静态代码分析等方法，"
+            "来查找漏洞；或者通过动态fuzz，模拟执行来找漏洞",
+            "盘点一下当前利用AI进行二进制漏洞挖掘的主流方法",
+            "梳理一下语法树和代码图在漏洞检测里的技术细节",
+        )
+        for message in cases:
+            with self.subTest(message=message[:20]):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "research")
+                self.assertEqual(decision.action, "dispatch_swarm")
+                self.assertEqual(decision.intent, "research")
+                self.assertEqual(decision.target_type, "unknown")
+
+    def test_active_security_task_not_swallowed_by_methodology_gate(self):
+        # 方法论门控不得抢走真实安全任务: 主动攻击动词/目标实体优先。
+        cases = (
+            "扫描 example.com 并尝试绕过认证",
+            "给 acme.com 的登录接口写一个 poc",
+            "扫描并分析 10.0.0.5 的漏洞",
+        )
+        for message in cases:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "security")
+
+    def test_ma_question_does_not_redispatch(self):
+        # 2026-08-12: "调研跑完了吗" 被误判为 research 新任务重复派发 (run 323d31af)。
+        # "…吗" 结尾是完成态问句, 必须走 main_agent, 不得再派发蜂群。
+        cases = (
+            "调研跑完了吗",
+            "调研完成了吗",
+            "那个扫描任务跑完了吗",
+            "蜂群 7d8cb7f0 有结果了吗",
+        )
+        for message in cases:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "company")
+                self.assertEqual(decision.action, "main_agent")
+
+    def test_ma_suffix_does_not_block_explicit_prefix(self):
+        # 显式 /security 前缀仍优先于问句拦截 (用户显式指令)
+        decision = classify_message("/security 扫描 example.com 跑完了吗")
+        self.assertEqual(decision.route, "security")
 
     def test_article_pipeline_complaints_are_not_article_production(self):
         messages = (

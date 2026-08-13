@@ -116,7 +116,7 @@ _DEFAULT_ROUTING_TERMS: Dict[str, list] = {
         "implement", "build", "update", "create", "refactor",
     ],
     # 蜂群研究路由 (2026-08-10): 公司职能研究/调研类任务 → dispatch_swarm。
-    # 与 security 的区别: research 不涉及外部目标授权 (analyze/report intent,
+    # 与 security 的区别: research 不涉及外部目标授权 (research intent,
     # 无 scope 概念); 与 company 的区别: research 是多 agent 并行研究 (蜂群
     # benchmark 证明: 研究/分析类任务蜂群 > 单 agent)。
     "research": [
@@ -252,7 +252,8 @@ COMPANY_CONTEXTUAL_EXECUTION_RE = re.compile(
     re.I,
 )
 QUESTION_RE = re.compile(
-    r"[?？]|为什么|为何|怎么(?:样)?|如何|是否|能否|可否|有没有|有无|什么|哪些?|哪(?:个|些)|借鉴意义|支持吗|下载吗",
+    r"[?？]|为什么|为何|怎么(?:样)?|如何|是否|能否|可否|有没有|有无|什么|哪些?|哪(?:个|些)|借鉴意义|支持吗|下载吗|"
+    r"[^。；\n]{0,10}吗(?:[?？]|$)",
     re.I,
 )
 SECURITY_ANALYSIS_RE = re.compile(
@@ -261,6 +262,26 @@ SECURITY_ANALYSIS_RE = re.compile(
 )
 SECURITY_REPORT_RE = re.compile(
     r"(?:生成|写|整理|输出|出)[^。；\n]{0,8}(?:安全|漏洞|渗透|赏金|逆向)[^。；\n]{0,8}报告",
+    re.I,
+)
+
+# 方法论研究门控 (2026-08-12): 技术方法论讨论 (无目标实体、无主动攻击动词)
+# 不得被 security 词 (fuzz/漏洞/反编译) 劫持成 recon 扫描任务。
+# 强信号词 — 消息中必须出现至少一个, 才可能是"讨论方法"而非"执行任务"。
+METHODOLOGY_STRONG_RE = re.compile(
+    r"(方法|方法论|技术细节|语法树|代码图|全景|原理|主流|盘点|梳理|现状|有哪些|怎么做|如何实现|技术方案)",
+    re.I,
+)
+# 技术/安全上下文 — 与强信号词同时出现才构成"方法论讨论"。
+METHODOLOGY_CONTEXT_RE = re.compile(
+    r"(漏洞|逆向|fuzz|反编译|伪代码|二进制|SAST|静态分析|动态分析|模拟执行|exploit|渗透|安全|解析器)",
+    re.I,
+)
+# 主动攻击/探测动词 — 出现即视为实际任务 (含 fuzz 作动词的用法),
+# 即使措辞里也带"方法"等词, 仍按 security 处理。
+ACTIVE_TASK_VERB_RE = re.compile(
+    r"(扫描|探测|枚举|爆破|绕过|攻击|验证漏洞|写.{0,8}poc|recon|probe|brute|"
+    r"fuzz\s*(?:一下|目标|这个|那个|本机|本地|[:：]|\s+[a-zA-Z0-9./-]+))",
     re.I,
 )
 
@@ -375,6 +396,28 @@ def _is_research_request(text: str) -> bool:
         return True
     # 研究词 + 公司执行动作 (如 "做一份竞品分析报告")
     return bool(_contains_any(text, COMPANY_EXECUTION_TERMS) and _contains_any(text, {"报告", "方案", "分析", "梳理", "总结"}))
+
+
+def _is_methodology_research_request(text: str) -> bool:
+    """方法论研究门控 (2026-08-12): 技术方法论讨论不得被 security 词劫持。
+
+    背景: "现在方法是将二进制反编译成伪代码…或者通过动态fuzz，模拟执行来找漏洞"
+    这类讨论"怎么做"的陈述句, 会因 fuzz/漏洞/反编译 命中 security 词表,
+    以 intent=recon 形态派发蜂群 → 无目标全 BLOCKED, 白烧 token。
+
+    判定三条件 (全部满足才放行到 research):
+    1. 有方法论强信号词 (方法/技术细节/语法树/全景/盘点/现状…)
+    2. 有技术/安全上下文 (漏洞/fuzz/反编译/二进制…)
+    3. 无主动攻击动词 (扫描/探测/绕过/写poc/fuzz 目标…)
+       且无具体目标实体 (IP/域名/APK → 那是有授权语义的真实任务)
+    """
+    if not text or not METHODOLOGY_STRONG_RE.search(text):
+        return False
+    if not METHODOLOGY_CONTEXT_RE.search(text):
+        return False
+    if ACTIVE_TASK_VERB_RE.search(text):
+        return False
+    return not extract_target(text)
 
 
 def _is_company_execution_request(text: str) -> bool:
@@ -623,6 +666,12 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     elif _is_video_request(text):
         route = "video"
         confidence = 0.86
+    elif _is_methodology_research_request(text):
+        # 方法论研究门控 (2026-08-12): 在 security 判定之前拦截技术方法论
+        # 陈述句 ("…反编译成伪代码…动态fuzz…找漏洞"), 避免被 security 词
+        # 劫持成 recon 扫描。真实安全任务 (含主动攻击动词/目标实体) 不受影响。
+        route = "research"
+        confidence = 0.84
     elif _is_security_request(text):
         route = "security"
         confidence = 0.86
@@ -665,9 +714,12 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
             action = "approval_required"
         extra = {}
         if route == "research":
-            # 研究任务: 含"报告/汇总"→ report, 否则 analyze (多 agent 并行分析)
+            # 蜂群研究路由 (2026-08-12): 统一 research intent, 由蜂群侧按
+            # research 产品线播种 (researcher×2 + reporter)。不再压成
+            # analyze/report——旧映射会让 research 任务命中二进制分析技能
+            # (nm/objdump/readelf), 对市场/技术调研是语义错配。
             extra = {
-                "intent": "report" if any(t in text for t in ("报告", "汇总", "总结", "简报")) else "analyze",
+                "intent": "research",
                 "target_type": "unknown",
             }
         return RouteDecision(
@@ -1203,8 +1255,8 @@ def runner_role_counts(intent: str) -> str:
         "exploit": "analyst=1,exploiter=1,reporter=1",
         "report": "reporter=1",
         "analyze": "analyst=1,reporter=1",
-        # 蜂群研究路由 (2026-08-10): 研究类任务以并行分析为主
-        "research": "analyst=2,reporter=1",
+        # 蜂群研究路由 (2026-08-12): research 产品线使用独立 researcher 角色
+        "research": "researcher=2,reporter=1",
     }.get(intent, "analyst=1,reporter=1")
 
 

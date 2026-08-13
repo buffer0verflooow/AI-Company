@@ -58,6 +58,9 @@ def main() -> int:
     env["HERMES_SESSION_SOURCE"] = "tool"
     env["HERMES_WRITE_SAFE_ROOT"] = WORKSPACE
     env["TERMINAL_CWD"] = WORKSPACE
+    # 蜂群 agent 执行环境门（审计 A2）：capture.py --force-capture 仅接受该标记，
+    # 防止任意本机进程伪造 agent 身份强制入库
+    env["SWARM_AGENT_EXEC"] = "1"
     cmd = [
         "hermes", "chat", "-q", prompt, "-Q",
         "--source", "tool", "--max-turns", "40",

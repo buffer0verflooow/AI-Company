@@ -44,7 +44,7 @@ OBSIDIAN_VAULT = Path(os.environ.get(
     str(Path.home() / "workspace" / "company"),
 ))
 CAPTURE_PY = (
-    Path.home() / "workspace" / "research" / "swarm-knowledge" / "capture.py"
+    Path.home() / "workspace" / "research" / "swarm-knowledge" / "scripts" / "capture.py"
 )
 SWARM_DB = (
     Path.home() / "workspace" / "research" / "swarm-knowledge" / "swarm_knowledge.db"

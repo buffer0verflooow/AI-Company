@@ -32,20 +32,25 @@ def push_to_wechat(article_path, cover_path=None):
     with open(article_path) as f:
         raw = f.read()
     
-    # Parse YAML frontmatter
+    # Parse YAML frontmatter — ONLY the leading ---...--- block.  Body may
+    # contain its own "---" separator lines (e.g. before 免责声明); naive
+    # toggle parsing would swallow the rest of the article as frontmatter.
     lines = raw.split("\n")
     title = ""
     body_lines = []
-    in_fm = False
-    for line in lines:
-        if line.strip() == "---":
-            in_fm = not in_fm
-            continue
-        if in_fm:
+    fence_hits = [i for i, ln in enumerate(lines) if ln.strip() == "---"]
+    if len(fence_hits) >= 2:
+        fm_zone = lines[fence_hits[0] + 1:fence_hits[1]]
+        body_lines = lines[fence_hits[1] + 1:]
+        for line in fm_zone:
             if line.startswith("title:"):
-                title = line.split(":",1)[1].strip()
-        else:
-            body_lines.append(line)
+                title = line.split(":", 1)[1].strip()
+                # strip surrounding quotes (single or double) from title
+                if len(title) >= 2 and title[0] == title[-1] and title[0] in ('"', "'"):
+                    title = title[1:-1]
+                break
+    else:
+        body_lines = lines
     body = "\n".join(body_lines)
     
     if not title:
@@ -58,18 +63,41 @@ def push_to_wechat(article_path, cover_path=None):
     else:
         print("CSS block found in body")
     
-    # Render markdown to HTML with syntax highlighting + CSS inline
-    html = markdown.markdown(body, extensions=['fenced_code','tables','codehilite','nl2br'])
-    
-    # Inject pygments syntax highlighting CSS into style block if present
+    # Render markdown to HTML — NO pygments syntax highlighting for WeChat
+    # WeChat's editor doesn't support pygments span classes: colored spans render
+    # as fragmented inline styles, and raw chars like *** get parsed as markdown
+    # bold markers → broken display. Use plain code blocks with uniform styling.
     import re
-    style_match = re.search(r'<style>(.*?)</style>', html, re.S)
-    if style_match:
-        from pygments.formatters import HtmlFormatter
-        pygments_css = HtmlFormatter(style='monokai').get_style_defs('.codehilite')
-        # Merge pygments CSS into existing style
-        new_style = style_match.group(1) + '\n' + pygments_css
-        html = html[:style_match.start(1)] + new_style + html[style_match.end(1):]
+    # Defensive: replace *** inside code fences before markdown parsing — WeChat's
+    # editor re-parses content and treats *** as an emphasis marker, breaking the line.
+    body = re.sub(r'(```[^`\n]*\n)(.*?)(```)', 
+        lambda m: m.group(1) + m.group(2).replace('***', '•••') + m.group(3), 
+        body, flags=re.S)
+    html = markdown.markdown(body, extensions=['fenced_code','tables','nl2br'])
+    # De-highlight codehilite spans if any: unwrap pygments span classes
+    html = re.sub(r'<span class="[^"]*"[^>]*>', '', html)
+    html = re.sub(r'</span>', '', html)
+    # Convert <ul>/<ol> lists to WeChat-compatible paragraphs.
+    # WeChat's editor mangles <ul><li> markup — bullets render as garbage.
+    # Reference style (GAP article, user-approved) uses plain paragraphs per item.
+    def _list_to_paras(m):
+        tag = m.group(1)
+        items = re.findall(r'<li[^>]*>(.*?)</li>', m.group(2), re.S)
+        out = []
+        for i, it in enumerate(items, 1):
+            it = it.strip()
+            if not it:
+                continue
+            prefix = f"{i}. " if tag == 'ol' else "• "
+            out.append(f"<p>{prefix}{it}</p>")
+        return "\n".join(out)
+    html = re.sub(r'<(ul|ol)[^>]*>(.*?)</\1>', _list_to_paras, html, flags=re.S)
+    # Convert newlines inside <pre> to <br> — WeChat's editor collapses plain
+    # \n inside code blocks to spaces (YARA/long code loses line breaks).
+    # <br> tags survive the editor's round-trip; white-space:pre does not.
+    html = re.sub(r'(<pre[^>]*>)(.*?)(</pre>)',
+                  lambda m: m.group(1) + m.group(2).replace('\n', '<br>') + m.group(3),
+                  html, flags=re.S)
     
     # CRITICAL: WeChat strips <style> tags — use premailer for production-grade inline
     from premailer import transform
@@ -79,6 +107,34 @@ def push_to_wechat(article_path, cover_path=None):
     html = re.sub(r'^<html><head></head><body[^>]*>', '', html)
     html = re.sub(r'</body></html>$', '', html)
     print(f"CSS inlined via premailer: style= count = {html.count('style=')}")
+
+    # CRITICAL (2026-08-12): WeChat editor STRIPS the <pre> wrapper and keeps only
+    # <code>. Premailer inlines `pre code { background: transparent; color: #e2e8f0 }`
+    # onto <code>, so after <pre> is dropped the block renders as light-gray text on
+    # white background — unreadable, and without white-space:pre long lines squash.
+    # Fix: force the complete block styling onto <code> itself, independent of <pre>.
+    CODE_BLOCK_STYLE = (
+        "display:block;background:#1e293b;color:#e2e8f0;border-radius:4px;"
+        "padding:14px 16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;"
+        "font-family:'Consolas','Menlo','Courier New',monospace;font-size:13px;line-height:1.65;"
+    )
+    # Inline code (short, inside <p>) keeps light style; only standalone code blocks get the dark treatment.
+    # Standalone blocks: <pre><code ...>...</code></pre>. After WeChat strips <pre>, <code> must stand alone.
+    def _style_code_block(m):
+        inner = m.group(2)
+        return f"<pre><code style=\"{CODE_BLOCK_STYLE}\">{inner}</code></pre>"
+    html = re.sub(r'(<pre[^>]*>)(<code[^>]*>)(.*?)(</code>)(</pre>)',
+                  lambda m: f"<pre><code style=\"{CODE_BLOCK_STYLE}\">{m.group(3)}</code></pre>",
+                  html, flags=re.S)
+    # Safety net: any <code> block that lost its <pre> parent (WeChat round-trip)
+    # gets the block style too — detect multi-line code via <br> presence.
+    def _fix_orphan_code(m):
+        inner = m.group(2)
+        if "<br" in inner or len(inner) > 120:
+            return f"<code style=\"{CODE_BLOCK_STYLE}\">{inner}</code>"
+        return m.group(0)
+    html = re.sub(r'(<code[^>]*>)(.*?)(</code>)', _fix_orphan_code, html, flags=re.S)
+    print(f"code block styling applied: dark blocks = {html.count(CODE_BLOCK_STYLE.split(';')[1][10:])}")
     
     # Verify CSS made it through
     if "body, p, li" not in html:
@@ -115,7 +171,7 @@ def push_to_wechat(article_path, cover_path=None):
     draft = {"articles":[{
         "title": title,
         "thumb_media_id": thumb_id,
-        "author": "pwn",
+        "author": "nooooop",
         "digest": digest_text,
         "content": html,
         "content_source_url": "",

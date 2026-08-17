@@ -22,6 +22,10 @@ updated: 2026-07-21
 - `market_signals.db` — 外部市场信号、去重记录、评分和多来源市场脉冲
 - `runtime/market-radar/` — 每次雷达运行的原始响应、报告和结构化脉冲
 - `market-to-content-bridge.md` — 市场雷达 → 内容项目桥接（选题映射、排期建议）
+- [[wechat-automation-plan|公众号自动化运营方案]] — 选题→写稿→草稿→发布→回捞全链路自动化（2026-08-09）
+- [[content-pipeline-topic-pool|文章产线选题池 v1]] — 4 赛道选题清单（A攻防/B对抗/C治理/D变现）+ 4 周排期（2026-08-09）
+- [[article-quality-constraints|文章产出质量约束规范 v1]] — 14 条用户抱怨→9 组约束（C1-C9），draft 阶段强制（2026-08-09）
+- [[article-style-references|文章风格参考：三种舒服风格]] — 策展清单/概念辨析/深度拆解三风格特征与产线映射（2026-08-09）
 
 ## 关联项目
 

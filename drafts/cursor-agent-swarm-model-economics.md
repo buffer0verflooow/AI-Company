@@ -3,101 +3,67 @@ title: Cursor 的 Agent Swarm 实验：当 AI Agent 学会组队写代码
 ---
 
 <style>
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-  font-size: 16px;
-  line-height: 1.75;
-  color: #1a1a1a;
-  max-width: 680px;
-  margin: 0 auto;
-  padding: 20px 16px;
-  background: #ffffff;
+body, p, li, table, blockquote {
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #1f2937;
+}
+p { margin: 0 0 12px; }
+h1 {
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 24px; line-height: 1.45;
+  color: #0f172a; margin: 20px 0 18px;
 }
 h2 {
-  font-size: 1.25em;
-  font-weight: 600;
-  margin: 1.8em 0 0.8em;
-  padding-bottom: 0.3em;
-  border-bottom: 1px solid #eee;
-  color: #111;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 18px; line-height: 1.5;
+  color: #0f172a; border-left: 4px solid #2563eb;
+  padding-left: 10px; margin: 28px 0 16px;
 }
 h3 {
-  font-size: 1.1em;
-  font-weight: 600;
-  margin: 1.4em 0 0.6em;
-  color: #222;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 16px; line-height: 1.6;
+  color: #1e3a8a; margin: 20px 0 10px;
 }
-p {
-  margin: 0.8em 0;
-  text-align: justify;
-}
-blockquote {
-  margin: 1em 0;
-  padding: 0.8em 1em;
-  border-left: 4px solid #3478f6;
-  background: #f7f9fc;
-  color: #333;
-  font-style: normal;
-}
+/* Code blocks — dark background, MUST have white-space:pre */
 pre {
-  background: #f5f5f5;
-  border: 1px solid #e8e8e8;
-  border-radius: 4px;
-  padding: 12px 16px;
-  overflow-x: auto;
-  font-size: 0.85em;
-  line-height: 1.5;
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-}
-code {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 0.9em;
-  background: #f0f0f0;
-  padding: 2px 6px;
-  border-radius: 3px;
+  background: #1e293b; color: #e2e8f0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px; line-height: 1.65;
+  border-radius: 4px; padding: 14px 16px;
+  margin: 14px 0 18px; overflow-x: auto;
+  white-space: pre;
 }
 pre code {
-  background: none;
-  padding: 0;
+  background: transparent; color: #e2e8f0;
+  font-family: inherit; font-size: 13px;
 }
+/* Inline code */
+code {
+  background: #eff6ff; color: #1d4ed8;
+  border-radius: 3px; padding: 1px 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+}
+blockquote {
+  background: #eff6ff; border-left: 4px solid #3b82f6;
+  margin: 14px 0 18px; padding: 10px 14px;
+  color: #1e3a8a;
+}
+blockquote p { margin: 0; }
 table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 1em 0;
-  font-size: 0.9em;
+  width: 100%; border-collapse: collapse;
+  margin: 14px 0 18px;
 }
 th, td {
-  border: 1px solid #ddd;
-  padding: 8px 12px;
-  text-align: left;
+  border: 1px solid #dbeafe; padding: 8px 12px;
+  text-align: left; font-size: 13px;
 }
-th {
-  background: #f7f9fc;
-  font-weight: 600;
-}
-ul, ol {
-  margin: 0.6em 0;
-  padding-left: 1.5em;
-}
-li {
-  margin: 0.4em 0;
-}
-strong {
-  font-weight: 600;
-  color: #111;
-}
-em {
-  color: #555;
-}
-a {
-  color: #3478f6;
-  text-decoration: none;
-}
-hr {
-  border: none;
-  border-top: 1px solid #eee;
-  margin: 2em 0;
-}
+th { background: #eff6ff; font-weight: 600; }
+img { max-width: 100%; height: auto; margin: 12px 0; }
+a { color: #2563eb; text-decoration: none; }
+hr { border: none; border-top: 1px solid #e5e7eb; margin: 20px 0; }
 </style>
 
 # Cursor 的 Agent Swarm 实验：当 AI Agent 学会组队写代码
@@ -182,7 +148,7 @@ Cursor 在 Swarm 中做了一个叫 Field Guide 的实验。
 
 结果非常清楚：新 Swarm 在每一种模型配置中都碾压旧版。使用 Grok 4.5 时，新版四小时达到 80%，旧版不到两小时就失控，只能被迫暂停。
 
-旧版 Spam 最终引擎代码 64,305 行，分 54 个 crate，里面三个互不通信的 SQL 实现。新版只用了 9,908 行，9 个 crate。旧版累积了超过七万次合并冲突，新版不到一千。
+旧版 Swarm 最终引擎代码 64,305 行，分 54 个 crate，里面三个互不通信的 SQL 实现。新版只用了 9,908 行，9 个 crate。旧版累积了超过七万次合并冲突，新版不到一千。
 
 质量差距在代码里一目了然。
 

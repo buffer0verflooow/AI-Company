@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.knowledge_promotion_gateway import approve, connect_gate, list_candidates, promote, scan
+from automation.knowledge_promotion_gateway import (
+    approve,
+    connect_gate,
+    list_candidates,
+    promote,
+    scan,
+)
 
 
 class KnowledgePromotionTests(unittest.TestCase):

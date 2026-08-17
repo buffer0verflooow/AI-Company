@@ -16,9 +16,8 @@ AUTOMATION_DIR = str(Path(__file__).resolve().parent)
 if AUTOMATION_DIR not in sys.path:
     sys.path.insert(0, AUTOMATION_DIR)
 
-from market_radar import main as radar_main  # noqa: E402
-from agentkey_radar_probe import run_probe, load_config  # noqa: E402
-
+from agentkey_radar_probe import load_config, run_probe
+from market_radar import main as radar_main
 
 if __name__ == "__main__":
     # Step 1 — Primary radar (AnySearch)

@@ -15,11 +15,20 @@ from automation.company_result_notifier import (
     process_once,
     recover_failed_cron_deliveries,
 )
-from automation.company_router import RouterState, classify_message, resolve_session_origin
-from automation.notification_outbox import pending as pending_outbox
+from automation.company_router import (
+    RouterState,
+    classify_message,
+    resolve_session_origin,
+)
 from automation.notification_outbox import enqueue as enqueue_outbox
 from automation.notification_outbox import get as get_outbox
-from automation.operations_control import business_period, connect as connect_operations, create_review, import_proposals
+from automation.notification_outbox import pending as pending_outbox
+from automation.operations_control import (
+    business_period,
+    create_review,
+    import_proposals,
+)
+from automation.operations_control import connect as connect_operations
 
 
 class OriginResolutionTests(unittest.TestCase):

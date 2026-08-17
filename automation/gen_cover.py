@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
 # ── Color palettes (dark tech-themed) ──────────────────────────────────────
@@ -50,7 +51,7 @@ def _find_font(size: int = 32) -> ImageFont.FreeTypeFont:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
-            except Exception:
+            except (OSError, ValueError):
                 continue
     # Fallback to default
     return ImageFont.load_default()

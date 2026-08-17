@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from automation.company_operator import (
+    _worker_model,
     build_worker_prompt,
     connect,
     discover_opportunities,
@@ -18,16 +19,15 @@ from automation.company_operator import (
     run_cycle,
     select_executable,
     worker_usage,
-    _worker_model,
 )
+from automation.market_radar import connect as connect_market
+from automation.notification_outbox import pending as pending_outbox
 from automation.operations_control import (
     apply_user_decision,
     business_period,
     create_review,
     import_proposals,
 )
-from automation.notification_outbox import pending as pending_outbox
-from automation.market_radar import connect as connect_market
 
 
 class CompanyOperatorTests(unittest.TestCase):

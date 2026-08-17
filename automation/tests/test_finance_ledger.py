@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.finance_ledger import add_actual, connect, report, sync_forecast, sync_snapshot
+from automation.finance_ledger import (
+    add_actual,
+    connect,
+    report,
+    sync_forecast,
+    sync_snapshot,
+)
 
 
 class FinanceLedgerTests(unittest.TestCase):

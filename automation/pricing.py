@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
     from ._safe_io import sqlite_uri
@@ -61,7 +61,7 @@ def _counter(value: Any) -> int:
         return 0
 
 
-def _nonnegative_float(value: Any) -> Optional[float]:
+def _nonnegative_float(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -69,15 +69,15 @@ def _nonnegative_float(value: Any) -> Optional[float]:
     return number if math.isfinite(number) and number >= 0 else None
 
 
-def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> Dict[str, Any]:
+def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> dict[str, Any]:
     """Load evidence-backed prices read-only.
 
     Returns a lookup with ``by_slug`` (exact, lowercased ``model_slug``) and
     ``by_base`` (provider-stripped name -> candidate rows).  Missing DB / table
     yields an empty table so callers degrade to "unpriced" rather than crash.
     """
-    by_slug: Dict[str, List[Dict[str, Any]]] = {}
-    by_base: Dict[str, List[Dict[str, Any]]] = {}
+    by_slug: dict[str, list[dict[str, Any]]] = {}
+    by_base: dict[str, list[dict[str, Any]]] = {}
     try:
         db = sqlite3.connect(sqlite_uri(finance_db, mode="ro"), uri=True)
     except sqlite3.Error:
@@ -114,7 +114,7 @@ def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> Dict[str, Any]:
     return {"by_slug": by_slug, "by_base": by_base}
 
 
-def _pick(candidates: List[Dict[str, Any]], model_norm: str) -> Optional[Dict[str, Any]]:
+def _pick(candidates: list[dict[str, Any]], model_norm: str) -> dict[str, Any] | None:
     """Deterministic winner among price rows sharing a base name.
 
     Prefer USD (so figures stay comparable in a mixed-provider deployment),
@@ -132,7 +132,7 @@ def _pick(candidates: List[Dict[str, Any]], model_norm: str) -> Optional[Dict[st
     return pool[0]
 
 
-def match_price(model: Any, table: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def match_price(model: Any, table: dict[str, Any]) -> dict[str, Any] | None:
     model_norm = _norm(model)
     if not model_norm:
         return None
@@ -146,7 +146,7 @@ def match_price(model: Any, table: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return _pick(candidates, model_norm)
 
 
-def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> Dict[str, Any]:
+def estimate_cost(model: Any, tokens: dict[str, Any], table: dict[str, Any]) -> dict[str, Any]:
     """Estimate the cost of one run from its measured tokens.
 
     Never fabricates: unmatched -> ``unpriced``; matched non-USD -> native
@@ -156,7 +156,7 @@ def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> 
     """
     token_counts = {field: _counter(tokens.get(field)) for field, _ in _COST_COMPONENTS}
     total_tokens = sum(token_counts.values())
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "estimated_cost_usd": None,
         "estimated_cost_native": None,
         "estimated_cost_currency": "",
@@ -175,8 +175,8 @@ def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> 
         return result
 
     native = 0.0
-    priced: List[str] = []
-    unpriced: List[str] = []
+    priced: list[str] = []
+    unpriced: list[str] = []
     for field, price_col in _COST_COMPONENTS:
         count = token_counts[field]
         if not count:
@@ -206,11 +206,11 @@ def estimate_cost(model: Any, tokens: Dict[str, Any], table: Dict[str, Any]) -> 
 
 def price_run_update(
     model: Any,
-    tokens: Dict[str, Any],
-    table: Dict[str, Any],
+    tokens: dict[str, Any],
+    table: dict[str, Any],
     *,
     existing_cost_status: Any = "",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Return column updates for a run, or ``None`` to leave it untouched.
 
     A confirmed/actual cost is authoritative and never replaced by an estimate.
@@ -232,14 +232,14 @@ def price_run_update(
     }
 
 
-def cost_rollup(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def cost_rollup(runs: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate cost honestly: confirmed USD, estimated USD, native non-USD, and
     the still-unpriced token volume — so no consumer can sum a basis that omits
     the unpriced portion.
     """
     confirmed_usd = 0.0
     estimated_usd = 0.0
-    estimated_native: Dict[str, float] = {}
+    estimated_native: dict[str, float] = {}
     unpriced_runs = 0
     unpriced_tokens = 0
     priced_runs = 0

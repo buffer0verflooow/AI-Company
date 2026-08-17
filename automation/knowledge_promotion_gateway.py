@@ -11,9 +11,10 @@ import math
 import re
 import sqlite3
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, read_text_limited, sqlite_uri
@@ -26,12 +27,12 @@ DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_know
 DEFAULT_GATE_DB = COMPANY_ROOT / "operations/runtime/knowledge_promotion.db"
 DEFAULT_WIKI_DIR = COMPANY_ROOT / "wiki/promoted"
 
-DOMAIN_RE = re.compile(r"(?<![@\w-])(?:https?://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)", re.I)
+DOMAIN_RE = re.compile(r"(?<![@\w-])(?:https?://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)", re.IGNORECASE)
 IP_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-SECRET_RE = re.compile(r"(?:api[_ -]?key|secret|token|password|dsn)\s*[:=]\s*[^\s,;]+", re.I)
-PATH_RE = re.compile(r"/(?:home|root|opt|var|tmp)/[^\s`\])]+", re.I)
-ENDPOINT_RE = re.compile(r"(?<!\w)/(?:api|auth|oauth|admin|internal|v\d+)(?:/[A-Za-z0-9_.-]+)+", re.I)
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+SECRET_RE = re.compile(r"(?:api[_ -]?key|secret|token|password|dsn)\s*[:=]\s*[^\s,;]+", re.IGNORECASE)
+PATH_RE = re.compile(r"/(?:home|root|opt|var|tmp)/[^\s`\])]+", re.IGNORECASE)
+ENDPOINT_RE = re.compile(r"(?<!\w)/(?:api|auth|oauth|admin|internal|v\d+)(?:/[A-Za-z0-9_.-]+)+", re.IGNORECASE)
 SENSITIVE_TERMS = {
     "poc", "exploit", "未披露", "0day", "zero-day", "bypass", "接管", "takeover",
     "hackerone", "in scope", "payload", "hardcoded key", "hardcoded-key",
@@ -125,14 +126,14 @@ def _tags(value: Any) -> set[str]:
     return {str(item).strip().lower() for item in parsed if str(item).strip()}
 
 
-def _trust(value: Any) -> Dict[str, float]:
+def _trust(value: Any) -> dict[str, float]:
     try:
         parsed = json.loads(value or "{}")
     except json.JSONDecodeError:
         parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
-    result: Dict[str, float] = {}
+    result: dict[str, float] = {}
     for key in ("logic_soundness", "base_confidence", "cross_validation"):
         try:
             score = float(parsed.get(key, 0.0) or 0.0)
@@ -191,7 +192,7 @@ def _yaml_scalar(value: Any) -> str:
     return json.dumps(text, ensure_ascii=False)
 
 
-def assess(entry: sqlite3.Row) -> Dict[str, Any]:
+def assess(entry: sqlite3.Row) -> dict[str, Any]:
     combined = "\n".join((str(entry["title"] or ""), str(entry["content"] or ""), str(entry["tags"] or "")))
     trust = _trust(entry["trust_vector"])
     validated = (
@@ -241,11 +242,11 @@ def assess(entry: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def scan(swarm_db: Path, gate_db: Path) -> Dict[str, int]:
+def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
     source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
     source.row_factory = sqlite3.Row
     gate: sqlite3.Connection | None = None
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     now = utc_now()
     try:
         gate = connect_gate(gate_db)
@@ -364,7 +365,7 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
         db.close()
 
 
-def list_candidates(gate_db: Path, statuses: Iterable[str] = ()) -> list[Dict[str, Any]]:
+def list_candidates(gate_db: Path, statuses: Iterable[str] = ()) -> list[dict[str, Any]]:
     db = connect_gate(gate_db)
     try:
         status_list = [item for item in statuses if item]

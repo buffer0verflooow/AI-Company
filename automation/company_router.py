@@ -20,10 +20,11 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any
 
 try:
     from ._safe_io import (
@@ -53,7 +54,7 @@ OPERATOR_INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
 INTERNAL_MESSAGE_PREFIXES = (INTERNAL_WORKER_PREFIX, TVCR_INTERNAL_PREFIX, OPERATOR_INTERNAL_PREFIX)
 INTERNAL_MESSAGE_PREFIX_RE = re.compile(
     rf"^(?:\s*(?:{'|'.join(re.escape(prefix) for prefix in INTERNAL_MESSAGE_PREFIXES)})\s*)+",
-    re.I,
+    re.IGNORECASE,
 )
 NON_USER_SESSION_SOURCES = {"tool", "cron", "subagent"}
 SYNTHETIC_MESSAGE_PREFIX_RE = re.compile(
@@ -72,16 +73,16 @@ SYNTHETIC_MESSAGE_PREFIX_RE = re.compile(
     r"|Review the conversation above and (?:update the skill library|consider saving to memory)"
     r"|\[(?:image|图片)[^\]\n]{0,32}(?:fallback|降级)[^\]\n]*\]"
     r")",
-    re.I,
+    re.IGNORECASE,
 )
 MODEL_SWITCH_NOTICE_RE = re.compile(
     r"^\s*\[Note:\s*model was just switched[^\]]*\]\s*",
-    re.I,
+    re.IGNORECASE,
 )
 
 EXPLICIT_NEW_SWARM_RE = re.compile(
     r"(?:new|fresh|another)\s+swarm|(?:新的?|新建|另开|再开|重新(?:提交|分发|启动))[^，。；\n]{0,8}(?:蜂群|swarm)",
-    re.I,
+    re.IGNORECASE,
 )
 SKILL_REVIEW_MARKER = "update the skill library"
 HERMES_STATE_DB = Path("/home/pwn/.hermes/state.db")
@@ -95,7 +96,7 @@ PRE_EVAL_MIN_PRIOR_USER_MESSAGES = 1  # the current message doesn't count
 # defaults below are the exact previous values and act as a fallback when the
 # file omits a table, so classification behaviour is unchanged if the config is
 # absent or partial.
-_DEFAULT_ROUTING_TERMS: Dict[str, list] = {
+_DEFAULT_ROUTING_TERMS: dict[str, list] = {
     "security": [
         "安全", "漏洞", "赏金", "hackerone", "bug bounty", "渗透", "红队",
         "recon", "exploit", "cve", "apk", "逆向", "攻击面", "扫描", "蜂群",
@@ -143,13 +144,13 @@ _DEFAULT_ROUTING_TERMS: Dict[str, list] = {
 }
 
 
-def _load_routing_terms(path: Optional[Path] = None) -> Dict[str, set]:
+def _load_routing_terms(path: Path | None = None) -> dict[str, set]:
     """Load routing term tables from router_config.json, over built-in defaults.
 
     A missing file, unreadable JSON, or a missing/renamed table all fall back to
     the defaults so a malformed config can never silently empty a classifier gate.
     """
-    resolved: Dict[str, list] = {key: list(value) for key, value in _DEFAULT_ROUTING_TERMS.items()}
+    resolved: dict[str, list] = {key: list(value) for key, value in _DEFAULT_ROUTING_TERMS.items()}
     target = Path(path) if path is not None else DEFAULT_CONFIG
     try:
         data = json.loads(read_text_limited(target, max_bytes=5 * 1024 * 1024))
@@ -163,7 +164,7 @@ def _load_routing_terms(path: Optional[Path] = None) -> Dict[str, set]:
     return {key: set(value) for key, value in resolved.items()}
 
 
-def _apply_routing_terms(terms: Dict[str, set]) -> None:
+def _apply_routing_terms(terms: dict[str, set]) -> None:
     """Publish resolved term tables (and their derived regexes) as module globals."""
     global SECURITY_TERMS, ARTICLE_TERMS, ARTICLE_BLOCKING_TERMS, VIDEO_TERMS
     global COMPANY_TERMS, MANAGEMENT_TERMS, COMPANY_EXECUTION_TERMS, COMPANY_TASK_TERMS
@@ -188,7 +189,7 @@ def _apply_routing_terms(terms: Dict[str, set]) -> None:
     COMPANY_DIRECTIVE_RE = re.compile(
         rf"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|继续|先|着手|需要你|让你|让(?:codex|code|你|它))\s*)*"
         rf"(?:开始\s*)?(?:{COMPANY_EXECUTION_PATTERN})",
-        re.I,
+        re.IGNORECASE,
     )
     external_pattern = "|".join(
         re.escape(term) for term in sorted(EXTERNAL_ACTION_TERMS, key=len, reverse=True)
@@ -198,11 +199,11 @@ def _apply_routing_terms(terms: Dict[str, set]) -> None:
     # real publish slip through; a near-miss now stays flagged (fail toward approval).
     NEGATED_EXTERNAL_ACTION_RE = re.compile(
         rf"(?:不|不要|无需|禁止|不得|暂不|先不|仅生成|只生成)[^，。；\n]{{0,1}}(?:{external_pattern})",
-        re.I,
+        re.IGNORECASE,
     )
 
 
-def reload_routing_terms(path: Optional[Path] = None) -> None:
+def reload_routing_terms(path: Path | None = None) -> None:
     """Re-read routing term tables from disk (called at startup and on demand)."""
     _apply_routing_terms(_load_routing_terms(path))
 
@@ -216,53 +217,53 @@ ARTICLE_NEGATION_PATTERNS = re.compile(
     r"|(?:检讨|反省|误判|误触发|误分类|误分发|误路由)[^。；\n]{0,12}文章"
     r"|文章[^。；\n]{0,12}(?:误判|误触发|误分发|误路由)"
     r"|(?:这|那|刚才)[^。；\n]{0,4}(?:篇)?文章[^。；\n]{0,16}(?:清除|删掉|删除|不是我想要|根本不是|不需要)",
-    re.I,
+    re.IGNORECASE,
 )
 ARTICLE_TOOL_OPERATION_RE = re.compile(
     r"(?:mineru|ocr|提取|解析|识别|读取|抽取)[^。；\n]{0,24}(?:文章|稿件|文档|报告)"
     r"|(?:文章|稿件|文档|报告)[^。；\n]{0,24}(?:mineru|ocr|提取|解析|识别|读取|抽取)",
-    re.I,
+    re.IGNORECASE,
 )
 ARTICLE_OBJECT_PATTERN = r"(?:公众号(?:文章)?|技术文章|文章|稿件|稿子|写稿|草稿)"
 ARTICLE_DIRECT_REQUEST_RE = re.compile(
     rf"(?:写(?:一篇|篇)?|撰写|创作|改写|润色|排版|发布|推送)[^。；\n]{{0,24}}{ARTICLE_OBJECT_PATTERN}"
     rf"|{ARTICLE_OBJECT_PATTERN}[^。；\n]{{0,16}}(?:改写|润色|排版|发布|推送)",
-    re.I,
+    re.IGNORECASE,
 )
 ARTICLE_DESTINATION_RE = re.compile(
     rf"(?:改|整理|转换|转化|加工)[^。；\n]{{0,8}}(?:成|为)[^。；\n]{{0,8}}{ARTICLE_OBJECT_PATTERN}",
-    re.I,
+    re.IGNORECASE,
 )
 VIDEO_DATA_CONTEXT_RE = re.compile(
     r"音视频(?:数据|流|内容|传输)?|视频(?:数据|流|传输|通话|会议|联网)",
-    re.I,
+    re.IGNORECASE,
 )
 VIDEO_OBJECT_PATTERN = r"(?:视频|短片|短视频|成片|分镜|口播稿|配音|字幕|剪辑|mp4|pixelle)"
 VIDEO_REQUEST_RE = re.compile(
     rf"(?:生成|制作|创作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)[^。；\n]{{0,24}}{VIDEO_OBJECT_PATTERN}"
     rf"|{VIDEO_OBJECT_PATTERN}[^。；\n]{{0,16}}(?:制作|剪辑|配音|加字幕|做成|转成|改成|渲染|输出)",
-    re.I,
+    re.IGNORECASE,
 )
 COMPANY_OBJECT_FIRST_RE = re.compile(
     r"^\s*(?:(?:请(?:你)?|帮我|麻烦|现在|直接|立即|先)\s*)*(?:把|将)",
-    re.I,
+    re.IGNORECASE,
 )
 COMPANY_CONTEXTUAL_EXECUTION_RE = re.compile(
     r"^\s*(?:开始|继续|直接|立即)\s*(?:修改|执行|实现|开发|完善|更新|重构|排查|修复|验证)(?:吧|了|一下)?\s*$",
-    re.I,
+    re.IGNORECASE,
 )
 QUESTION_RE = re.compile(
     r"[?？]|为什么|为何|怎么(?:样)?|如何|是否|能否|可否|有没有|有无|什么|哪些?|哪(?:个|些)|借鉴意义|支持吗|下载吗|"
     r"[^。；\n]{0,10}吗(?:[?？]|$)",
-    re.I,
+    re.IGNORECASE,
 )
 SECURITY_ANALYSIS_RE = re.compile(
     r"(?:分析|审计|逆向|检查|评估|研究|排查|测试|验证|复现|定位)",
-    re.I,
+    re.IGNORECASE,
 )
 SECURITY_REPORT_RE = re.compile(
     r"(?:生成|写|整理|输出|出)[^。；\n]{0,8}(?:安全|漏洞|渗透|赏金|逆向)[^。；\n]{0,8}报告",
-    re.I,
+    re.IGNORECASE,
 )
 
 # 方法论研究门控 (2026-08-12): 技术方法论讨论 (无目标实体、无主动攻击动词)
@@ -270,19 +271,19 @@ SECURITY_REPORT_RE = re.compile(
 # 强信号词 — 消息中必须出现至少一个, 才可能是"讨论方法"而非"执行任务"。
 METHODOLOGY_STRONG_RE = re.compile(
     r"(方法|方法论|技术细节|语法树|代码图|全景|原理|主流|盘点|梳理|现状|有哪些|怎么做|如何实现|技术方案)",
-    re.I,
+    re.IGNORECASE,
 )
 # 技术/安全上下文 — 与强信号词同时出现才构成"方法论讨论"。
 METHODOLOGY_CONTEXT_RE = re.compile(
     r"(漏洞|逆向|fuzz|反编译|伪代码|二进制|SAST|静态分析|动态分析|模拟执行|exploit|渗透|安全|解析器)",
-    re.I,
+    re.IGNORECASE,
 )
 # 主动攻击/探测动词 — 出现即视为实际任务 (含 fuzz 作动词的用法),
 # 即使措辞里也带"方法"等词, 仍按 security 处理。
 ACTIVE_TASK_VERB_RE = re.compile(
     r"(扫描|探测|枚举|爆破|绕过|攻击|验证漏洞|写.{0,8}poc|recon|probe|brute|"
     r"fuzz\s*(?:一下|目标|这个|那个|本机|本地|[:：]|\s+[a-zA-Z0-9./-]+))",
-    re.I,
+    re.IGNORECASE,
 )
 
 # 蜂群自身系统元讨论门控 (2026-08-13): "蜂群"/"swarm" 在 SECURITY_TERMS 里
@@ -291,7 +292,7 @@ ACTIVE_TASK_VERB_RE = re.compile(
 META_SWARM_DISCUSSION_RE = re.compile(
     r"(?:蜂群|swarm)[^，。；\n]{0,6}(?:算法|架构|系统|机制|框架|平台|原理|设计|实现|流程|代码|策略|调度|模型|方案)"
     r"|(?:讨论|聊聊|交流|探讨)[^，。；\n]{0,12}(?:蜂群|swarm)",
-    re.I,
+    re.IGNORECASE,
 )
 
 # URL 作为"待抓取/阅读的内容来源"的强信号 (2026-08-13): "抓取分析一下
@@ -301,12 +302,12 @@ META_SWARM_DISCUSSION_RE = re.compile(
 CONTENT_SOURCE_URL_SIGNAL_RE = re.compile(
     r"(?:抓取|爬取|阅读|读取|看下|看看|fetch|crawl|read)"
     r"|(?:提到的|中提到的|里提到的|上提到的|中说的|里说的|中介绍的|里介绍的|中写的|里写的)",
-    re.I,
+    re.IGNORECASE,
 )
 
-DOMAIN_RE = re.compile(r"(?<![@\w-])(?:https?://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?::\d+)?", re.I)
+DOMAIN_RE = re.compile(r"(?<![@\w-])(?:https?://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?::\d+)?", re.IGNORECASE)
 IP_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
-APK_RE = re.compile(r"(?:^|\s)(/[^\s]+\.apk|[^\s]+\.apk)(?:$|\s)", re.I)
+APK_RE = re.compile(r"(?:^|\s)(/[^\s]+\.apk|[^\s]+\.apk)(?:$|\s)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -327,7 +328,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     data = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(data, dict):
         raise ValueError("router config must be an object")
@@ -335,7 +336,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
     return data
 
 
-def resolve_session_origin(index_path: str, session_id: str) -> Dict[str, str]:
+def resolve_session_origin(index_path: str, session_id: str) -> dict[str, str]:
     """Resolve a Hermes agent session ID back to its messaging destination."""
     if not index_path or not session_id:
         return {}
@@ -511,14 +512,14 @@ def _internal_metadata_value(value: Any) -> bool:
     }
 
 
-def _is_internal_hermes_hook(payload: Dict[str, Any], extra: Dict[str, Any]) -> bool:
+def _is_internal_hermes_hook(payload: dict[str, Any], extra: dict[str, Any]) -> bool:
     """Trust internal prefixes only when hook provenance explicitly says so."""
     source_present = "source" in payload or "source" in extra
     source = payload.get("source") if "source" in payload else extra.get("source")
     if source_present and str(source or "").strip().lower() != "hook":
         return False
 
-    metadata: list[Dict[str, Any]] = []
+    metadata: list[dict[str, Any]] = []
     for container in (payload, extra):
         for key in ("hook_metadata", "metadata"):
             value = container.get(key)
@@ -566,8 +567,8 @@ def _strip_internal_message_prefixes(message: str) -> str:
 
 
 def _is_non_user_hermes_session(
-    payload: Dict[str, Any],
-    extra: Dict[str, Any],
+    payload: dict[str, Any],
+    extra: dict[str, Any],
     session_id: str,
     *,
     hermes_db_path: Path = HERMES_STATE_DB,
@@ -843,10 +844,10 @@ _LLM_FALLBACK_PREFIX = {
     "video": "/video ",
     "company": "/company ",
 }
-_LLM_FALLBACK_JSON_RE = re.compile(r"\{[^{}]*\"route\"[^{}]*\}", re.S)
+_LLM_FALLBACK_JSON_RE = re.compile(r"\{[^{}]*\"route\"[^{}]*\}", re.DOTALL)
 
 
-def _parse_llm_fallback(stdout: str) -> Optional[Dict[str, Any]]:
+def _parse_llm_fallback(stdout: str) -> dict[str, Any] | None:
     """Pull the last {"route":...,"confidence":...} object out of an LLM reply."""
     if not stdout:
         return None
@@ -861,7 +862,7 @@ def _parse_llm_fallback(stdout: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _llm_fallback_classify(message: str, config: Dict[str, Any], *, timeout: int = 45) -> Optional[Dict[str, Any]]:
+def _llm_fallback_classify(message: str, config: dict[str, Any], *, timeout: int = 45) -> dict[str, Any] | None:
     """One cheap Hermes turn to classify a message the keyword router was unsure of.
 
     Returns ``{"route": <security|article|video|company|none>, "confidence": float}``
@@ -903,7 +904,7 @@ def _llm_fallback_classify(message: str, config: Dict[str, Any], *, timeout: int
 
 def classify_with_fallback(
     message: str,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     authorized_targets: Iterable[str] = (),
     *,
     fallback=None,
@@ -1017,7 +1018,7 @@ class RouterState:
     def __init__(self, path: str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db: Optional[sqlite3.Connection] = None
+        self.db: sqlite3.Connection | None = None
         try:
             # Schema creation/migrations are writes too; serialize first
             # startup so concurrent hooks cannot race on ALTER TABLE/indices.
@@ -1094,7 +1095,7 @@ class RouterState:
         except Exception:
             pass
 
-    def existing(self, session_id: str, message_hash: str) -> Optional[sqlite3.Row]:
+    def existing(self, session_id: str, message_hash: str) -> sqlite3.Row | None:
         return self.db.execute(
             "SELECT * FROM route_events WHERE session_id=? AND message_hash=?",
             (session_id, message_hash),
@@ -1118,7 +1119,7 @@ class RouterState:
         completed_only: bool = False,
         message_marker: str = "",
         dedup_key: str = "",
-    ) -> Optional[sqlite3.Row]:
+    ) -> sqlite3.Row | None:
         conditions = ["session_id=?", "action=?", "run_id<>''", "created_at>=?"]
         params: list[Any] = [session_id, action, since.isoformat(timespec="seconds")]
         if completed_only:
@@ -1170,7 +1171,7 @@ class RouterState:
         message_hash: str,
         message: str,
         decision: RouteDecision,
-        origin: Optional[Dict[str, str]] = None,
+        origin: dict[str, str] | None = None,
         dedup_key: str = "",
     ) -> str:
         event_id = str(uuid.uuid4())
@@ -1256,7 +1257,7 @@ class RouterState:
         ))
 
 
-def _parse_json_output(output: str) -> Dict[str, Any]:
+def _parse_json_output(output: str) -> dict[str, Any]:
     text = (output or "").strip()
     try:
         return json.loads(text)
@@ -1271,7 +1272,7 @@ def _parse_json_output(output: str) -> Dict[str, Any]:
     raise RuntimeError(f"command did not return JSON: {text[-500:]}")
 
 
-def swarm_command(config: Dict[str, Any], *args: str, timeout: int = 30) -> Dict[str, Any]:
+def swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict[str, Any]:
     cmd = [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -1285,7 +1286,7 @@ def swarm_command(config: Dict[str, Any], *args: str, timeout: int = 30) -> Dict
     return _parse_json_output(proc.stdout)
 
 
-def submit_security(config: Dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> Dict[str, Any]:
+def submit_security(config: dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> dict[str, Any]:
     metadata = json.dumps(
         {
             "company_product_line": product_line,
@@ -1322,7 +1323,7 @@ def runner_role_counts(intent: str) -> str:
     }.get(intent, "analyst=1,reporter=1")
 
 
-def build_runner_cmd(config: Dict[str, Any], run_id: str, intent: str) -> list:
+def build_runner_cmd(config: dict[str, Any], run_id: str, intent: str) -> list:
     """构造 swarm runner 启动命令 (纯函数, 可测)。
 
     2026-08-10 教训: swarm_runner.py 从仓库根目录移到 scripts/ 后,
@@ -1342,7 +1343,7 @@ def build_runner_cmd(config: Dict[str, Any], run_id: str, intent: str) -> list:
     ]
 
 
-def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
+def launch_runner(config: dict[str, Any], run_id: str, intent: str) -> int:
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-{run_id}.log"
@@ -1369,7 +1370,7 @@ def launch_runner(config: Dict[str, Any], run_id: str, intent: str) -> int:
     return proc.pid
 
 
-def content_job_path(config: Dict[str, Any], run_id: str) -> Path:
+def content_job_path(config: dict[str, Any], run_id: str) -> Path:
     value = str(run_id or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
         raise ValueError(f"invalid content run id: {value!r}")
@@ -1385,7 +1386,7 @@ def content_job_path(config: Dict[str, Any], run_id: str) -> Path:
 
 
 def launch_content_job(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     run_id: str,
     *,
     route: str = "",
@@ -1436,7 +1437,7 @@ def launch_content_job(
     return proc.pid
 
 
-def select_company_result(result: Dict[str, Any]) -> str:
+def select_company_result(result: dict[str, Any]) -> str:
     """Prefer the latest completed worker result over reporter-first ordering.
 
     The swarm client intentionally favors reporter tasks for generic callers,
@@ -1466,7 +1467,7 @@ def select_company_result(result: Dict[str, Any]) -> str:
     return str(result.get("result") or result.get("summary") or "")
 
 
-def refresh_session_runs(config: Dict[str, Any], state: RouterState, session_id: str) -> list[str]:
+def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id: str) -> list[str]:
     updates: list[str] = []
     for row in state.active_for_session(session_id):
         run_id = row["run_id"]
@@ -1506,7 +1507,7 @@ def refresh_session_runs(config: Dict[str, Any], state: RouterState, session_id:
     return updates
 
 
-def refresh_session_content_jobs(config: Dict[str, Any], state: RouterState, session_id: str) -> list[str]:
+def refresh_session_content_jobs(config: dict[str, Any], state: RouterState, session_id: str) -> list[str]:
     updates: list[str] = []
     for action, label in (
         ("dispatch_article", "文章产线"),
@@ -1553,10 +1554,10 @@ def refresh_session_content_jobs(config: Dict[str, Any], state: RouterState, ses
 def build_context(
     decision: RouteDecision,
     *,
-    run: Optional[Dict[str, Any]] = None,
+    run: dict[str, Any] | None = None,
     existing_run_id: str = "",
     existing_status: str = "",
-    status_updates: Optional[list[str]] = None,
+    status_updates: list[str] | None = None,
 ) -> str:
     lines = [
         "[公司 Router 私有上下文]",
@@ -1612,7 +1613,7 @@ def build_context(
     return "\n".join(lines)
 
 
-def handle_tvcr_decision(message: str, config: Dict[str, Any], actor: str) -> Optional[str]:
+def handle_tvcr_decision(message: str, config: dict[str, Any], actor: str) -> str | None:
     """Apply an explicit user decision to a pending operating proposal."""
     operations_db = str(config.get("operations_db") or "").strip()
     if not operations_db:
@@ -1692,7 +1693,7 @@ def _pre_evaluate_task(
     decision: RouteDecision,
     message: str,
     session_id: str,
-    config: Dict[str, Any],
+    config: dict[str, Any],
 ) -> str:
     """Determines if a task should proceed, be skipped, or require approval BEFORE dispatch.
 
@@ -1779,8 +1780,8 @@ def _route_product_line(route: str) -> str:
 
 
 def _circuit_breaker_state(
-    config: Dict[str, Any], route: str, *, now: Optional[datetime] = None
-) -> Optional[Tuple[str, int]]:
+    config: dict[str, Any], route: str, *, now: datetime | None = None
+) -> tuple[str, int] | None:
     """Return ``(product_line, failures)`` when a product line should be tripped.
 
     Reuses the digest's failure clustering so the breaker keys on the exact same
@@ -1811,7 +1812,7 @@ def _circuit_breaker_state(
     return (product_line, failures) if failures >= threshold else None
 
 
-def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
+def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, str]:
     if not config.get("enabled", True):
         return {}
 
@@ -1934,7 +1935,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
         origin=origin,
         dedup_key=dedup_key,
     )
-    run: Optional[Dict[str, Any]] = None
+    run: dict[str, Any] | None = None
 
     # Pre-evaluation gate: check task value BEFORE dispatch
     pre_eval = _pre_evaluate_task(decision, message, session_id, config)
@@ -2015,7 +2016,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
                     config, session_id, platform, message, decision,
                     product_line="research" if decision.route == "research" else "security-exploration",
                 )
-                fields: Dict[str, Any] = {
+                fields: dict[str, Any] = {
                     "run_id": str(run.get("run_id") or ""),
                     "request_id": str(run.get("request_id") or ""),
                     "status": "submitted",
@@ -2060,7 +2061,7 @@ def handle_hook(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, st
     return {"context": build_context(decision, run=run, status_updates=updates)}
 
 
-def parse_hook_stdin() -> Dict[str, Any]:
+def parse_hook_stdin() -> dict[str, Any]:
     raw = sys.stdin.read()
     if not raw.strip():
         return {}

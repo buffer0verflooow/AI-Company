@@ -11,12 +11,24 @@ import subprocess
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 try:
-    from ._safe_io import locked_append_text, locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
+    from ._safe_io import (
+        locked_append_text,
+        locked_atomic_write_text,
+        read_text_limited,
+        scrub_environment,
+        sqlite_connection,
+    )
 except ImportError:  # direct script execution
-    from _safe_io import locked_append_text, locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
+    from _safe_io import (
+        locked_append_text,
+        locked_atomic_write_text,
+        read_text_limited,
+        scrub_environment,
+        sqlite_connection,
+    )
 
 
 WORKSPACE = Path("/home/pwn/workspace")
@@ -30,7 +42,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def write_status(job_dir: Path, payload: Dict[str, Any]) -> None:
+def write_status(job_dir: Path, payload: dict[str, Any]) -> None:
     payload = {**payload, "updated_at": utc_now()}
     locked_atomic_write_text(
         job_dir / "status.json",
@@ -47,7 +59,7 @@ def write_progress(
     heartbeat of *where* a long-running job is: stage label, optional percent,
     and a timestamp. Workers may overwrite it with finer-grained stages.
     """
-    payload: Dict[str, Any] = {"stage": stage, "updated_at": utc_now()}
+    payload: dict[str, Any] = {"stage": stage, "updated_at": utc_now()}
     if percent is not None:
         payload["percent"] = max(0, min(100, int(percent)))
     if detail:
@@ -66,7 +78,7 @@ def append_event(
     *,
     detail: str = "",
     state: str = "",
-    payload: Dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
     """Append one line to events.jsonl (append-only job event log).
 
@@ -74,7 +86,7 @@ def append_event(
     QA results, publish/archive actions, retry/termination reasons. It is
     append-only and survives progress.json/status.json overwrites.
     """
-    record: Dict[str, Any] = {
+    record: dict[str, Any] = {
         "ts": utc_now(),
         "event": event,
         "state": state,
@@ -120,7 +132,7 @@ def pixelle_runtime_ready() -> bool:
     return bool(shutil.which("uv") and (project / "config.yaml").exists())
 
 
-def worker_usage(job_dir: Path, hermes_db: Path = HERMES_DB) -> Dict[str, Any]:
+def worker_usage(job_dir: Path, hermes_db: Path = HERMES_DB) -> dict[str, Any]:
     """Resolve the isolated Hermes session and its measured token counters."""
     if not hermes_db.is_file():
         return {}
@@ -140,7 +152,7 @@ def worker_usage(job_dir: Path, hermes_db: Path = HERMES_DB) -> Dict[str, Any]:
         return {}
 
 
-def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]]:
+def build_prompt(request: dict[str, Any], job_dir: Path) -> tuple[str, list[str]]:
     route = str(request.get("route") or "")
     message = str(request.get("message") or "")
     if route == "article":
@@ -260,10 +272,10 @@ Pixelle-Video 运行时：{runtime}
 
 
 def build_worker_invocation(
-    request: Dict[str, Any],
+    request: dict[str, Any],
     job_dir: Path,
     prompt: str,
-) -> tuple[list[str], Path, Dict[str, str]]:
+) -> tuple[list[str], Path, dict[str, str]]:
     """Build a least-privilege Hermes invocation for one content job.
 
     Article/video workers only need file, web, skill, and image tools.  In
@@ -383,7 +395,7 @@ def main() -> int:
     missing = [name for name in expected if not (job_dir / name).is_file()]
     content = proc.stdout.strip()[-12000:]
     error = proc.stderr.strip()[-4000:]
-    worker_result: Dict[str, Any] = {}
+    worker_result: dict[str, Any] = {}
     if request["route"] == "company" and not missing:
         try:
             value = json.loads(read_text_limited(job_dir / "result.json", max_bytes=2 * 1024 * 1024))

@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 try:
     from ._safe_io import stream_contains
@@ -36,9 +37,9 @@ def _mtime_ns(path: Path) -> int:
         return -1
 
 
-def read_claude_session(path: Path) -> Dict[str, Any]:
+def read_claude_session(path: Path) -> dict[str, Any]:
     """Return deduplicated counters and metadata for one Claude Code session."""
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "id": "",
         "model": "",
         "model_provider": "anthropic",
@@ -91,7 +92,7 @@ def read_claude_session(path: Path) -> Dict[str, Any]:
     return result
 
 
-def find_claude_usage(reference: str, root: Path = DEFAULT_CLAUDE_PROJECTS) -> Dict[str, Any]:
+def find_claude_usage(reference: str, root: Path = DEFAULT_CLAUDE_PROJECTS) -> dict[str, Any]:
     """Find the newest Claude Code session whose transcript contains a run reference."""
     if not reference or not root.is_dir():
         return {}

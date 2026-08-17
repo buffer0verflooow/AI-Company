@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from typing import Any, Dict
+from typing import Any
 
 try:
     from ._safe_io import scrub_environment
@@ -18,7 +18,7 @@ WORKSPACE = "/home/pwn/workspace"
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
 
 
-def build_prompt(payload: Dict[str, Any]) -> str:
+def build_prompt(payload: dict[str, Any]) -> str:
     task = payload.get("task") or {}
     context = str(payload.get("context") or "")
     profile = payload.get("model_profile") or {}

@@ -27,10 +27,15 @@ import os
 import shlex
 import subprocess
 import sys
-from typing import Any, Dict
+from typing import Any
+
+try:
+    from ._safe_io import scrub_environment
+except ImportError:  # direct script execution
+    from _safe_io import scrub_environment
 
 
-def _payload_error(message: str) -> Dict[str, Any]:
+def _payload_error(message: str) -> dict[str, Any]:
     return {
         "success": False,
         "error": message,
@@ -38,7 +43,7 @@ def _payload_error(message: str) -> Dict[str, Any]:
     }
 
 
-def _normalize_backend_output(raw: str, task: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_backend_output(raw: str, task: dict[str, Any]) -> dict[str, Any]:
     text = raw.strip()
     if not text:
         return {
@@ -61,7 +66,7 @@ def _normalize_backend_output(raw: str, task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _simulate(task: Dict[str, Any], context: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+def _simulate(task: dict[str, Any], context: str, profile: dict[str, Any]) -> dict[str, Any]:
     role = str(task.get("required_role") or task.get("task_type") or "custom")
     task_type = str(task.get("task_type") or "analyze")
     reason = str(task.get("reason") or "")
@@ -96,14 +101,14 @@ def _simulate(task: Dict[str, Any], context: str, profile: Dict[str, Any]) -> Di
     }
 
 
-def _run_command_backend(payload: Dict[str, Any], task: Dict[str, Any]) -> Dict[str, Any]:
+def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
     command = os.getenv("SWARM_NATIVE_AGENT_COMMAND", "").strip()
     if not command:
         return _payload_error(
             "SWARM_NATIVE_BACKEND=command requires SWARM_NATIVE_AGENT_COMMAND"
         )
     argv = shlex.split(command)
-    env = dict(os.environ)
+    env, _dropped = scrub_environment()
     env["SWARM_AGENT_EXEC"] = "1"
     try:
         proc = subprocess.run(

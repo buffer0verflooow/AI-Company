@@ -14,9 +14,9 @@ import os
 import re
 import sqlite3
 import tempfile
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Collection, Iterator, Mapping, Optional
 from urllib.parse import quote
 
 try:  # pragma: no cover - Windows is not the deployment platform
@@ -30,7 +30,7 @@ SECRET_ENV_RE = re.compile(
     r"(?:^|_)(?:SECRET|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE_KEY|ACCESS_KEY|"
     r"API_KEY|KEY|TOKEN|BEARER|COOKIE|AUTH|AUTHORIZATION|DSN)(?:_|$)|"
     r"(?:DATABASE|REDIS)_URL$",
-    re.I,
+    re.IGNORECASE,
 )
 SECRET_ENV_EXTRA = {
     "WEIXIN_APP_ID",
@@ -63,7 +63,7 @@ __all__ = [
 ]
 
 
-def quote_identifier(identifier: str, *, allowed: Optional[Collection[str]] = None) -> str:
+def quote_identifier(identifier: str, *, allowed: Collection[str] | None = None) -> str:
     """Validate and quote a SQL identifier.
 
     SQLite parameters cannot represent table/column names.  Callers that need
@@ -96,7 +96,7 @@ def sqlite_uri(path: Path, *, mode: str = "ro") -> str:
 
 
 def scrub_environment(
-    base: Optional[Mapping[str, str]] = None,
+    base: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Remove credentials before launching an isolated or untrusted worker."""
 
@@ -177,10 +177,10 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing_mode: Optional[int] = None
+    existing_mode: int | None = None
     with suppress(OSError):
         existing_mode = path.stat().st_mode & 0o7777
-    temporary: Optional[Path] = None
+    temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -258,7 +258,7 @@ def sqlite_connection(
     never issue a commit.
     """
 
-    db: Optional[sqlite3.Connection] = None
+    db: sqlite3.Connection | None = None
     try:
         path = Path(path)
         if not read_only:

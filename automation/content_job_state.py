@@ -25,11 +25,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, locked_append_text, read_text_limited
@@ -40,7 +39,7 @@ VALID_STATES = ("pending", "running", "qa", "review", "published", "archived",
                 "retrying", "terminated")
 
 # allowed transitions: current -> {next states}
-TRANSITIONS: Dict[str, set] = {
+TRANSITIONS: dict[str, set] = {
     "pending": {"running", "terminated"},
     "running": {"qa", "review", "retrying", "terminated"},
     "qa": {"review", "retrying", "terminated"},
@@ -74,18 +73,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def read_lifecycle(job_dir: Path) -> Dict[str, Any]:
+def read_lifecycle(job_dir: Path) -> dict[str, Any]:
     path = job_dir / "lifecycle.json"
     try:
         data = json.loads(read_text_limited(path, max_bytes=1024 * 1024))
         if isinstance(data, dict) and data.get("state") in VALID_STATES:
             return data
-    except Exception:
+    except (OSError, ValueError):
         pass
     return {"state": "pending", "history": []}
 
 
-def write_lifecycle(job_dir: Path, data: Dict[str, Any]) -> None:
+def write_lifecycle(job_dir: Path, data: dict[str, Any]) -> None:
     atomic_write_text(
         job_dir / "lifecycle.json",
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -131,7 +130,8 @@ def show(job_dir: Path) -> int:
     ev_path = job_dir / "events.jsonl"
     if ev_path.exists():
         try:
-            n = sum(1 for _ in open(ev_path, encoding="utf-8", errors="replace"))
+            with open(ev_path, encoding="utf-8", errors="replace") as stream:
+                n = sum(1 for _ in stream)
         except OSError:
             n = 0
         print(f"events.jsonl lines: {n}")

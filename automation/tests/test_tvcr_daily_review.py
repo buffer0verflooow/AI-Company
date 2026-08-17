@@ -5,7 +5,11 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from automation.tvcr_daily_review import build_evidence_pack, build_prompt, validate_outputs
+from automation.tvcr_daily_review import (
+    build_evidence_pack,
+    build_prompt,
+    validate_outputs,
+)
 
 
 class TVCRDailyReviewTests(unittest.TestCase):

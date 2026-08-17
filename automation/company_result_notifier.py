@@ -10,11 +10,13 @@ import re
 import sqlite3
 import sys
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
 
 try:
+    from ._safe_io import locked_append_text, read_text_limited, sqlite_uri
     from .company_router import (
         DEFAULT_CONFIG,
         RouteDecision,
@@ -28,17 +30,29 @@ try:
         swarm_command,
         utc_now,
     )
-    from ._safe_io import locked_append_text, read_text_limited, sqlite_uri
     from .notification_outbox import (
         append_dead_letter as append_outbox_dead_letter,
+    )
+    from .notification_outbox import (
         enqueue as enqueue_outbox,
+    )
+    from .notification_outbox import (
         force_dead_letter as force_outbox_dead_letter,
+    )
+    from .notification_outbox import (
         get_by_dedup_key as get_outbox_by_dedup_key,
+    )
+    from .notification_outbox import (
         mark_delivered as mark_outbox_delivered,
+    )
+    from .notification_outbox import (
         pending as pending_outbox,
+    )
+    from .notification_outbox import (
         record_failure as record_outbox_failure,
     )
 except ImportError:  # Direct execution from automation/.
+    from _safe_io import locked_append_text, read_text_limited, sqlite_uri
     from company_router import (
         DEFAULT_CONFIG,
         RouteDecision,
@@ -52,39 +66,58 @@ except ImportError:  # Direct execution from automation/.
         swarm_command,
         utc_now,
     )
-    from _safe_io import locked_append_text, read_text_limited, sqlite_uri
     from notification_outbox import (
         append_dead_letter as append_outbox_dead_letter,
+    )
+    from notification_outbox import (
         enqueue as enqueue_outbox,
+    )
+    from notification_outbox import (
         force_dead_letter as force_outbox_dead_letter,
+    )
+    from notification_outbox import (
         get_by_dedup_key as get_outbox_by_dedup_key,
+    )
+    from notification_outbox import (
         mark_delivered as mark_outbox_delivered,
+    )
+    from notification_outbox import (
         pending as pending_outbox,
+    )
+    from notification_outbox import (
         record_failure as record_outbox_failure,
     )
 
 
-DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
-MirrorFn = Callable[[Dict[str, str], str], bool]
+DeliveryFn = Callable[[dict[str, Any], dict[str, str], str], tuple[bool, str]]
+MirrorFn = Callable[[dict[str, str], str], bool]
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 MAX_CRON_OUTPUT_BYTES = 5 * 1024 * 1024
 
 
 def _operations_api():
     try:
-        from .operations_control import format_review_message, pending_review_deliveries, update_review
+        from .operations_control import (
+            format_review_message,
+            pending_review_deliveries,
+            update_review,
+        )
     except ImportError:
-        from operations_control import format_review_message, pending_review_deliveries, update_review
+        from operations_control import (
+            format_review_message,
+            pending_review_deliveries,
+            update_review,
+        )
     return format_review_message, pending_review_deliveries, update_review
 
 
-def _ensure_hermes_imports(config: Dict[str, Any]) -> None:
+def _ensure_hermes_imports(config: dict[str, Any]) -> None:
     repo = str(config.get("hermes_repo") or "").strip()
     if repo and repo not in sys.path:
         sys.path.insert(0, repo)
 
 
-def deliver_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> Tuple[bool, str]:
+def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
     """Use Hermes' supported standalone sender for a confirmed delivery."""
     _ensure_hermes_imports(config)
     try:
@@ -114,7 +147,7 @@ def deliver_message(config: Dict[str, Any], origin: Dict[str, str], message: str
     return False, f"unconfirmed delivery result: {result!r}"
 
 
-def mirror_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> bool:
+def mirror_message(config: dict[str, Any], origin: dict[str, str], message: str) -> bool:
     """Append a delivered notification to the matching gateway transcript."""
     _ensure_hermes_imports(config)
     try:
@@ -133,7 +166,7 @@ def mirror_message(config: Dict[str, Any], origin: Dict[str, str], message: str)
         return False
 
 
-def mirror_tvcr_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> bool:
+def mirror_tvcr_message(config: dict[str, Any], origin: dict[str, str], message: str) -> bool:
     """Mirror a delivered operating review into the management conversation."""
     _ensure_hermes_imports(config)
     try:
@@ -152,7 +185,7 @@ def mirror_tvcr_message(config: Dict[str, Any], origin: Dict[str, str], message:
         return False
 
 
-def runner_is_alive(pid: Optional[int], run_id: str) -> bool:
+def runner_is_alive(pid: int | None, run_id: str) -> bool:
     if not pid or pid <= 0:
         return False
     try:
@@ -162,7 +195,7 @@ def runner_is_alive(pid: Optional[int], run_id: str) -> bool:
     return "swarm_runner.py" in cmdline and run_id in cmdline
 
 
-def content_runner_is_alive(pid: Optional[int], run_id: str) -> bool:
+def content_runner_is_alive(pid: int | None, run_id: str) -> bool:
     if not pid or pid <= 0:
         return False
     try:
@@ -182,15 +215,15 @@ def _age_minutes(created_at: str) -> float:
         return 0.0
 
 
-def _beat_heartbeat(state: "RouterState", event_id: str, alive: bool) -> None:
+def _beat_heartbeat(state: RouterState, event_id: str, alive: bool) -> None:
     """Refresh the run heartbeat on behalf of a live runner (1-minute cron)."""
     if alive:
         state.update(event_id, last_heartbeat=utc_now())
 
 
 def _mark_suspected_dead_if_stale(
-    state: "RouterState",
-    config: Dict[str, Any],
+    state: RouterState,
+    config: dict[str, Any],
     row: Any,
     event_id: str,
     *,
@@ -218,7 +251,7 @@ def _mark_suspected_dead_if_stale(
     return True
 
 
-def _delivery_retry_ready(config: Dict[str, Any], row: Any) -> bool:
+def _delivery_retry_ready(config: dict[str, Any], row: Any) -> bool:
     attempts = int(row["delivery_attempts"] or 0)
     last = str(row["last_delivery_at"] or "")
     if attempts <= 0 or not last:
@@ -235,17 +268,17 @@ def _delivery_retry_ready(config: Dict[str, Any], row: Any) -> bool:
     return (datetime.now(timezone.utc) - last_at).total_seconds() >= delay
 
 
-def _delivery_fallback_path(config: Dict[str, Any]) -> Path:
+def _delivery_fallback_path(config: dict[str, Any]) -> Path:
     configured = str(config.get("delivery_fallback_path") or "").strip()
     return Path(configured) if configured else Path(config["state_db"]).parent / "delivery-dead-letters.jsonl"
 
 
 def record_terminal_delivery(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     kind: str,
     identifier: str,
-    origin: Dict[str, str],
+    origin: dict[str, str],
     message: str,
     reason: str,
 ) -> str:
@@ -264,14 +297,14 @@ def record_terminal_delivery(
     return str(path)
 
 
-def list_terminal_deliveries(config: Dict[str, Any], limit: int = 50) -> list[Dict[str, Any]]:
+def list_terminal_deliveries(config: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
     """Return the newest locally surfaced terminal notifications."""
     path = _delivery_fallback_path(config)
     if not path.is_file():
         return []
     if limit <= 0:
         return []
-    records: deque[Dict[str, Any]] = deque(maxlen=limit)
+    records: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
         with path.open("r", encoding="utf-8") as stream:
             for line in stream:
@@ -286,14 +319,14 @@ def list_terminal_deliveries(config: Dict[str, Any], limit: int = 50) -> list[Di
     return list(reversed(records))
 
 
-def _terminal_reason(config: Dict[str, Any], origin: Dict[str, str]) -> str:
+def _terminal_reason(config: dict[str, Any], origin: dict[str, str]) -> str:
     allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
     if allowed and origin.get("platform", "").lower() not in allowed:
         return f"delivery platform not allowlisted: {origin.get('platform', '')}"
     return ""
 
 
-def _origin_for_row(config: Dict[str, Any], row: Any) -> Dict[str, str]:
+def _origin_for_row(config: dict[str, Any], row: Any) -> dict[str, str]:
     stored = {
         "platform": str(row["delivery_platform"] or ""),
         "chat_id": str(row["delivery_chat_id"] or ""),
@@ -308,7 +341,7 @@ def _origin_for_row(config: Dict[str, Any], row: Any) -> Dict[str, str]:
     )
 
 
-def _format_terminal_message(config: Dict[str, Any], row: Any, result: Dict[str, Any]) -> str:
+def _format_terminal_message(config: dict[str, Any], row: Any, result: dict[str, Any]) -> str:
     run_id = str(row["run_id"])
     status = str(result.get("status") or row["status"] or "unknown")
     if status == "completed":
@@ -319,7 +352,7 @@ def _format_terminal_message(config: Dict[str, Any], row: Any, result: Dict[str,
     return f"Research 安全探索任务状态异常：{status}\nRun: {run_id}\n\n{detail}"
 
 
-def _format_content_message(row: Any, payload: Dict[str, Any]) -> str:
+def _format_content_message(row: Any, payload: dict[str, Any]) -> str:
     route = {
         "dispatch_article": "文章产线",
         "dispatch_video": "视频产线",
@@ -342,7 +375,7 @@ def _format_content_message(row: Any, payload: Dict[str, Any]) -> str:
     return f"{route}任务状态异常：{status}\nRun: {run_id}\n\n{error}{suffix}"
 
 
-def _fit_delivery_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> str:
+def _fit_delivery_message(config: dict[str, Any], origin: dict[str, str], message: str) -> str:
     limits = config.get("proactive_delivery_chars_by_platform") or {}
     limit = int(limits.get(origin.get("platform", ""), config.get("proactive_delivery_default_chars", 3000)))
     if limit <= 0 or len(message) <= limit:
@@ -351,7 +384,7 @@ def _fit_delivery_message(config: Dict[str, Any], origin: Dict[str, str], messag
     return message[:max(0, limit - len(suffix))].rstrip() + suffix
 
 
-def mirror_management_message(config: Dict[str, Any], origin: Dict[str, str], message: str) -> bool:
+def mirror_management_message(config: dict[str, Any], origin: dict[str, str], message: str) -> bool:
     """Mirror a recovered management notification into the chat transcript."""
     _ensure_hermes_imports(config)
     try:
@@ -370,12 +403,12 @@ def mirror_management_message(config: Dict[str, Any], origin: Dict[str, str], me
         return False
 
 
-def _operations_db_path(config: Dict[str, Any]) -> Optional[Path]:
+def _operations_db_path(config: dict[str, Any]) -> Path | None:
     value = str(config.get("operations_db") or "").strip()
     return Path(value) if value else None
 
 
-def _management_origin(config: Dict[str, Any]) -> Dict[str, str]:
+def _management_origin(config: dict[str, Any]) -> dict[str, str]:
     """Resolve the latest known management conversation without guessing."""
     try:
         from .operations_control import latest_origin
@@ -388,14 +421,14 @@ def _management_origin(config: Dict[str, Any]) -> Dict[str, str]:
         return {}
 
 
-def _cron_output_root(config: Dict[str, Any]) -> Path:
+def _cron_output_root(config: dict[str, Any]) -> Path:
     configured = str(config.get("cron_output_root") or "").strip()
     if configured:
         return Path(configured)
     return Path("/home/pwn/.hermes/cron/output")
 
 
-def _read_cron_jobs(config: Dict[str, Any]) -> list[Dict[str, Any]]:
+def _read_cron_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
     configured = str(config.get("cron_jobs_path") or "").strip()
     path = Path(configured) if configured else Path("/home/pwn/.hermes/cron/jobs.json")
     try:
@@ -409,7 +442,7 @@ def _read_cron_jobs(config: Dict[str, Any]) -> list[Dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
-def _cron_run_datetime(value: str) -> Optional[datetime]:
+def _cron_run_datetime(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
@@ -419,7 +452,7 @@ def _cron_run_datetime(value: str) -> Optional[datetime]:
     return parsed
 
 
-def _find_cron_output(config: Dict[str, Any], job_id: str, last_run_at: str) -> Optional[Path]:
+def _find_cron_output(config: dict[str, Any], job_id: str, last_run_at: str) -> Path | None:
     if not SAFE_ID_RE.fullmatch(str(job_id or "")):
         return None
     output_root = _cron_output_root(config).resolve()
@@ -467,8 +500,7 @@ def _extract_cron_response(path: Path) -> str:
     marker = "\n## Response\n"
     if marker in text:
         text = text.rsplit(marker, 1)[1].lstrip()
-        if text.startswith("---"):
-            text = text[3:]
+        text = text.removeprefix("---")
     else:
         # no-agent scripts generally contain a short header followed by JSON.
         parts = text.split("\n---\n", 1)
@@ -477,7 +509,7 @@ def _extract_cron_response(path: Path) -> str:
     return text.strip()
 
 
-def _extract_cron_json(path: Path) -> Dict[str, Any]:
+def _extract_cron_json(path: Path) -> dict[str, Any]:
     """Parse a no-agent Cron script's JSON response, if present."""
     response = _extract_cron_response(path)
     try:
@@ -488,11 +520,11 @@ def _extract_cron_json(path: Path) -> Dict[str, Any]:
 
 
 def _cron_recovery_payload(
-    config: Dict[str, Any],
-    job: Dict[str, Any],
+    config: dict[str, Any],
+    job: dict[str, Any],
     output: Path,
-    fallback_origin: Dict[str, str],
-) -> tuple[Dict[str, str], str, str, Dict[str, Any]]:
+    fallback_origin: dict[str, str],
+) -> tuple[dict[str, str], str, str, dict[str, Any]]:
     """Return (origin, message, kind, metadata) for a saved Cron output."""
     name = str(job.get("name") or job.get("id") or "cron")
     # TVCR's no-agent output contains a stable review ID.  Format the concise
@@ -546,7 +578,7 @@ def _cron_recovery_payload(
     )
 
 
-def _outbox_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+def _outbox_metadata(row: dict[str, Any]) -> dict[str, Any]:
     raw = row.get("metadata_json")
     if isinstance(raw, dict):
         return raw
@@ -557,7 +589,7 @@ def _outbox_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _sync_tvcr_review_from_outbox(config: Dict[str, Any], row: Dict[str, Any]) -> None:
+def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -> None:
     """Project a TVCR outbox state back into its review delivery fields."""
     if str(row.get("kind") or "") != "tvcr_cron":
         return
@@ -581,7 +613,7 @@ def _sync_tvcr_review_from_outbox(config: Dict[str, Any], row: Dict[str, Any]) -
     state = str(row.get("state") or "")
     outbox_attempts = int(row.get("attempts") or 0)
     attempts = max(int(current[1] or 0), outbox_attempts)
-    fields: Dict[str, Any]
+    fields: dict[str, Any]
     if state == "delivered":
         fields = {
             "delivered": 1,
@@ -627,7 +659,7 @@ def _sync_tvcr_review_from_outbox(config: Dict[str, Any], row: Dict[str, Any]) -
         return
 
 
-def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
+def recover_failed_cron_deliveries(config: dict[str, Any]) -> int:
     """Queue failed origin deliveries from selected Cron jobs.
 
     Hermes records a Cron agent as successful even when the final message
@@ -692,11 +724,11 @@ def recover_failed_cron_deliveries(config: Dict[str, Any]) -> int:
 
 
 def process_outbox(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     deliverer: DeliveryFn,
-    mirror: Optional[MirrorFn] = None,
-) -> Dict[str, int]:
+    mirror: MirrorFn | None = None,
+) -> dict[str, int]:
     """Deliver ready outbox rows with bounded retry and dead-lettering."""
     result = {"checked": 0, "delivered": 0, "failed": 0, "dead_letter": 0}
     db_path = _operations_db_path(config)
@@ -764,11 +796,11 @@ def process_outbox(
 
 
 def _record_retry_exhaustion(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     kind: str,
     identifier: str,
-    origin: Dict[str, str],
+    origin: dict[str, str],
     message: str,
     error: str,
 ) -> str:
@@ -785,11 +817,11 @@ def _record_retry_exhaustion(
 
 
 def process_once(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     deliverer: DeliveryFn = deliver_message,
-    mirror: Optional[MirrorFn] = None,
-) -> Dict[str, int]:
+    mirror: MirrorFn | None = None,
+) -> dict[str, int]:
     """Reconcile run state, recover dead runners, and deliver terminal results."""
     summary = {
         "checked": 0, "running": 0, "restarted": 0, "delivered": 0,
@@ -963,7 +995,7 @@ def process_once(
                 state.update(event_id, status="failed", error=f"invalid content run path: {exc}")
                 summary["failed"] += 1
                 continue
-            payload: Dict[str, Any] = {}
+            payload: dict[str, Any] = {}
             if status_path.exists():
                 try:
                     if status_path.is_symlink():

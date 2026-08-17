@@ -13,11 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from .finance_ledger import connect
     from ._safe_io import read_text_limited
+    from .finance_ledger import connect
 except ImportError:  # direct script execution
-    from finance_ledger import connect
     from _safe_io import read_text_limited
+    from finance_ledger import connect
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -27,14 +27,14 @@ DEFAULT_DB = COMPANY_ROOT / "finance/finance_ledger.db"
 SOURCE_URL = "https://anyrouter.top/pricing"
 
 ROW_RE = re.compile(
-    r'<tr[^>]+data-row-key="(?P<slug>[^"]+)"[^>]*>(?P<body>.*?)</tr>', re.S | re.I
+    r'<tr[^>]+data-row-key="(?P<slug>[^"]+)"[^>]*>(?P<body>.*?)</tr>', re.DOTALL | re.IGNORECASE
 )
 TAG_RE = re.compile(r"<[^>]+>")
-INPUT_RE = re.compile(r"Prompt\s*\$([0-9.]+)\s*/\s*1M tokens", re.I)
-OUTPUT_RE = re.compile(r"Completion\s*\$([0-9.]+)\s*/\s*1M tokens", re.I)
-MODEL_RATIO_RE = re.compile(r"Model ratio[：:]\s*([0-9.]+)", re.I)
-COMPLETION_RATIO_RE = re.compile(r"Completion ratio[：:]\s*([0-9.]+)", re.I)
-GROUP_RATIO_RE = re.compile(r"Group ratio[：:]\s*([0-9.]+)", re.I)
+INPUT_RE = re.compile(r"Prompt\s*\$([0-9.]+)\s*/\s*1M tokens", re.IGNORECASE)
+OUTPUT_RE = re.compile(r"Completion\s*\$([0-9.]+)\s*/\s*1M tokens", re.IGNORECASE)
+MODEL_RATIO_RE = re.compile(r"Model ratio[：:]\s*([0-9.]+)", re.IGNORECASE)
+COMPLETION_RATIO_RE = re.compile(r"Completion ratio[：:]\s*([0-9.]+)", re.IGNORECASE)
+GROUP_RATIO_RE = re.compile(r"Group ratio[：:]\s*([0-9.]+)", re.IGNORECASE)
 
 
 def digest(path: Path) -> str:

@@ -7,11 +7,11 @@ content-jobs 队列滞留告警 (2026-08-17, TVCR-P-20260809-03 落地)
 - 有滞留 -> stdout 输出清单 (cron no_agent 模式直接投递)
 - 无滞留 -> 静默 (exit 0, 无输出)
 """
-import datetime
 import glob
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 CONTENT_JOBS = '/home/pwn/workspace/company/operations/runtime/content-jobs'
 STALE_HOURS = float(os.environ.get('STALE_HOURS', '48'))
@@ -28,22 +28,24 @@ def job_state(job_dir: str):
     lc = os.path.join(job_dir, 'lifecycle.json')
     if os.path.exists(lc):
         try:
-            d = json.load(open(lc))
+            with open(lc, encoding='utf-8') as stream:
+                d = json.load(stream)
             return d.get('state'), os.path.getmtime(lc)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             pass
     st = os.path.join(job_dir, 'status.json')
     if os.path.exists(st):
         try:
-            d = json.load(open(st))
+            with open(st, encoding='utf-8') as stream:
+                d = json.load(stream)
             return d.get('status'), os.path.getmtime(st)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             pass
     return None, os.path.getmtime(job_dir)
 
 
 def main():
-    now = datetime.datetime.now().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     stale = []
     review_stale = []
     no_state = 0

@@ -17,19 +17,30 @@ import sqlite3
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
 
 try:
+    from ._safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        scrub_environment,
+        sqlite_uri,
+    )
     from .operations_control import connect as connect_operations
     from .operations_control import latest_origin, update_experiment, utc_now
-    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment, sqlite_uri
 except ImportError:  # direct ``python automation/company_operator.py`` invocation
+    from _safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        scrub_environment,
+        sqlite_uri,
+    )
     from operations_control import connect as connect_operations
     from operations_control import latest_origin, update_experiment, utc_now
-    from _safe_io import atomic_write_text, read_text_limited, scrub_environment, sqlite_uri
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -40,8 +51,8 @@ DEFAULT_RUN_ROOT = COMPANY_ROOT / "operations/runtime/autonomy-runs"
 DEFAULT_MARKET_DB = COMPANY_ROOT / "marketing/market_signals.db"
 INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
 
-WorkerFn = Callable[[Dict[str, Any], Path, Dict[str, Any]], Dict[str, Any]]
-DeliveryFn = Callable[[Dict[str, Any], Dict[str, str], str], Tuple[bool, str]]
+WorkerFn = Callable[[dict[str, Any], Path, dict[str, Any]], dict[str, Any]]
+DeliveryFn = Callable[[dict[str, Any], dict[str, str], str], tuple[bool, str]]
 
 # Retry ladder: the higher an opportunity's retry_count, the cheaper the model we
 # fall back to. The first entry is the primary model used on the initial attempt.
@@ -49,14 +60,14 @@ DEFAULT_WORKER_MODEL_LADDER = ["deepseek-v4-sol", "deepseek-v4-flash"]
 DEFAULT_AUTO_RETRY_MAX = 1
 
 
-def _int_config(config: Dict[str, Any], key: str, default: int) -> int:
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
     try:
         return int(config.get(key, default))
     except (TypeError, ValueError):
         return default
 
 
-def _worker_model(config: Dict[str, Any], retry_count: int) -> str:
+def _worker_model(config: dict[str, Any], retry_count: int) -> str:
     """Resolve the model slug for this attempt, degrading with each retry."""
     ladder = config.get("worker_model_ladder")
     if ladder is None:
@@ -67,7 +78,7 @@ def _worker_model(config: Dict[str, Any], retry_count: int) -> str:
     return str(ladder[index] or "")
 
 
-def _is_empty_output(result: Dict[str, Any], artifacts: list[str]) -> bool:
+def _is_empty_output(result: dict[str, Any], artifacts: list[str]) -> bool:
     """A nominally completed run that produced no usable output is empty_output."""
     if result.get("status") != "completed":
         return False
@@ -79,7 +90,7 @@ def _is_empty_output(result: Dict[str, Any], artifacts: list[str]) -> bool:
     return not [path for path in artifacts if Path(path).name not in scaffold]
 
 
-def _should_auto_retry(config: Dict[str, Any], retry_count: int, failed: bool) -> bool:
+def _should_auto_retry(config: dict[str, Any], retry_count: int, failed: bool) -> bool:
     if not failed:
         return False
     if not config.get("auto_retry_enabled", True):
@@ -88,7 +99,7 @@ def _should_auto_retry(config: Dict[str, Any], retry_count: int, failed: bool) -
 
 
 
-def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
         raise ValueError("company operator config must be an object")
@@ -107,7 +118,7 @@ def _parse_json(value: Any, default: Any) -> Any:
     return parsed
 
 
-def _parse_dt(value: str) -> Optional[datetime]:
+def _parse_dt(value: str) -> datetime | None:
     if not value:
         return None
     try:
@@ -207,7 +218,7 @@ def connect(path: Path = DEFAULT_OPERATIONS_DB) -> sqlite3.Connection:
         raise
 
 
-def _upsert_opportunity(db: sqlite3.Connection, item: Dict[str, Any]) -> str:
+def _upsert_opportunity(db: sqlite3.Connection, item: dict[str, Any]) -> str:
     now = utc_now()
     existing = db.execute(
         "SELECT opportunity_id,status FROM autonomy_opportunities WHERE idempotency_key=?",
@@ -260,10 +271,10 @@ def _mission_bucket(now: datetime, cadence_hours: int) -> str:
 
 def discover_opportunities(
     db_path: Path,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
-    now: Optional[datetime] = None,
-) -> Dict[str, int]:
+    now: datetime | None = None,
+) -> dict[str, int]:
     """Refresh the queue from approved experiments, gates, outcomes, and missions."""
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -370,8 +381,8 @@ def discover_opportunities(
         market_db_value = str(config.get("market_signals_db") or "").strip()
         market_db_path = Path(market_db_value) if market_db_value else None
         if market_db_path and market_db_path.is_file():
-            pulse_statuses: Dict[str, str] = {}
-            pulse_scores: Dict[str, float] = {}
+            pulse_statuses: dict[str, str] = {}
+            pulse_scores: dict[str, float] = {}
             market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
             market_db.row_factory = sqlite3.Row
             try:
@@ -400,7 +411,7 @@ def discover_opportunities(
                            SET status='dismissed',completed_at=?,updated_at=? WHERE opportunity_id=?""",
                         (now_text, now_text, opportunity["opportunity_id"]),
                     )
-            evaluated_by_theme: Dict[str, tuple[datetime, float]] = {}
+            evaluated_by_theme: dict[str, tuple[datetime, float]] = {}
             completed_market = db.execute(
                 """SELECT source_ref,evidence_json,completed_at FROM autonomy_opportunities
                    WHERE source_type='market_pulse' AND status='completed' AND completed_at<>''"""
@@ -500,11 +511,11 @@ def discover_opportunities(
 
 def select_executable(
     db_path: Path,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
-    limit: Optional[int] = None,
-    now: Optional[datetime] = None,
-) -> list[Dict[str, Any]]:
+    limit: int | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
     allowed_risks = {str(value) for value in config.get("auto_execute_risk_levels", ["low"])}
     minimum = float(config.get("minimum_score", 0))
     current = now or datetime.now(timezone.utc)
@@ -520,7 +531,7 @@ def select_executable(
                ORDER BY created_at ASC""",
             (minimum,),
         ).fetchall()
-        eligible: list[Dict[str, Any]] = []
+        eligible: list[dict[str, Any]] = []
         for row in rows:
             if row["risk_level"] not in allowed_risks and not int(row["approval_granted"] or 0):
                 continue
@@ -543,14 +554,14 @@ def select_executable(
 
         # Fair round-robin across sources prevents a hot market/mission feed from
         # monopolising the whole budget. A lone source may still use spare slots.
-        groups: Dict[str, list[Dict[str, Any]]] = {}
+        groups: dict[str, list[dict[str, Any]]] = {}
         for item in eligible:
             groups.setdefault(str(item.get("source_type") or "unknown"), []).append(item)
         source_order = sorted(
             groups,
             key=lambda source: (-groups[source][0]["effective_score"], source),
         )
-        selected: list[Dict[str, Any]] = []
+        selected: list[dict[str, Any]] = []
         while len(selected) < max_items:
             progressed = False
             for source in source_order:
@@ -564,7 +575,7 @@ def select_executable(
         db.close()
 
 
-def pending_approval_items(db_path: Path, limit: int = 3) -> list[Dict[str, Any]]:
+def pending_approval_items(db_path: Path, limit: int = 3) -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         return [dict(row) for row in db.execute(
@@ -577,7 +588,7 @@ def pending_approval_items(db_path: Path, limit: int = 3) -> list[Dict[str, Any]
         db.close()
 
 
-def build_worker_prompt(opportunity: Dict[str, Any], run_dir: Path) -> str:
+def build_worker_prompt(opportunity: dict[str, Any], run_dir: Path) -> str:
     evidence = _parse_json(opportunity.get("evidence_json"), {})
     market_contract = ""
     if opportunity.get("action_kind") == "market_validation":
@@ -628,7 +639,7 @@ def build_worker_prompt(opportunity: Dict[str, Any], run_dir: Path) -> str:
 # (see _record_operational_run). Concurrent cron (notifier) also modifies it.
 _AUDIT_CODE_DIRS = ("automation", "scripts")
 _AUDIT_DBS = ("finance/finance_ledger.db", "operations/runtime/knowledge_promotion.db")
-def scrub_worker_env(base: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], list]:
+def scrub_worker_env(base: dict[str, str] | None = None) -> tuple[dict[str, str], list]:
     """Drop external-service credentials from the env handed to an isolated worker."""
     return scrub_environment(base)
 
@@ -665,7 +676,7 @@ def audit_sandbox_writes(run_dir: Path, since: float, company_root: Path = COMPA
     return sorted(violations)[:50]
 
 
-def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     prompt = build_worker_prompt(opportunity, run_dir)
     worker_env, dropped_env = scrub_worker_env()
@@ -738,7 +749,7 @@ def execute_worker(opportunity: Dict[str, Any], run_dir: Path, config: Dict[str,
     }
 
 
-def worker_usage(run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+def worker_usage(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     """Resolve measured Hermes usage for this isolated operator run."""
     state_db = Path(config.get("hermes_state_db") or "/home/pwn/.hermes/state.db")
     if not state_db.is_file():
@@ -786,10 +797,10 @@ def _safe_counter(value: Any) -> int:
 def _record_operational_run(
     db: sqlite3.Connection,
     run_id: str,
-    opportunity: Dict[str, Any],
+    opportunity: dict[str, Any],
     run_dir: Path,
-    result: Dict[str, Any],
-    usage: Dict[str, Any],
+    result: dict[str, Any],
+    usage: dict[str, Any],
     started_at: str,
     completed_at: str,
 ) -> None:
@@ -842,11 +853,11 @@ def execute_opportunity(
     db_path: Path,
     run_root: Path,
     cycle_id: str,
-    opportunity: Dict[str, Any],
-    config: Dict[str, Any],
+    opportunity: dict[str, Any],
+    config: dict[str, Any],
     *,
     worker: WorkerFn = execute_worker,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     run_id = f"AUTO-RUN-{uuid.uuid4().hex[:12]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -963,7 +974,7 @@ def execute_opportunity(
     }
 
 
-def format_cycle_message(summary: Dict[str, Any], limit: int = 1400) -> str:
+def format_cycle_message(summary: dict[str, Any], limit: int = 1400) -> str:
     lines = ["公司自驱日报", f"周期：{summary['cycle_id']}"]
     executed = summary.get("executions") or []
     if executed:
@@ -990,7 +1001,7 @@ def format_cycle_message(summary: Dict[str, Any], limit: int = 1400) -> str:
     return message if len(message) <= limit else message[: max(0, limit - 1)] + "…"
 
 
-def _default_deliverer(config: Dict[str, Any], origin: Dict[str, str], message: str) -> Tuple[bool, str]:
+def _default_deliverer(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
     try:
         from .company_result_notifier import deliver_message, mirror_tvcr_message
     except ImportError:
@@ -1002,13 +1013,13 @@ def _default_deliverer(config: Dict[str, Any], origin: Dict[str, str], message: 
 
 
 def run_cycle(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
     worker: WorkerFn = execute_worker,
-    deliverer: Optional[DeliveryFn] = None,
+    deliverer: DeliveryFn | None = None,
     execute: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     db_path = Path(config.get("operations_db") or DEFAULT_OPERATIONS_DB)
     router_db = Path(config.get("router_db") or DEFAULT_ROUTER_DB)
     run_root = Path(config.get("run_root") or DEFAULT_RUN_ROOT)
@@ -1028,14 +1039,14 @@ def run_cycle(
 
     discovery = discover_opportunities(db_path, config, now=now)
     selected = select_executable(db_path, config, now=now) if execute and config.get("enabled", True) else []
-    executions: list[Dict[str, Any]] = []
+    executions: list[dict[str, Any]] = []
     parallelism = min(len(selected), max(1, int(config.get("max_parallel_workers", 1))))
     if parallelism <= 1:
         for opportunity in selected:
             result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
             executions.append({"title": opportunity["title"], "opportunity_id": opportunity["opportunity_id"], **result})
     else:
-        ordered: list[Optional[Dict[str, Any]]] = [None] * len(selected)
+        ordered: list[dict[str, Any] | None] = [None] * len(selected)
         with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="company-operator") as pool:
             futures = {
                 pool.submit(execute_opportunity, db_path, run_root, cycle_id, opportunity, config, worker=worker): index
@@ -1136,7 +1147,7 @@ def run_cycle(
     return {**summary, "message": message, "delivered": delivered, "delivery_error": delivery_error}
 
 
-def queue_snapshot(db_path: Path) -> list[Dict[str, Any]]:
+def queue_snapshot(db_path: Path) -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         return [dict(row) for row in db.execute(

@@ -17,7 +17,7 @@ import sqlite3
 from contextlib import suppress
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
@@ -27,12 +27,12 @@ except ImportError:  # direct ``python automation/operations_control.py`` invoca
 
 try:
     from . import pricing
-    from .codex_usage import DEFAULT_CODEX_SESSIONS, find_codex_usage
     from .claude_usage import DEFAULT_CLAUDE_PROJECTS, find_claude_usage
+    from .codex_usage import DEFAULT_CODEX_SESSIONS, find_codex_usage
 except ImportError:  # direct ``python automation/operations_control.py`` invocation
     import pricing  # type: ignore[no-redef]
-    from codex_usage import DEFAULT_CODEX_SESSIONS, find_codex_usage
     from claude_usage import DEFAULT_CLAUDE_PROJECTS, find_claude_usage
+    from codex_usage import DEFAULT_CODEX_SESSIONS, find_codex_usage
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -47,9 +47,9 @@ DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_know
 DEFAULT_LOG_DIR = COMPANY_ROOT / "operations/runtime/logs"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
-APPROVE_RE = re.compile(r"(?<!不)(?:批准|同意|确认执行|采纳|通过)", re.I)
-REJECT_RE = re.compile(r"(?:拒绝|不批准|不采纳|驳回|暂不执行)", re.I)
-PROPOSAL_ID_RE = re.compile(r"TVCR-P-\d{8}-\d{2}", re.I)
+APPROVE_RE = re.compile(r"(?<!不)(?:批准|同意|确认执行|采纳|通过)", re.IGNORECASE)
+REJECT_RE = re.compile(r"(?:拒绝|不批准|不采纳|驳回|暂不执行)", re.IGNORECASE)
+PROPOSAL_ID_RE = re.compile(r"TVCR-P-\d{8}-\d{2}", re.IGNORECASE)
 ITEM_NO_RE = re.compile(r"第?\s*(\d{1,2})\s*(?:项|条)")
 
 
@@ -59,7 +59,7 @@ def utc_now() -> str:
 
 def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db: Optional[sqlite3.Connection] = None
+    db: sqlite3.Connection | None = None
     try:
         # Protect schema creation/migrations; normal transactions still use
         # SQLite's WAL/busy-timeout for concurrent readers and writers.
@@ -218,7 +218,7 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _sql_assignments(fields: Dict[str, Any], allowed: set[str]) -> str:
+def _sql_assignments(fields: dict[str, Any], allowed: set[str]) -> str:
     """Return a parameterized ``SET`` clause for a trusted column allow-list."""
 
     unknown = set(fields) - allowed
@@ -227,7 +227,7 @@ def _sql_assignments(fields: Dict[str, Any], allowed: set[str]) -> str:
     return ",".join(f"{quote_identifier(key, allowed=allowed)}=?" for key in fields)
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(read_text_limited(path, max_bytes=2 * 1024 * 1024))
     except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
@@ -284,7 +284,7 @@ def _path_mtime_ns(path_value: Any) -> int:
         return -1
 
 
-def _parse_dt(value: str) -> Optional[datetime]:
+def _parse_dt(value: str) -> datetime | None:
     if not value:
         return None
     try:
@@ -307,7 +307,7 @@ def previous_business_day(timezone_name: str = DEFAULT_TIMEZONE) -> date:
     return datetime.now(ZoneInfo(timezone_name)).date() - timedelta(days=1)
 
 
-def _find_worker_session(hermes_db: Path, job_dir: Path) -> Dict[str, Any]:
+def _find_worker_session(hermes_db: Path, job_dir: Path) -> dict[str, Any]:
     if not hermes_db.is_file():
         return {}
     db = sqlite3.connect(sqlite_uri(hermes_db, mode="ro"), uri=True)
@@ -331,7 +331,7 @@ def _classify_security_findings(
     swarm_db: Path = DEFAULT_SWARM_DB,
     log_dir: Path = DEFAULT_LOG_DIR,
     min_finding_tokens: int = 200,
-    no_finding_patterns: Optional[list[str]] = None,
+    no_finding_patterns: list[str] | None = None,
 ) -> str:
     """Classify a security run's output quality without modifying existing records.
 
@@ -418,13 +418,13 @@ def _classify_security_findings(
         r"xss|csrf|ssrf|sqli|idor|rce|命令执行|文件包含|"
         r"权限提升|敏感文件|备份文件|目录遍历|cors|jwt|"
         r"broken\\s*(?:access\\s*)?control|misconfig|暴露)",
-        re.I,
+        re.IGNORECASE,
     )
 
     def _finding_is_noise(finding_span: tuple[int, int]) -> bool:
         """Return True if the finding span lies entirely inside a no-finding pattern."""
         for pat in no_finding_patterns:  # type: ignore[union-attr]
-            for noise_m in re.finditer(re.escape(pat), combined, re.I):
+            for noise_m in re.finditer(re.escape(pat), combined, re.IGNORECASE):
                 if noise_m.start() <= finding_span[0] and finding_span[1] <= noise_m.end():
                     return True
         return False
@@ -481,7 +481,7 @@ def _quality_status(route: str, job_dir: Path) -> str:
     return "qa_report_present"
 
 
-def _upsert_run(db: sqlite3.Connection, values: Dict[str, Any]) -> None:
+def _upsert_run(db: sqlite3.Connection, values: dict[str, Any]) -> None:
     columns = list(values)
     safe_columns = [quote_identifier(key) for key in columns]
     placeholders = ",".join("?" for _ in columns)
@@ -506,7 +506,7 @@ _SESSION_INT_FIELDS = (
 _SESSION_FLOAT_FIELDS = ("estimated_cost_usd", "estimated_cost_native", "actual_cost_usd")
 
 
-def _apportion_shared_sessions(rows: List[Dict[str, Any]]) -> None:
+def _apportion_shared_sessions(rows: list[dict[str, Any]]) -> None:
     """Split one worker session's tokens/cost evenly across the runs it served.
 
     Every run in a shared session initially carries the session's full usage.
@@ -515,7 +515,7 @@ def _apportion_shared_sessions(rows: List[Dict[str, Any]]) -> None:
     the last run absorbs float rounding).  Runs with an empty ``worker_session_id``
     or a session used by a single run are left untouched.
     """
-    groups: Dict[str, List[Dict[str, Any]]] = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         session_id = str(row.get("worker_session_id") or "")
         if session_id:
@@ -570,10 +570,10 @@ def sync_operational_runs(
     swarm_db: Path = DEFAULT_SWARM_DB,
     log_dir: Path = DEFAULT_LOG_DIR,
     finance_db: Path = DEFAULT_FINANCE_DB,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Import technical run evidence without inventing business outcomes."""
     price_table = pricing.load_price_table(finance_db)
-    router_rows: Dict[str, Dict[str, Any]] = {}
+    router_rows: dict[str, dict[str, Any]] = {}
     if router_db.is_file():
         source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
         source.row_factory = sqlite3.Row
@@ -583,7 +583,7 @@ def sync_operational_runs(
         finally:
             source.close()
 
-    job_dirs: Dict[str, Path] = {}
+    job_dirs: dict[str, Path] = {}
     if content_jobs.is_dir():
         for path in content_jobs.iterdir():
             if path.is_dir() and (path / "request.json").is_file():
@@ -592,7 +592,7 @@ def sync_operational_runs(
     all_run_ids = set(router_rows) | set(job_dirs)
     db = connect(db_path)
     counts = {"synced": 0, "content": 0, "security": 0}
-    pending_rows: List[Dict[str, Any]] = []
+    pending_rows: list[dict[str, Any]] = []
     try:
         now = utc_now()
         for run_id in sorted(all_run_ids):
@@ -719,7 +719,7 @@ def reprice_runs(
     finance_db: Path = DEFAULT_FINANCE_DB,
     *,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Recompute estimated cost for every stored run from its measured tokens.
 
     Backfills the price-join onto history so existing runs stop reporting $0.
@@ -769,14 +769,14 @@ def reprice_runs(
         db.close()
 
 
-def cost_report(db_path: Path = DEFAULT_DB) -> Dict[str, Any]:
+def cost_report(db_path: Path = DEFAULT_DB) -> dict[str, Any]:
     """Honest cost rollup over all runs, plus a per-model breakdown."""
     db = connect(db_path)
     try:
         runs = [dict(r) for r in db.execute("SELECT * FROM operational_runs")]
     finally:
         db.close()
-    by_model: Dict[str, Dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
     for run in runs:
         model = str(run.get("model") or "(empty)")
         bucket = by_model.setdefault(model, {"runs": 0, "estimated_cost_usd": 0.0, "cost_status": set()})
@@ -800,7 +800,7 @@ def _normalize_title(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
 
 
-def _run_article_titles(run: Dict[str, Any]) -> list[str]:
+def _run_article_titles(run: dict[str, Any]) -> list[str]:
     """Every candidate published title of a content run, most-final draft first.
 
     For each draft artifact (humanised / formatted / plain) two candidates are
@@ -854,13 +854,13 @@ def _run_article_titles(run: Dict[str, Any]) -> list[str]:
     return titles
 
 
-def _run_article_title(run: Dict[str, Any]) -> str:
+def _run_article_title(run: dict[str, Any]) -> str:
     """Best-effort single published title of a content run (first candidate)."""
     titles = _run_article_titles(run)
     return titles[0] if titles else ""
 
 
-def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
+def _load_article_reach(article_perf_db: Path) -> dict[str, dict[str, Any]]:
     """Map exact-normalized published title -> reach/publish evidence (read-only).
 
     Reads both measured tables in ``article_performance.db``:
@@ -870,7 +870,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
         that ``article_metrics`` does not already carry.
     Only exact normalized titles are indexed; nothing is fuzzy-matched or invented.
     """
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     try:
         db = sqlite3.connect(sqlite_uri(article_perf_db, mode="ro"), uri=True)
     except sqlite3.Error:
@@ -894,7 +894,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
         if "article_source_metrics" in tables:
             cols = {row[1] for row in db.execute("PRAGMA table_info(article_source_metrics)")}
             if {"title", "reads", "channel"}.issubset(cols):
-                totals: Dict[str, Dict[str, Any]] = {}
+                totals: dict[str, dict[str, Any]] = {}
                 for row in db.execute("SELECT title,channel,reads,published_at FROM article_source_metrics"):
                     key = _normalize_title(row["title"])
                     channel = str(row["channel"] or "").strip()
@@ -926,7 +926,7 @@ def _load_article_reach(article_perf_db: Path) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def _load_revenue_transactions(finance_db: Path) -> list[Dict[str, Any]]:
+def _load_revenue_transactions(finance_db: Path) -> list[dict[str, Any]]:
     """Revenue transactions to attribute to a run via an explicit source_ref key."""
     try:
         db = sqlite3.connect(sqlite_uri(finance_db, mode="ro"), uri=True)
@@ -950,7 +950,7 @@ def backfill_outcomes(
     finance_db: Path = DEFAULT_FINANCE_DB,
     article_perf_db: Path = DEFAULT_ARTICLE_PERF_DB,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Close the outcome loop from *evidence*, not guesses.
 
     Attributes a run to a business outcome only via a strong key: a finance
@@ -968,8 +968,8 @@ def backfill_outcomes(
     reach = _load_article_reach(article_perf_db)
     revenue = _load_revenue_transactions(finance_db)
     now = utc_now()
-    matched: list[Dict[str, Any]] = []
-    by_source: Dict[str, int] = {}
+    matched: list[dict[str, Any]] = []
+    by_source: dict[str, int] = {}
     unresolved = 0
     db = connect(db_path)
     try:
@@ -978,7 +978,7 @@ def backfill_outcomes(
         )]
         for run in runs:
             run_id = str(run["run_id"])
-            fields: Optional[Dict[str, Any]] = None
+            fields: dict[str, Any] | None = None
             source = ""
             for tx in revenue:
                 source_ref = str(tx.get("source_ref") or "")
@@ -998,7 +998,7 @@ def backfill_outcomes(
                     source = "finance-revenue"
                     break
             if fields is None and str(run.get("product_line") or "").startswith("article"):
-                hit: Optional[Dict[str, Any]] = None
+                hit: dict[str, Any] | None = None
                 matched_title = ""
                 for title in _run_article_titles(run):
                     candidate = reach.get(_normalize_title(title))
@@ -1037,7 +1037,7 @@ def backfill_outcomes(
             "matches": matched, "still_unmeasured": unresolved}
 
 
-def runs_for_period(db_path: Path, period_start: str, period_end: str) -> list[Dict[str, Any]]:
+def runs_for_period(db_path: Path, period_start: str, period_end: str) -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         rows = db.execute(
@@ -1081,7 +1081,7 @@ def create_review(
     period_end: str,
     product_line: str = "company",
     evidence_path: str = "",
-    origin: Optional[Dict[str, str]] = None,
+    origin: dict[str, str] | None = None,
 ) -> str:
     review_id = f"TVCR-R-{review_day.strftime('%Y%m%d')}"
     now = utc_now()
@@ -1134,7 +1134,7 @@ def update_review(db_path: Path, review_id: str, **fields: Any) -> None:
         db.close()
 
 
-def import_proposals(db_path: Path, review_id: str, payload: Dict[str, Any]) -> list[str]:
+def import_proposals(db_path: Path, review_id: str, payload: dict[str, Any]) -> list[str]:
     proposals = payload.get("proposals")
     if not isinstance(proposals, list):
         raise ValueError("proposals.json must contain a proposals array")
@@ -1194,7 +1194,7 @@ def import_proposals(db_path: Path, review_id: str, payload: Dict[str, Any]) -> 
     return ids
 
 
-def pending_review_deliveries(db_path: Path, max_attempts: int = 10) -> list[Dict[str, Any]]:
+def pending_review_deliveries(db_path: Path, max_attempts: int = 10) -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         rows = db.execute(
@@ -1209,7 +1209,7 @@ def pending_review_deliveries(db_path: Path, max_attempts: int = 10) -> list[Dic
         db.close()
 
 
-def proposals_for_review(db_path: Path, review_id: str) -> list[Dict[str, Any]]:
+def proposals_for_review(db_path: Path, review_id: str) -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         return [dict(row) for row in db.execute(
@@ -1283,14 +1283,14 @@ def format_review_message(db_path: Path, review_id: str, limit: int = 1000) -> s
         db.close()
 
 
-def _latest_pending_review(db: sqlite3.Connection) -> Optional[sqlite3.Row]:
+def _latest_pending_review(db: sqlite3.Connection) -> sqlite3.Row | None:
     return db.execute(
         """SELECT * FROM tvcr_reviews WHERE status IN ('pending_approval','partially_approved')
            ORDER BY review_date DESC LIMIT 1"""
     ).fetchone()
 
 
-def _resolve_proposal(db: sqlite3.Connection, message: str) -> Optional[sqlite3.Row]:
+def _resolve_proposal(db: sqlite3.Connection, message: str) -> sqlite3.Row | None:
     match = PROPOSAL_ID_RE.search(message)
     if match:
         return db.execute(
@@ -1314,7 +1314,7 @@ def _resolve_proposal(db: sqlite3.Connection, message: str) -> Optional[sqlite3.
     return None
 
 
-def _experiment_baseline(db: sqlite3.Connection) -> Dict[str, Any]:
+def _experiment_baseline(db: sqlite3.Connection) -> dict[str, Any]:
     """Snapshot the metrics an experiment will later be judged against.
 
     Captured at approval time so weekly evaluation can compute a real delta
@@ -1422,9 +1422,9 @@ def auto_approve_proposals(
     db_path: Path = DEFAULT_DB,
     *,
     actor: str = "policy-auto-approve",
-    now: Optional[str] = None,
+    now: str | None = None,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Policy-approve P2/low-risk proposals whose change_scopes are already sanctioned.
 
     Deliberately narrow: only P2 priority, only a stated-low risk, and only when
@@ -1439,7 +1439,7 @@ def auto_approve_proposals(
             "SELECT * FROM improvement_proposals WHERE status='pending_approval' AND priority='P2' ORDER BY review_id,item_no"
         ).fetchall()
         approved_ids: list[str] = []
-        skipped: list[Dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
         for row in candidates:
             scopes = _proposal_change_scopes(row)
             if not _is_low_risk(row["risk"]):
@@ -1478,10 +1478,10 @@ def auto_approve_proposals(
 def escalate_stale_proposals(
     db_path: Path = DEFAULT_DB,
     *,
-    now: Optional[str] = None,
+    now: str | None = None,
     p0_sla_hours: int = 72,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Enforce the proposal SLA: expire superseded backlog, escalate stale P0s.
 
     * A pending proposal whose review is older than the latest review for the
@@ -1505,7 +1505,7 @@ def escalate_stale_proposals(
                JOIN tvcr_reviews r ON r.review_id=p.review_id
                WHERE p.status='pending_approval'"""
         ).fetchall()
-        latest_date: Dict[str, str] = {}
+        latest_date: dict[str, str] = {}
         for row in db.execute(
             """SELECT p.product_line AS pl, MAX(r.review_date) AS md FROM improvement_proposals p
                JOIN tvcr_reviews r ON r.review_id=p.review_id GROUP BY p.product_line"""
@@ -1553,7 +1553,7 @@ def apply_user_decision(
     *,
     actor: str,
     note: str = "",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     decision = "rejected" if REJECT_RE.search(message) else "approved" if APPROVE_RE.search(message) else ""
     if not decision or not (PROPOSAL_ID_RE.search(message) or ITEM_NO_RE.search(message) or "提案" in message):
         return None
@@ -1606,7 +1606,7 @@ EXPERIMENT_TRANSITIONS = {
 EVALUATION_WINDOW_HOURS = 168
 
 
-def _iso_plus_hours(base: Optional[datetime], hours: float) -> str:
+def _iso_plus_hours(base: datetime | None, hours: float) -> str:
     return ((base or datetime.now(timezone.utc)) + timedelta(hours=hours)).isoformat(timespec="seconds")
 
 
@@ -1615,7 +1615,7 @@ def update_experiment(
     experiment_id: str,
     *,
     status: str,
-    result: Optional[Dict[str, Any]] = None,
+    result: dict[str, Any] | None = None,
     conclusion: str = "",
     evaluation_window_hours: float = EVALUATION_WINDOW_HOURS,
     force: bool = False,
@@ -1634,7 +1634,7 @@ def update_experiment(
         cur_status = str(current["status"])
         if status != cur_status and not force and status not in EXPERIMENT_TRANSITIONS.get(cur_status, set()):
             raise ValueError(f"illegal experiment transition: {cur_status} -> {status}")
-        fields: Dict[str, Any] = {"status": status, "updated_at": now}
+        fields: dict[str, Any] = {"status": status, "updated_at": now}
         if status == "running":
             if not current["started_at"]:  # don't rewrite the original start on re-entry
                 fields["started_at"] = now
@@ -1658,7 +1658,7 @@ def reap_experiments(
     db_path: Path = DEFAULT_DB,
     *,
     evaluation_window_hours: float = EVALUATION_WINDOW_HOURS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Recover experiments from silent limbo.
 
     Old ``running`` rows were written with no ``evaluation_due_at`` and would
@@ -1707,7 +1707,7 @@ def reap_experiments(
 DEFAULT_STALE_RUN_MINUTES = 120
 
 
-def _age_minutes(reference: str, *, now: Optional[datetime] = None) -> float:
+def _age_minutes(reference: str, *, now: datetime | None = None) -> float:
     dt = _parse_dt(reference)
     if dt is None:
         return 0.0
@@ -1739,9 +1739,9 @@ def reap_stale_runs(
     *,
     router_db: Path = DEFAULT_ROUTER_DB,
     stale_minutes: float = DEFAULT_STALE_RUN_MINUTES,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Terminalize operational runs stuck in ``running``/``submitted``.
 
     A worker can die before writing ``status.json`` (e.g. an executor crash on
@@ -1759,7 +1759,7 @@ def reap_stale_runs(
     now_iso = now_dt.isoformat(timespec="seconds")
 
     # Runner PIDs live in the router DB; join them back to each run.
-    runner_pids: Dict[str, Any] = {}
+    runner_pids: dict[str, Any] = {}
     if router_db.is_file():
         source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
         source.row_factory = sqlite3.Row
@@ -1836,7 +1836,7 @@ def reap_stale_runs(
     return {"reaped": reaped, "skipped_alive": skipped_alive, "stale_minutes": stale_minutes}
 
 
-def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> Dict[str, str]:
+def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> dict[str, str]:
     if not router_db.is_file():
         return {}
     db = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
@@ -1859,7 +1859,7 @@ def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> Dict[str, str]:
         db.close()
 
 
-def _optional_bool(value: str) -> Optional[int]:
+def _optional_bool(value: str) -> int | None:
     if not value:
         return None
     return 1 if value.lower() in {"1", "true", "yes", "y", "是"} else 0

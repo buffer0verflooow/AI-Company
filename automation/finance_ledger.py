@@ -12,7 +12,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     from . import pricing
@@ -27,7 +27,7 @@ DEFAULT_DB = COMPANY_ROOT / "finance/finance_ledger.db"
 DEFAULT_SUBMISSIONS = Path("/home/pwn/workspace/hackerone/SUBMISSIONS_INDEX.md")
 DEFAULT_ROUTER_DB = COMPANY_ROOT / "operations/runtime/company_router.db"
 DEFAULT_HERMES_DB = Path("/home/pwn/.hermes/state.db")
-BOUNTY_RANGE_RE = re.compile(r"总赏金[^$]*\$([\d,]+)\s*-\s*\$([\d,]+)", re.I)
+BOUNTY_RANGE_RE = re.compile(r"总赏金[^$]*\$([\d,]+)\s*-\s*\$([\d,]+)", re.IGNORECASE)
 ACTUAL_COST_STATUSES = {"actual", "confirmed", "provider_reported", "billed"}
 
 
@@ -55,7 +55,7 @@ def _migrate_usage_snapshots(db: sqlite3.Connection) -> None:
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db: Optional[sqlite3.Connection] = None
+    db: sqlite3.Connection | None = None
     try:
         db = sqlite3.connect(path)
         db.row_factory = sqlite3.Row
@@ -220,8 +220,8 @@ _SESSION_TOKEN_COLUMNS = (
 
 
 def _hermes_cost_snapshot(
-    path: Path, price_table: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    path: Path, price_table: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Join measured Hermes session tokens to evidence-backed model prices.
 
     Sessions the provider has already billed (``cost_status`` in
@@ -233,7 +233,7 @@ def _hermes_cost_snapshot(
     tracked as a native-currency amount) rather than assumed free — "unknown is
     not zero", and no FX rate is ever invented.
     """
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "confirmed_cost_usd": 0.0,
         "estimated_cost_usd": 0.0,
         "estimated_cost_native": {},
@@ -292,7 +292,7 @@ def _hermes_cost_snapshot(
         db.close()
 
 
-def _route_counts(path: Path) -> Dict[str, int]:
+def _route_counts(path: Path) -> dict[str, int]:
     counts = {"security": 0, "article": 0, "video": 0}
     if not path.is_file():
         return counts
@@ -345,7 +345,7 @@ def sync_snapshot(db_path: Path, router_db: Path, hermes_db: Path) -> str:
     return snapshot_id
 
 
-def report(db_path: Path) -> Dict[str, Any]:
+def report(db_path: Path) -> dict[str, Any]:
     db = connect(db_path)
     try:
         actual = [dict(row) for row in db.execute(

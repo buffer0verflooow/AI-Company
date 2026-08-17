@@ -11,7 +11,13 @@ from zoneinfo import ZoneInfo
 from automation.company_daily_digest import build_digest, run
 from automation.company_router import RouterState, classify_message
 from automation.notification_outbox import pending
-from automation.operations_control import business_period, connect, create_review, import_proposals, utc_now
+from automation.operations_control import (
+    business_period,
+    connect,
+    create_review,
+    import_proposals,
+    utc_now,
+)
 
 
 class CompanyDailyDigestTests(unittest.TestCase):

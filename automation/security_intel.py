@@ -27,12 +27,10 @@ import json
 import re
 import sqlite3
 import subprocess
-import urllib.parse
-import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, sqlite_connection
@@ -52,7 +50,7 @@ FETCH_TIMEOUT = 20
 # source registry: (id, kind, url, title, max_items)
 # kind: rss | api_json | api_atom | html
 # ---------------------------------------------------------------------------
-SOURCES: List[Dict[str, Any]] = [
+SOURCES: list[dict[str, Any]] = [
     # --- RSS 中文 ---
     {"id": "freebuf",   "kind": "rss",  "url": "https://www.freebuf.com/feed",
      "title": "FreeBuf", "max": 15, "cat": "中文社区"},
@@ -110,7 +108,7 @@ TLS_INSECURE = {"anquanke"}
 # 战略赛道规则 (对齐选题池: A 攻防实战 / B EDR对抗 / C Agent治理 / D 变现)
 # 关键词命中: 标题 ×3, 摘要 ×1; 最高分赛道胜出; 0 分 → general(不入池)
 # ---------------------------------------------------------------------------
-TRACK_RULES: Dict[str, Dict[str, Any]] = {
+TRACK_RULES: dict[str, dict[str, Any]] = {
     "A": {
         "name": "A 攻防实战",
         "keywords": [
@@ -166,7 +164,7 @@ def _kw_in(kw_l: str, text_l: str) -> bool:
     return kw_l in text_l
 
 
-def classify_track(item: Dict[str, Any]) -> str:
+def classify_track(item: dict[str, Any]) -> str:
     """Score item against strategy tracks.  Returns track id or 'general'."""
     # CISA KEV entries are vulnerability intel, not content-track material
     if item.get("source") == "cisa-kev":
@@ -210,7 +208,7 @@ def fetch(url: str, insecure: bool = False) -> str:
     to the mihomo fake-ip range (198.18.x.x) → TLS connect error 35.  A retry
     often lands on the real A record.
     """
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in range(3):
         cmd = [
             "curl", "-s", "-L", "-m", str(FETCH_TIMEOUT), "--noproxy", "*",
@@ -220,7 +218,7 @@ def fetch(url: str, insecure: bool = False) -> str:
             cmd.append("-k")
         cmd.append(url)
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT + 10)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT + 10, check=False)
             if proc.returncode == 0:
                 return proc.stdout
             last_err = RuntimeError(f"curl exit {proc.returncode}")
@@ -233,8 +231,8 @@ def fetch(url: str, insecure: bool = False) -> str:
 
 
 def strip_html(text: str) -> str:
-    text = re.sub(r"<script.*?</script>", " ", text, flags=re.S | re.I)
-    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<script.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     return html.unescape(re.sub(r"\s+", " ", text)).strip()
 
@@ -247,17 +245,17 @@ def clean_title(raw: str) -> str:
 # ---------------------------------------------------------------------------
 # channel parsers
 # ---------------------------------------------------------------------------
-def parse_nitter(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+def parse_nitter(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     """X 账号 RSS (via nitter.net).  Standard RSS 2.0 items:
     title=推文全文, dc:creator=原作者, link=nitter status URL, pubDate 标准.
     """
-    items: List[Dict[str, Any]] = []
-    for m in re.finditer(r"<item>(.*?)</item>", body, re.S):
+    items: list[dict[str, Any]] = []
+    for m in re.finditer(r"<item>(.*?)</item>", body, re.DOTALL):
         chunk = m.group(1)
-        t = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", chunk, re.S)
-        creator = re.search(r"<dc:creator>(.*?)</dc:creator>", chunk, re.S)
-        link = re.search(r"<link>(.*?)</link>", chunk, re.S)
-        pub = re.search(r"<pubDate>(.*?)</pubDate>", chunk, re.S)
+        t = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", chunk, re.DOTALL)
+        creator = re.search(r"<dc:creator>(.*?)</dc:creator>", chunk, re.DOTALL)
+        link = re.search(r"<link>(.*?)</link>", chunk, re.DOTALL)
+        pub = re.search(r"<pubDate>(.*?)</pubDate>", chunk, re.DOTALL)
         if not t:
             continue
         title = clean_title(t.group(1))
@@ -284,14 +282,14 @@ def parse_nitter(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str
     return items[: src["max"]]
 
 
-def parse_rss(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    for m in re.finditer(r"<item>(.*?)</item>|<entry>(.*?)</entry>", body, re.S):
+def parse_rss(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for m in re.finditer(r"<item>(.*?)</item>|<entry>(.*?)</entry>", body, re.DOTALL):
         chunk = m.group(1) or m.group(2) or ""
-        t = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", chunk, re.S)
-        link = re.search(r"<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", chunk, re.S)
+        t = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", chunk, re.DOTALL)
+        link = re.search(r"<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", chunk, re.DOTALL)
         link_href = re.search(r'<link[^>]*href="([^"]+)"', chunk)
-        pub = re.search(r"<pubDate>(.*?)</pubDate>|<updated>(.*?)</updated>|<published>(.*?)</published>", chunk, re.S)
+        pub = re.search(r"<pubDate>(.*?)</pubDate>|<updated>(.*?)</updated>|<published>(.*?)</published>", chunk, re.DOTALL)
         title = clean_title(t.group(1)) if t else ""
         if not title:
             continue
@@ -314,13 +312,13 @@ def parse_rss(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, A
     return items[: src["max"]]
 
 
-def parse_arxiv_atom(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    for m in re.finditer(r"<entry>(.*?)</entry>", body, re.S):
+def parse_arxiv_atom(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for m in re.finditer(r"<entry>(.*?)</entry>", body, re.DOTALL):
         chunk = m.group(1)
-        t = re.search(r"<title[^>]*>(.*?)</title>", chunk, re.S)
+        t = re.search(r"<title[^>]*>(.*?)</title>", chunk, re.DOTALL)
         link = re.search(r'<link[^>]*href="([^"]+)"', chunk)
-        pub = re.search(r"<published>(.*?)</published>", chunk, re.S)
+        pub = re.search(r"<published>(.*?)</published>", chunk, re.DOTALL)
         authors = re.findall(r"<name>(.*?)</name>", chunk)
         title = clean_title(t.group(1)) if t else ""
         if not title:
@@ -334,7 +332,7 @@ def parse_arxiv_atom(body: str, src: Dict[str, Any], now: datetime) -> List[Dict
     return items[: src["max"]]
 
 
-def parse_cisa_kev(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+def parse_cisa_kev(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
@@ -358,12 +356,12 @@ def parse_cisa_kev(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[s
     return items[: src["max"]]
 
 
-def parse_kanxue(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+def parse_kanxue(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     """看雪主页: 帖子标题 + 链接."""
     items = []
     seen = set()
     # 标题在 <a ...>标题</a>, 链接多为 thread-xxx
-    for m in re.finditer(r'<a[^>]+href="(/thread-[^"]+)"[^>]*>(.*?)</a>', body, re.S):
+    for m in re.finditer(r'<a[^>]+href="(/thread-[^"]+)"[^>]*>(.*?)</a>', body, re.DOTALL):
         url = "https://bbs.kanxue.com" + m.group(1)
         title = clean_title(m.group(2))
         if not title or len(title) < 6 or title in seen or "回复" in title or "查看" in title:
@@ -376,11 +374,11 @@ def parse_kanxue(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str
     return items
 
 
-def parse_anquanke(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+def parse_anquanke(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     """安全客首页: 文章列表链接 /post/id-xxxx."""
     items = []
     seen = set()
-    for m in re.finditer(r'<a[^>]+href="(/post/id/\d+)"[^>]*>(.*?)</a>', body, re.S):
+    for m in re.finditer(r'<a[^>]+href="(/post/id/\d+)"[^>]*>(.*?)</a>', body, re.DOTALL):
         url = "https://www.anquanke.com" + m.group(1)
         title = clean_title(m.group(2))
         if not title or len(title) < 6 or title in seen:
@@ -393,11 +391,11 @@ def parse_anquanke(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[s
     return items
 
 
-def parse_xianzhi(body: str, src: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+def parse_xianzhi(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     """先知社区 news 页: 文章链接 /news/数字 (相对或绝对 URL)."""
     items = []
     seen = set()
-    for m in re.finditer(r'<a[^>]+href="([^"]*/news/\d+)"[^>]*>(.*?)</a>', body, re.S):
+    for m in re.finditer(r'<a[^>]+href="([^"]*/news/\d+)"[^>]*>(.*?)</a>', body, re.DOTALL):
         href = m.group(1)
         url = href if href.startswith("http") else "https://xz.aliyun.com" + href
         title = clean_title(m.group(2))
@@ -425,7 +423,7 @@ HTML_PARSERS = {
 }
 
 
-def collect_source(src: Dict[str, Any], now: datetime) -> Tuple[str, List[Dict[str, Any]]]:
+def collect_source(src: dict[str, Any], now: datetime) -> tuple[str, list[dict[str, Any]]]:
     """Fetch + parse one source.  Returns (status, items)."""
     try:
         body = fetch(src["url"], insecure=src["id"] in TLS_INSECURE)
@@ -476,13 +474,13 @@ def init_db(db: sqlite3.Connection) -> None:
     )
 
 
-def item_id(item: Dict[str, Any]) -> str:
+def item_id(item: dict[str, Any]) -> str:
     import hashlib
-    key = f"{item['source']}|{item['url']}|{item['title']}".encode("utf-8")
+    key = f"{item['source']}|{item['url']}|{item['title']}".encode()
     return hashlib.sha256(key).hexdigest()[:16]
 
 
-def persist_items(db: sqlite3.Connection, items: List[Dict[str, Any]], now: datetime) -> int:
+def persist_items(db: sqlite3.Connection, items: list[dict[str, Any]], now: datetime) -> int:
     new_count = 0
     now_s = now.isoformat(timespec="seconds")
     for it in items:
@@ -505,7 +503,7 @@ def persist_items(db: sqlite3.Connection, items: List[Dict[str, Any]], now: date
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
-def build_report(results: List[Tuple[str, List[Dict[str, Any]]]], new_count: int, now: datetime) -> str:
+def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int, now: datetime) -> str:
     date_str = now.strftime("%Y-%m-%d")
     lines = [
         f"# 安全情报日报 {date_str}",
@@ -524,7 +522,7 @@ def build_report(results: List[Tuple[str, List[Dict[str, Any]]]], new_count: int
                  if status == "ok" or status.endswith(": ok")
                  for it in items]
 
-    by_track: Dict[str, List[Dict[str, Any]]] = {}
+    by_track: dict[str, list[dict[str, Any]]] = {}
     for it in all_items:
         t = it.get("track", "general")
         by_track.setdefault(t, []).append(it)
@@ -537,7 +535,7 @@ def build_report(results: List[Tuple[str, List[Dict[str, Any]]]], new_count: int
     lines.append(f"共 {len(all_items)} 条 ｜ {track_stats}")
     lines.append("")
 
-    def is_fresh(it: Dict[str, Any]) -> bool:
+    def is_fresh(it: dict[str, Any]) -> bool:
         pub = it.get("published")
         if not pub:
             return True  # HTML sources carry no date → assume fresh
@@ -621,8 +619,8 @@ def main() -> int:
         wanted = {s.strip() for s in args.limit_sources.split(",")}
         sources = [s for s in SOURCES if s["id"] in wanted]
 
-    results: List[Tuple[str, List[Dict[str, Any]]]] = []
-    all_items: List[Dict[str, Any]] = []
+    results: list[tuple[str, list[dict[str, Any]]]] = []
+    all_items: list[dict[str, Any]] = []
     for src in sources:
         status, items = collect_source(src, now)
         results.append((f"{src['id']}: {status}", items))

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from automation.company_router import RouterState, classify_message
 from automation.operations_control import (
+    _apportion_shared_sessions,
     apply_user_decision,
     auto_approve_proposals,
     backfill_outcomes,
@@ -27,7 +28,6 @@ from automation.operations_control import (
     update_experiment,
     utc_now,
 )
-from automation.operations_control import _apportion_shared_sessions
 
 
 class OperatingLedgerTests(unittest.TestCase):

@@ -10,7 +10,7 @@ import subprocess
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 try:
     from . import pricing
@@ -59,7 +59,7 @@ DEFAULT_CONFIG = HERE / "operations_control_config.json"
 TVCR_INTERNAL_PREFIX = "[COMPANY_TVCR_INTERNAL]"
 
 
-def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
         raise ValueError("operations control config must be a JSON object")
@@ -76,17 +76,17 @@ def _safe_json(value: Any) -> Any:
 
 
 def build_evidence_pack(
-    runs: list[Dict[str, Any]],
+    runs: list[dict[str, Any]],
     *,
     review_day: date,
     period_start: str,
     period_end: str,
-    thresholds: Dict[str, Any],
-) -> Dict[str, Any]:
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
     """Aggregate operating evidence while keeping observations separate from decisions."""
-    lines: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
-    signals: list[Dict[str, Any]] = []
-    evidence_runs: list[Dict[str, Any]] = []
+    lines: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    signals: list[dict[str, Any]] = []
+    evidence_runs: list[dict[str, Any]] = []
     for run in runs:
         product_line = str(run.get("product_line") or "unknown")
         direct_tokens = int(run.get("input_tokens") or 0) + int(run.get("output_tokens") or 0) + int(run.get("reasoning_tokens") or 0)
@@ -154,7 +154,7 @@ def build_evidence_pack(
                 "interpretation_rule": "缺少采用、发布、触达或收入数据时，不能声称投入产出为正或为负。",
             })
 
-    summaries: Dict[str, Any] = {}
+    summaries: dict[str, Any] = {}
     for product_line, items in lines.items():
         completed = [item for item in items if item["status"] == "completed"]
         measured = [item for item in items if item["outcome_status"] != "unmeasured"]
@@ -260,9 +260,9 @@ def build_prompt(review_id: str, evidence_path: Path, report_path: Path, proposa
 
 
 def validate_outputs(
-    evidence: Dict[str, Any],
+    evidence: dict[str, Any],
     report_text: str,
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     proposal_ids: set[str] | None = None,
 ) -> list[str]:
     """Reject common business-accounting errors before a report can be delivered.
@@ -277,14 +277,14 @@ def validate_outputs(
         return ["proposals must be an array"]
     combined = report_text + "\n" + json.dumps(payload, ensure_ascii=False)
     if all(str(run.get("outcome_status") or "unmeasured") == "unmeasured" for run in evidence.get("runs") or []):
-        if re.search(r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", combined, re.I):
+        if re.search(r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", combined, re.IGNORECASE):
             errors.append("unmeasured business value was incorrectly stated as zero")
     if evidence.get("runs") and all(
         str(run.get("cost_status") or "unknown").lower()
         not in {"actual", "confirmed", "provider_reported", "billed"}
         for run in evidence.get("runs") or []
     ):
-        if re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.I):
+        if re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.IGNORECASE):
             errors.append("unknown model cost was incorrectly stated as zero")
     if any(int(run.get("result_delivered") or 0) == 1 for run in evidence.get("runs") or []):
         if any(phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")):
@@ -320,7 +320,7 @@ def validate_outputs(
     return errors
 
 
-def run_daily_review(config: Dict[str, Any], review_day: date, *, invoke_agent: bool = True) -> Dict[str, Any]:
+def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: bool = True) -> dict[str, Any]:
     db_path = Path(config["operations_db"])
     router_db = Path(config["router_db"])
     jobs = Path(config["content_job_dir"])

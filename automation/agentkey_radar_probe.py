@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
@@ -44,7 +44,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
         raise ValueError("agentkey radar config must be an object")
@@ -88,7 +88,7 @@ def _sanitize_text(value: str, limit: int = 2400) -> str:
 
 def _canonical_url(value: str) -> str:
     try:
-        from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qsl
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         parsed = urlsplit(value.strip())
         hostname = parsed.hostname
     except (ValueError, AttributeError):
@@ -178,6 +178,7 @@ def _run_one_query(theme_title: str, query: str, output_dir: Path) -> list[dict]
                  "--skills", "agentkey", "--max-turns", "8"],
                 cwd=str(WORKSPACE), env=env,
                 capture_output=True, text=True, timeout=WORKER_TIMEOUT,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             return [{"error": f"agentkey worker timed out ({WORKER_TIMEOUT}s)"}]
@@ -217,7 +218,7 @@ def _run_one_query(theme_title: str, query: str, output_dir: Path) -> list[dict]
 
 
 def _parse_agentkey_result(raw: dict, theme: str, theme_title: str,
-                            product_line: str, query: str) -> Optional[dict]:
+                            product_line: str, query: str) -> dict | None:
     """Convert an agentkey result item to the market-signal record format."""
     if "error" in raw:
         return None

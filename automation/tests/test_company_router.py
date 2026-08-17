@@ -1,16 +1,28 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 import tempfile
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from automation.company_router import RouterState, build_context, classify_message, classify_with_fallback, handle_hook, select_company_result, submit_security
-from automation.operations_control import business_period, create_review, import_proposals
+from automation.company_router import (
+    RouterState,
+    build_context,
+    classify_message,
+    classify_with_fallback,
+    handle_hook,
+    select_company_result,
+    submit_security,
+)
+from automation.operations_control import (
+    business_period,
+    create_review,
+    import_proposals,
+)
 from automation.operations_control import connect as connect_operations
-from datetime import date, datetime, timezone
 
 
 class ClassificationTests(unittest.TestCase):

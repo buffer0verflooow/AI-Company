@@ -92,11 +92,15 @@ def parse_frontmatter(text: str) -> dict:
     front_raw = m.group(1)
     try:
         import yaml
-        result = yaml.safe_load(front_raw)
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            result = yaml.safe_load(front_raw)
+        except yaml.YAMLError:
+            result = None
         if isinstance(result, dict):
             return result
-    except Exception:
-        pass
     # fallback: basic key-value parse for Obsidian frontmatter
     result = {}
     for line in front_raw.splitlines():
@@ -217,6 +221,7 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
         proc = subprocess.run(
             cmd,
             input=f"## {title}\n\n{body}", capture_output=True, text=True, timeout=30,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return "timeout"

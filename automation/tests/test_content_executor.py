@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from automation.content_hermes_executor import build_prompt, build_worker_invocation, worker_usage, write_progress
-import json
-import sqlite3
+from automation.content_hermes_executor import (
+    build_prompt,
+    build_worker_invocation,
+    worker_usage,
+    write_progress,
+)
 
 
 class ContentPromptTests(unittest.TestCase):

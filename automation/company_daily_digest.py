@@ -12,13 +12,14 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
     from ._safe_io import read_text_limited, sqlite_uri
     from .company_router import load_config
-    from .notification_outbox import enqueue, summary as outbox_summary
+    from .notification_outbox import enqueue
+    from .notification_outbox import summary as outbox_summary
     from .operations_control import latest_origin, utc_now
 except ImportError:  # direct execution from automation/
     from _safe_io import read_text_limited, sqlite_uri
@@ -56,7 +57,7 @@ def _db_rows(path: Path, query: str, params: tuple[Any, ...] = ()) -> list[sqlit
         db.close()
 
 
-def _operator_status(config: Dict[str, Any]) -> str:
+def _operator_status(config: dict[str, Any]) -> str:
     jobs_path = Path(str(config.get("cron_jobs_path") or "/home/pwn/.hermes/cron/jobs.json"))
     payload = _read_json(jobs_path)
     if isinstance(payload, dict):
@@ -159,7 +160,7 @@ def _market_summary(market_db: Path) -> list[str]:
 
 def _failure_clusters(
     operations_db: Path, now: datetime, *, window_hours: int = 24, top: int = 3
-) -> tuple[list[str], list[Dict[str, Any]]]:
+) -> tuple[list[str], list[dict[str, Any]]]:
     """Group recent failed runs by ``product_line/quality_status``.
 
     A flat failure count hides whether one root cause (e.g. empty security
@@ -178,7 +179,7 @@ def _failure_clusters(
     if not rows:
         return ["近 24 小时失败聚类：无失败运行"], []
 
-    clusters: Dict[tuple[str, str], Dict[str, Any]] = {}
+    clusters: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         product = str(row["product_line"] or "unknown")
         quality = str(row["quality_status"] or "unmeasured")
@@ -203,7 +204,7 @@ def _failure_clusters(
     return lines, payload
 
 
-def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> tuple[str, Dict[str, Any]]:
+def build_digest(config: dict[str, Any], *, now: datetime | None = None) -> tuple[str, dict[str, Any]]:
     zone = ZoneInfo(str(config.get("timezone") or DEFAULT_TIMEZONE))
     current = now.astimezone(zone) if now else datetime.now(zone)
     operations_db = Path(str(config.get("operations_db") or COMPANY_ROOT / "operations/runtime/operations_control.db"))
@@ -250,7 +251,7 @@ def build_digest(config: Dict[str, Any], *, now: Optional[datetime] = None) -> t
     return message, {"origin": origin, **metadata}
 
 
-def run(config_path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def run(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     config = load_config(config_path)
     message, info = build_digest(config)
     origin = info["origin"]

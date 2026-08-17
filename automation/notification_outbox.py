@@ -14,7 +14,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     from ._safe_io import file_lock, locked_append_text
@@ -31,7 +31,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _parse_dt(value: str) -> Optional[datetime]:
+def _parse_dt(value: str) -> datetime | None:
     if not value:
         return None
     try:
@@ -47,7 +47,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     """Open the operations DB and create the outbox schema idempotently."""
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db: Optional[sqlite3.Connection] = None
+    db: sqlite3.Connection | None = None
     try:
         with file_lock(db_path):
             db = sqlite3.connect(db_path, timeout=5.0)
@@ -100,9 +100,9 @@ def enqueue(
     dedup_key: str,
     kind: str,
     source_id: str,
-    origin: Dict[str, Any],
+    origin: dict[str, Any],
     message: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Insert a notification once and return its stable ID.
 
@@ -160,7 +160,7 @@ def enqueue(
     return notification_id
 
 
-def pending(db_path: Path, *, limit: int = 20, now: str = "") -> list[Dict[str, Any]]:
+def pending(db_path: Path, *, limit: int = 20, now: str = "") -> list[dict[str, Any]]:
     """Return notifications whose retry time has arrived."""
 
     current = now or utc_now()
@@ -178,7 +178,7 @@ def pending(db_path: Path, *, limit: int = 20, now: str = "") -> list[Dict[str, 
         db.close()
 
 
-def get(db_path: Path, notification_id: str) -> Optional[Dict[str, Any]]:
+def get(db_path: Path, notification_id: str) -> dict[str, Any] | None:
     db = connect(db_path)
     try:
         row = db.execute(
@@ -190,7 +190,7 @@ def get(db_path: Path, notification_id: str) -> Optional[Dict[str, Any]]:
         db.close()
 
 
-def get_by_dedup_key(db_path: Path, dedup_key: str) -> Optional[Dict[str, Any]]:
+def get_by_dedup_key(db_path: Path, dedup_key: str) -> dict[str, Any] | None:
     db = connect(db_path)
     try:
         row = db.execute(
@@ -245,7 +245,7 @@ def record_failure(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_base_seconds: int = DEFAULT_RETRY_BASE_SECONDS,
     retry_max_seconds: int = DEFAULT_RETRY_MAX_SECONDS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Record one failed attempt and return the resulting row/state."""
 
     now_dt = datetime.now(timezone.utc)
@@ -290,7 +290,7 @@ def record_failure(
         db.close()
 
 
-def force_dead_letter(db_path: Path, notification_id: str, reason: str) -> Optional[Dict[str, Any]]:
+def force_dead_letter(db_path: Path, notification_id: str, reason: str) -> dict[str, Any] | None:
     now = utc_now()
     db = connect(db_path)
     try:
@@ -310,7 +310,7 @@ def force_dead_letter(db_path: Path, notification_id: str, reason: str) -> Optio
         db.close()
 
 
-def append_dead_letter(path: Path, row: Dict[str, Any], *, reason: str = "") -> None:
+def append_dead_letter(path: Path, row: dict[str, Any], *, reason: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "recorded_at": utc_now(),
@@ -330,7 +330,7 @@ def append_dead_letter(path: Path, row: Dict[str, Any], *, reason: str = "") -> 
     locked_append_text(path, json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def summary(db_path: Path) -> Dict[str, int]:
+def summary(db_path: Path) -> dict[str, int]:
     db = connect(db_path)
     try:
         rows = db.execute(

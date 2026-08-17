@@ -1,12 +1,12 @@
 """Tests for _classify_security_findings in operations_control.py."""
 
 import json
-import tempfile
-import unittest
-from pathlib import Path
 
 # Add parent to path
 import sys
+import tempfile
+import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 

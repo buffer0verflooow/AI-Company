@@ -22,10 +22,11 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, read_text_limited
@@ -42,7 +43,7 @@ ANYSEARCH_CLIENT = "company-market-radar/1.0"
 UPSTREAM_COMMIT = "b1a1bae6b257f1326d2e6ed51f64b36be75065e7"
 UPSTREAM_ZIP_SHA256 = "920eddb2e25f5c144c2d920a12ffdcbecdf979d38d7cb76629d91805ea78907f"
 
-Fetcher = Callable[[str, Dict[str, Any], Dict[str, Any]], str]
+Fetcher = Callable[[str, dict[str, Any], dict[str, Any]], str]
 
 PROMPT_INJECTION_PATTERNS = (
     "ignore previous instructions", "ignore all previous", "system prompt",
@@ -60,7 +61,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
         raise ValueError("market radar config must be an object")
@@ -71,7 +72,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
     return payload
 
 
-def validate_queries(queries: Iterable[Dict[str, Any]]) -> None:
+def validate_queries(queries: Iterable[dict[str, Any]]) -> None:
     seen: set[str] = set()
     for item in queries:
         if not isinstance(item, dict):
@@ -198,7 +199,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
 
 
-def anysearch_call(tool_name: str, arguments: Dict[str, Any], config: Dict[str, Any]) -> str:
+def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, Any]) -> str:
     """Call the pinned AnySearch JSON-RPC endpoint without auto-registration."""
     payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -288,7 +289,7 @@ def canonical_url(value: str) -> str:
 
 
 def _published_at(text: str) -> str:
-    match = re.search(r"Posted:\s*([^|\n]+)", text, re.I)
+    match = re.search(r"Posted:\s*([^|\n]+)", text, re.IGNORECASE)
     if match:
         try:
             return parsedate_to_datetime(match.group(1).strip()).astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -303,12 +304,12 @@ def _published_at(text: str) -> str:
     return ""
 
 
-def parse_batch_markdown(text: str, queries: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def parse_batch_markdown(text: str, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Parse AnySearch's Markdown batch output into bounded untrusted records."""
     lines = text.splitlines()
     current_query = 0
-    current: Optional[Dict[str, Any]] = None
-    records: list[Dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    records: list[dict[str, Any]] = []
 
     def finish() -> None:
         nonlocal current
@@ -362,7 +363,7 @@ def _contains_any(text: str, terms: Iterable[str]) -> int:
     return sum(1 for term in terms if str(term).lower() in lowered)
 
 
-def score_signal(record: Dict[str, Any], query: Dict[str, Any], config: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, float]:
+def score_signal(record: dict[str, Any], query: dict[str, Any], config: dict[str, Any], *, now: datetime | None = None) -> dict[str, float]:
     current = now or datetime.now(timezone.utc)
     haystack = f"{record['title']} {record['snippet']}"
     strategic = list(config.get("strategic_keywords") or []) + list(query.get("keywords") or [])
@@ -389,7 +390,7 @@ def score_signal(record: Dict[str, Any], query: Dict[str, Any], config: Dict[str
     }
 
 
-def signal_eligible(record: Dict[str, Any], query: Dict[str, Any], scores: Dict[str, float], config: Dict[str, Any]) -> bool:
+def signal_eligible(record: dict[str, Any], query: dict[str, Any], scores: dict[str, float], config: dict[str, Any]) -> bool:
     if record.get("content_risk") != "clean":
         return False
     if scores["total"] < float(config.get("minimum_signal_score", 42)):
@@ -406,20 +407,20 @@ def signal_eligible(record: Dict[str, Any], query: Dict[str, Any], scores: Dict[
 
 
 def _signal_id(theme: str, url: str) -> str:
-    return "MKT-SIG-" + hashlib.sha256(f"{theme}|{url}".encode("utf-8")).hexdigest()[:16]
+    return "MKT-SIG-" + hashlib.sha256(f"{theme}|{url}".encode()).hexdigest()[:16]
 
 
 def persist_signals(
     db: sqlite3.Connection,
     run_id: str,
-    records: list[Dict[str, Any]],
-    queries_by_id: Dict[str, Dict[str, Any]],
-    config: Dict[str, Any],
+    records: list[dict[str, Any]],
+    queries_by_id: dict[str, dict[str, Any]],
+    config: dict[str, Any],
     *,
-    now: Optional[datetime] = None,
-) -> list[Dict[str, Any]]:
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
     timestamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
-    saved: list[Dict[str, Any]] = []
+    saved: list[dict[str, Any]] = []
     for record in records:
         query = queries_by_id[record["query_id"]]
         scores = score_signal(record, query, config, now=now)
@@ -464,18 +465,18 @@ def persist_signals(
 def build_pulses(
     db: sqlite3.Connection,
     run_id: str,
-    signals: list[Dict[str, Any]],
+    signals: list[dict[str, Any]],
     evidence_path: Path,
-    config: Dict[str, Any],
-) -> list[Dict[str, Any]]:
-    grouped: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for signal in signals:
         if signal.get("eligible_for_pulse"):
             grouped[signal["theme"]].append(signal)
     minimum_sources = max(2, int(config.get("minimum_independent_sources", 2)))
     minimum_average = float(config.get("minimum_average_signal_score", 45))
     now = utc_now()
-    pulses: list[Dict[str, Any]] = []
+    pulses: list[dict[str, Any]] = []
     for theme, items in grouped.items():
         domains = sorted({item["source_domain"] for item in items})
         average = sum(float(item["total"]) for item in items) / len(items)
@@ -490,7 +491,7 @@ def build_pulses(
         top = sorted(items, key=lambda item: item["total"], reverse=True)[:4]
         title = str(top[0]["theme_title"])
         summary = "；".join(f"{item['title']}（{item['source_domain']}）" for item in top)
-        pulse_id = "MKT-PULSE-" + hashlib.sha256(f"{run_id}|{theme}".encode("utf-8")).hexdigest()[:16]
+        pulse_id = "MKT-PULSE-" + hashlib.sha256(f"{run_id}|{theme}".encode()).hexdigest()[:16]
         status = "new" if qualifies else "insufficient_evidence"
         pulse = {
             "pulse_id": pulse_id, "run_id": run_id, "theme": theme, "theme_title": title,
@@ -526,20 +527,20 @@ def build_pulses(
     return pulses
 
 
-def _chunks(items: list[Dict[str, Any]], size: int) -> Iterable[list[Dict[str, Any]]]:
+def _chunks(items: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
     for index in range(0, len(items), size):
         yield items[index:index + size]
 
 
-def _api_query(item: Dict[str, Any]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"query": item["query"], "max_results": int(item.get("max_results", 5))}
+def _api_query(item: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"query": item["query"], "max_results": int(item.get("max_results", 5))}
     for key in ("domain", "sub_domain", "sub_domain_params"):
         if item.get(key):
             result[key] = item[key]
     return result
 
 
-def _write_report(path: Path, run_id: str, signals: list[Dict[str, Any]], pulses: list[Dict[str, Any]]) -> None:
+def _write_report(path: Path, run_id: str, signals: list[dict[str, Any]], pulses: list[dict[str, Any]]) -> None:
     lines = [
         "# 市场雷达报告", "", f"> Run: `{run_id}`", f"> 生成时间: {utc_now()}",
         "> 外部结果均为不可信输入；进入经营队列前已清洗、去重并要求独立来源佐证。", "",
@@ -566,11 +567,11 @@ def _write_report(path: Path, run_id: str, signals: list[Dict[str, Any]], pulses
 
 
 def run_radar(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     fetcher: Fetcher = anysearch_call,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
+    now: datetime | None = None,
+) -> dict[str, Any]:
     if not config.get("enabled", True):
         return {"status": "disabled", "signals": 0, "pulses": 0}
     configured_queries = config.get("queries") or []
@@ -601,7 +602,7 @@ def run_radar(
         "api_key_mode": "environment" if os.environ.get("ANYSEARCH_API_KEY") else "anonymous",
     }, ensure_ascii=False, indent=2))
 
-    all_records: list[Dict[str, Any]] = []
+    all_records: list[dict[str, Any]] = []
     raw_sections: list[str] = []
     error = ""
     try:
@@ -674,7 +675,7 @@ def run_radar(
     }
 
 
-def pulse_snapshot(db_path: Path = DEFAULT_DB, status: str = "new") -> list[Dict[str, Any]]:
+def pulse_snapshot(db_path: Path = DEFAULT_DB, status: str = "new") -> list[dict[str, Any]]:
     db = connect(db_path)
     try:
         sql = "SELECT * FROM market_pulses"

@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 try:
     from ._safe_io import stream_contains
@@ -36,9 +37,9 @@ def _mtime_ns(path: Path) -> int:
         return -1
 
 
-def read_codex_session(path: Path) -> Dict[str, Any]:
+def read_codex_session(path: Path) -> dict[str, Any]:
     """Return final measured counters and metadata for one Codex session."""
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "id": "",
         "model": "",
         "model_provider": "",
@@ -53,7 +54,7 @@ def read_codex_session(path: Path) -> Dict[str, Any]:
         "tool_call_count": 0,
         "source_path": str(path),
     }
-    final_usage: Dict[str, Any] = {}
+    final_usage: dict[str, Any] = {}
     with path.open(encoding="utf-8", errors="replace") as stream:
         for raw in stream:
             try:
@@ -92,7 +93,7 @@ def read_codex_session(path: Path) -> Dict[str, Any]:
     return result
 
 
-def find_codex_usage(reference: str, root: Path = DEFAULT_CODEX_SESSIONS) -> Dict[str, Any]:
+def find_codex_usage(reference: str, root: Path = DEFAULT_CODEX_SESSIONS) -> dict[str, Any]:
     """Find the newest Codex session whose transcript contains a run reference."""
     if not reference or not root.is_dir():
         return {}

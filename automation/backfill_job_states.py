@@ -10,7 +10,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, '/home/pwn/workspace/company/automation')
-from content_job_state import log_event, read_lifecycle, write_lifecycle, utc_now  # noqa: E402
+from content_job_state import (
+    log_event,
+    read_lifecycle,
+    utc_now,
+    write_lifecycle,
+)
 
 JOBS_DIR = Path('/home/pwn/workspace/company/operations/runtime/content-jobs')
 
@@ -27,7 +32,7 @@ for job_dir in sorted(JOBS_DIR.iterdir()):
         continue
     try:
         status = json.loads(status_path.read_text(encoding='utf-8', errors='replace'))
-    except Exception:
+    except (OSError, ValueError):
         skipped += 1
         continue
     s = str(status.get('status') or '')

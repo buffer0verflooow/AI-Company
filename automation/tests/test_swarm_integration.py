@@ -8,7 +8,6 @@ swarm-knowledge 根目录移到 scripts/ 后, company_router.launch_runner
 from __future__ import annotations
 
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -16,7 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # company/
 sys.path.insert(0, str(REPO_ROOT))
 
-from automation.company_router import build_runner_cmd, load_config, runner_role_counts  # noqa: E402
+from automation.company_router import build_runner_cmd, runner_role_counts
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "router_config.json"
 

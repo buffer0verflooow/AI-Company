@@ -25,6 +25,7 @@ created: 2026-07-05
 | 12 | 0xMatheuZ 全站技术纵览：13篇深度研究 | matheuzsecurity.github.io | ✅ | 不发布（用户确认无发表意义） | ✅ | — |
 | 13 | P³：用进程启动参数投毒，四款 EDR 无一告警 | sensepost.com | ✅ | 2026-07-10 | ✅ | ✅ |
 | 14 | EDR 内部架构与绕过技术全景：从内核回调到调用栈欺骗 | 0xdbgman.github.io | ✅ | 待发布 | ✅ | ✅ |
+| 15 | AI 挖出的 19 个 0day 里，一半以上是越权（ZeroPath 方法论拆解） | zeropath.com | ✅ | 待推送 | ✅ | ✅ |
 
 ## 产出统计
 

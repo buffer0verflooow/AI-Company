@@ -27,6 +27,7 @@ updated: 2026-08-09
 | A8 | LiteLLM 供应链攻击：2,500 家企业、43.4 万条 CI/CD 流水线暴露 | 原创盘点 | FreeBuf 08-11（security-intel 采集） | 拉新（数据硬） | 08-11 当天 | ✅ 已发布 08-11 |
 | A9 | Fable 5 模型降级攻击：加一个 forbidden topic，模型降回 Opus 4.8 再被利用 | 翻译（C10） | @wunderwuzzi23 08-09（embracethered.com 博客） | 拉新（一手稀缺） | 2 周内 | 待定 |
 | A10 | USB 自动安装→Windows 11 完整 SYSTEM 接管 | 翻译/复现 | FreeBuf 08-11（security-intel 采集） | 拉新 | 随时 | 待定 |
+| A11 | RAG 嵌入对撞投毒：当"自主检索"变成攻击跳板（端到端实战深度解读） | 原创解读 | FreeBuf 08-13 + Prompt Security 一手 + PoisonedRAG arXiv | 拉新+产品联动（记忆面） | 3 天内 | ✅ 草稿箱待发（08-18 推送，author=nooooop） |
 
 ## 赛道 B：EDR 对抗与端点攻防（留存担当 · 基本盘）
 
@@ -57,6 +58,7 @@ updated: 2026-08-09
 | C11 | 白帽子的匿名时代终结：HackerOne 强制身份验证的影响 | 原创观察 | 安全客 08-11（security-intel 采集） | 埋伏（话题型） | 2 周内 | 待定 |
 | C12 | IBM Langflow 被列入 CISA KEV：LLM 工具链正成为真实攻击面 | 原创短篇 | CISA KEV 08-11（security-intel 采集） | 埋伏+拉新 | 随时 | 待定 |
 | C13 | DeepSeek-V4-Pro-0813 正式版：Cybergym 83.3 首超 Fable 5，Agent 短板一次补齐 | 原创（数据向） | 官方 API 文档 08-13 直抓 + 官方评测图（中国日报/36氪/新浪/网易/dv4p）+ ifanr 实测 + x.com | 埋伏+拉新（模型动态，安全基准钩子） | 48h | 待审批草稿 ✅（08-13，Cybergym 钩子版 v2） |
+| C14 | AI 挖出的 19 个 0day 里，一半以上是越权（ZeroPath 方法论拆解） | 原创解读 | zeropath.com/blog/0day-discoveries 08-13 直抓（wiki 已沉淀证据链） | 拉新（AI 挖洞方法论） | 随时 | ✅ 草稿完成 08-13（violet 封面） |
 
 ## 赛道 D：变现向
 

@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 try:
-    from ._safe_io import locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
+    from ._safe_io import locked_append_text, locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
 except ImportError:  # direct script execution
-    from _safe_io import locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
+    from _safe_io import locked_append_text, locked_atomic_write_text, read_text_limited, scrub_environment, sqlite_connection
 
 
 WORKSPACE = Path("/home/pwn/workspace")
@@ -60,6 +60,61 @@ def write_progress(
         )
 
 
+def append_event(
+    job_dir: Path,
+    event: str,
+    *,
+    detail: str = "",
+    state: str = "",
+    payload: Dict[str, Any] | None = None,
+) -> None:
+    """Append one line to events.jsonl (append-only job event log).
+
+    Event log is the observable history of a content job: stage transitions,
+    QA results, publish/archive actions, retry/termination reasons. It is
+    append-only and survives progress.json/status.json overwrites.
+    """
+    record: Dict[str, Any] = {
+        "ts": utc_now(),
+        "event": event,
+        "state": state,
+    }
+    if detail:
+        record["detail"] = detail
+    if payload:
+        record.update(payload)
+    with suppress(OSError):
+        locked_append_text(
+            job_dir / "events.jsonl",
+            json.dumps(record, ensure_ascii=False),
+        )
+
+
+# --- content-job state machine ---------------------------------------------
+# Lifecycle states for a content job (extends executor's terminal states with
+# the human-in-the-loop stages that happen AFTER the worker finishes):
+#   pending        — request written, not yet run by executor
+#   running        — worker executing
+#   qa             — worker finished, QA gates being checked (executor writes
+#                    "completed" in status.json; qa state is derived from
+#                    qa-report.md presence — see job_state.py)
+#   review         — human review in progress (main agent / user)
+#   published      — pushed to WeChat draft box / published
+#   archived       — closed out, kept for reference
+#   retrying       — transient failure, scheduled for re-run
+#   terminated     — unrecoverable failure, no re-run planned
+JOB_STATES = ("pending", "running", "qa", "review", "published", "archived",
+              "retrying", "terminated")
+
+# Human-in-the-loop transitions handled by automation/content_job_state.py
+# (invoked by main agent / push scripts), not by the worker executor:
+#   running   → review       (worker completed, awaiting human)
+#   review    → published    (draft pushed to WeChat)
+#   review    → archived     (closed without publishing)
+#   running   → retrying     (transient failure, re-run planned)
+#   running   → terminated   (unrecoverable failure)
+
+
 def pixelle_runtime_ready() -> bool:
     project = COMPANY / "projects" / "Pixelle-Video"
     return bool(shutil.which("uv") and (project / "config.yaml").exists())
@@ -98,6 +153,7 @@ def build_prompt(request: Dict[str, Any], job_dir: Path) -> tuple[str, list[str]
 
 必须先读取并遵循：
 - {COMPANY / 'operations/business-lines/article-production.md'}
+- {COMPANY / 'marketing/article-quality-constraints.md'}（质量约束规范 C1-C9：深度/文体/去AI味/标题/长度/事实/封面/排版/格式一致性——draft 阶段强制执行，QA Gate 逐项核对；**若任务是翻译类文章**——选题为英文一手研究、素材含原文 URL、任务消息含「翻译」——额外执行 C10 翻译约束：忠实原文/结构跟随/术语保留/长段拆短/路径代码化/列表化/图表保留/免责声明保留/来源标注）
 - 与选题相关的公司 Wiki、现有文章、跟踪表和源材料
 
 强制交付（按顺序）：
@@ -266,6 +322,8 @@ def main() -> int:
     except Exception as exc:
         write_status(job_dir, {"status": "failed", "error": f"invalid request: {exc}", "artifacts": []})
         write_progress(job_dir, "failed", percent=100, detail="invalid request")
+        append_event(job_dir, "terminated", state="terminated",
+                     detail=f"invalid request: {exc}")
         return 0
 
     prompt, expected = build_prompt(request, job_dir)
@@ -277,6 +335,9 @@ def main() -> int:
         "artifacts": [],
     })
     write_progress(job_dir, "worker_running", percent=10, detail=str(request["route"]))
+    append_event(job_dir, "started", state="running",
+                 detail=f"worker launch ({request['route']})",
+                 payload={"run_id": request.get("run_id")})
     command, worker_cwd, env = build_worker_invocation(request, job_dir, prompt)
     try:
         proc = subprocess.run(
@@ -297,9 +358,13 @@ def main() -> int:
             "artifacts": [],
         })
         write_progress(job_dir, "failed", percent=100, detail="worker launch failed")
+        append_event(job_dir, "terminated", state="terminated",
+                     detail=f"worker launch failed: {exc}")
         return 0
 
     write_progress(job_dir, "post_processing", percent=80)
+    append_event(job_dir, "worker_finished", state="qa",
+                 detail=f"worker exited {proc.returncode}")
     try:
         artifacts = [
             str(path) for path in sorted(job_dir.iterdir())
@@ -346,6 +411,8 @@ def main() -> int:
             "usage": usage,
         })
         write_progress(job_dir, "failed", percent=100, detail="; ".join(reasons)[:200])
+        append_event(job_dir, "terminated", state="terminated",
+                     detail="; ".join(reasons)[:300])
         return 0
 
     if request["route"] == "company":
@@ -363,6 +430,8 @@ def main() -> int:
                 "usage": usage,
             })
             write_progress(job_dir, "failed", percent=100, detail="worker reported failed")
+            append_event(job_dir, "terminated", state="terminated",
+                         detail=f"worker reported failed: {summary[:200]}")
             return 0
         write_status(job_dir, {
             "status": worker_status,
@@ -377,6 +446,9 @@ def main() -> int:
             "error": "",
         })
         write_progress(job_dir, worker_status, percent=100)
+        append_event(job_dir, "completed", state="review",
+                     detail=f"company job {worker_status}",
+                     payload={"artifacts": len(artifacts)})
         return 0
 
     write_status(job_dir, {
@@ -391,6 +463,9 @@ def main() -> int:
         "error": "",
     })
     write_progress(job_dir, "completed", percent=100)
+    append_event(job_dir, "completed", state="review",
+                 detail="content job completed, awaiting human review",
+                 payload={"artifacts": len(artifacts)})
     return 0
 
 

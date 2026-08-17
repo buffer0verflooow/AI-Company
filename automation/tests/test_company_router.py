@@ -171,6 +171,64 @@ class ClassificationTests(unittest.TestCase):
                 decision = classify_message(message)
                 self.assertEqual(decision.route, "security")
 
+    def test_methodology_with_source_url_routes_to_research(self):
+        # URL 作为内容来源 (2026-08-13): "抓取分析一下 https://... 中提到的漏洞
+        # 挖掘方法" 是读文章、分析方法的研究请求，URL 不是攻击目标，不得被派成
+        # security/analyze。主动攻击动词/目标实体的真实安全任务仍走 security。
+        cases = (
+            ("抓取分析一下https://zeropath.com/blog/0day-discoveries中提到的漏洞挖掘方法", "research"),
+            ("抓取分析一下 https://zeropath.com/blog/0day-discoveries 中提到的漏洞挖掘方法", "research"),
+            ("抓取并分析这篇文章里提到的漏洞挖掘方法", "research"),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message[:24]):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, expected)
+                if expected == "research":
+                    self.assertEqual(decision.action, "dispatch_swarm")
+                    self.assertEqual(decision.intent, "research")
+
+    def test_source_url_gate_keeps_real_security_tasks(self):
+        # 有 URL 但带主动攻击动词/目标时，仍然是真实安全任务，不被当成阅读内容来源。
+        cases = (
+            ("扫描 example.com 并尝试绕过认证", "security"),
+            ("扫描并分析 10.0.0.5 的漏洞", "security"),
+            ("给 acme.com 的登录接口写一个 poc", "security"),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, expected)
+
+    def test_meta_swarm_discussion_stays_with_main_agent(self):
+        # 蜂群自身系统元讨论门控 (2026-08-13): "蜂群算法/蜂群调度机制" 描述的是
+        # 公司自身蜂群系统，不能被 "蜂群"+"分析" 误派成 security 蜂群任务。
+        cases = (
+            "分析一下当前系统的蜂群算法，我们进行讨论",
+            "分析一下蜂群算法",
+            "分析当前系统的蜂群算法",
+            "分析蜂群算法的调度机制",
+            "优化蜂群算法的调度策略",
+        )
+        for message in cases:
+            with self.subTest(message=message[:20]):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "company")
+                self.assertEqual(decision.action, "main_agent")
+
+    def test_meta_swarm_gate_does_not_swallow_real_security_tasks(self):
+        # 讨论蜂群自身与真实安全任务要区分: 有主动攻击动词/目标/安全对象时仍走 security。
+        cases = (
+            ("用蜂群扫描 example.com", "security"),
+            ("审计当前系统的漏洞", "security"),
+            ("分析蜂群算法的漏洞", "security"),
+            ("扫描并分析 10.0.0.5 的漏洞", "security"),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, expected)
+
     def test_ma_question_does_not_redispatch(self):
         # 2026-08-12: "调研跑完了吗" 被误判为 research 新任务重复派发 (run 323d31af)。
         # "…吗" 结尾是完成态问句, 必须走 main_agent, 不得再派发蜂群。

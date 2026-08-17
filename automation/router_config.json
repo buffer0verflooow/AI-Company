@@ -11,7 +11,7 @@
   "operations_db": "/home/pwn/workspace/company/operations/runtime/operations_control.db",
   "market_signals_db": "/home/pwn/workspace/company/marketing/market_signals.db",
   "log_dir": "/home/pwn/workspace/company/operations/runtime/logs",
-  "executor": "/home/pwn/workspace/company/automation/swarm_hermes_executor.py",
+  "executor": "/home/pwn/workspace/company/automation/swarm_native_executor.py",
   "content_executor": "/home/pwn/workspace/company/automation/content_hermes_executor.py",
   "content_job_dir": "/home/pwn/workspace/company/operations/runtime/content-jobs",
   "hermes_repo": "/home/pwn/.hermes/hermes-agent",

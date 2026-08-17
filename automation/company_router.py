@@ -285,6 +285,25 @@ ACTIVE_TASK_VERB_RE = re.compile(
     re.I,
 )
 
+# 蜂群自身系统元讨论门控 (2026-08-13): "蜂群"/"swarm" 在 SECURITY_TERMS 里
+# 表示安全蜂群产品，但 "蜂群算法/蜂群架构/蜂群调度机制" 这类词描述的是蜂群系统
+# 自身。此类消息是公司内部讨论，不得被 "蜂群"+"分析" 误派成 security 蜂群任务。
+META_SWARM_DISCUSSION_RE = re.compile(
+    r"(?:蜂群|swarm)[^，。；\n]{0,6}(?:算法|架构|系统|机制|框架|平台|原理|设计|实现|流程|代码|策略|调度|模型|方案)"
+    r"|(?:讨论|聊聊|交流|探讨)[^，。；\n]{0,12}(?:蜂群|swarm)",
+    re.I,
+)
+
+# URL 作为"待抓取/阅读的内容来源"的强信号 (2026-08-13): "抓取分析一下
+# https://zeropath.com/blog/... 中提到的漏洞挖掘方法" 里的 URL 是阅读对象，
+# 不是攻击目标。出现抓取/阅读动词，或 URL 后带"提到的/中提到的"等引用语时，
+# 方法论门控不应再把该 URL 当作 attack target 而放行到 security。
+CONTENT_SOURCE_URL_SIGNAL_RE = re.compile(
+    r"(?:抓取|爬取|阅读|读取|看下|看看|fetch|crawl|read)"
+    r"|(?:提到的|中提到的|里提到的|上提到的|中说的|里说的|中介绍的|里介绍的|中写的|里写的)",
+    re.I,
+)
+
 DOMAIN_RE = re.compile(r"(?<![@\w-])(?:https?://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?::\d+)?", re.I)
 IP_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
 APK_RE = re.compile(r"(?:^|\s)(/[^\s]+\.apk|[^\s]+\.apk)(?:$|\s)", re.I)
@@ -417,7 +436,43 @@ def _is_methodology_research_request(text: str) -> bool:
         return False
     if ACTIVE_TASK_VERB_RE.search(text):
         return False
+    if _reads_url_as_source(text):
+        return True
     return not extract_target(text)
+
+
+def _reads_url_as_source(text: str) -> bool:
+    """URL 是"待抓取/阅读的内容来源"而非攻击目标。
+
+    用于方法论门控: 当消息里有 URL，但它前面带抓取/阅读动词，或后面带
+    "中提到的/里介绍的"等引用语时，说明这是读一篇文章、分析其中方法的研究
+    请求，而不是把该域名当作扫描/分析目标。此类消息应放行到 research，
+    不能因为 URL 的存在就落到 security。
+    """
+    if not extract_target(text):
+        return False
+    return bool(CONTENT_SOURCE_URL_SIGNAL_RE.search(text or ""))
+
+
+def _is_meta_swarm_discussion(text: str) -> bool:
+    """蜂群自身系统元讨论: 不是安全任务，不得派发蜂群。
+
+    背景: "分析一下当前系统的蜂群算法，我们进行讨论" 因命中 SECURITY_TERMS 的
+    "蜂群" 与 SECURITY_ANALYSIS_RE 的 "分析"，被误派成 security/analyze 蜂群。
+    "蜂群算法/蜂群架构/蜂群调度机制" 描述的是蜂群系统本身，应走 main_agent 讨论。
+
+    保护真实安全任务: 出现主动攻击动词、具体目标实体，或显式安全对象
+    (漏洞/exploit/poc/攻击面/渗透/recon/赏金) 时，仍按 security 处理。
+    """
+    if not META_SWARM_DISCUSSION_RE.search(text or ""):
+        return False
+    if ACTIVE_TASK_VERB_RE.search(text):
+        return False
+    if extract_target(text):
+        return False
+    if _contains_any(text, {"漏洞", "exploit", "poc", "攻击面", "渗透", "recon", "赏金"}):
+        return False
+    return True
 
 
 def _is_company_execution_request(text: str) -> bool:
@@ -672,6 +727,13 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
         # 劫持成 recon 扫描。真实安全任务 (含主动攻击动词/目标实体) 不受影响。
         route = "research"
         confidence = 0.84
+    elif _is_meta_swarm_discussion(text):
+        # 蜂群自身系统元讨论门控 (2026-08-13): 讨论蜂群算法/架构/调度机制
+        # 等公司自身系统，不是安全蜂群任务，交由主 Agent 讨论。
+        return _main_agent_decision(
+            "讨论公司自身蜂群/系统架构，交由公司主 Agent 处理。",
+            external_action=external_action,
+        )
     elif _is_security_request(text):
         route = "security"
         confidence = 0.86

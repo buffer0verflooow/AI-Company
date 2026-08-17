@@ -73,6 +73,31 @@ Hermes 是管理对话入口，不再默认承担所有执行工作。公司 Rou
 
 此格式同时适用于委派任务模板（context 里要求被委派方按此格式报告）和主 Agent 对委派结果的验收（收到非此格式的失败，按未完成处理）。
 
+## 外部委派用量登记模板（2026-08-17 新增）
+
+> 背景：Claude Code / Codex / 蜂群委派的任务用量不回传 Hermes 会话账本，安全产线 9 个 run 全部未定价，投入不可见（TVCR-P-20260809-02）。在技术化自动归集落地前，用人工登记建立计量口径——**每次委派任务启动/结束时各登记一次，约 5 分钟**。
+
+登记位置：`operations/runtime/delegation-usage-log.jsonl`（append-only，一行一条）。
+
+```json
+{
+  "run_id": "<operational_runs.run_id 或 run_id 前 8 位>",
+  "task_title": "一句话任务名",
+  "tool": "codex | claude | swarm-worker | company-worker",
+  "started_at": "2026-08-17T10:00:00+08:00",
+  "finished_at": "2026-08-17T10:30:00+08:00",
+  "estimated_cost_usd": 0.35,
+  "token_estimate": "input=120k, output=30k (若可查)",
+  "notes": "429 重试 1 次 / 产物在 xxx / 未完成原因"
+}
+```
+
+**登记纪律（铁律）**：
+1. 启动即记（run_id + 工具 + 开始时间），完成/失败后补 `finished_at` + 成本，避免事后补记丢字段。
+2. 拿不到精确 cost 时写估算并标 `estimated`，**不写 0**（0 = 已核销，unknown 才诚实）。
+3. 每周末由主 Agent 汇总本文件 → `finance/finance_ledger.py --sync` 口径对齐，TVCR 证据包自动引用。
+4. 技术化归集落地（Claude Code 用量接入价格目录）后本模板降级为兜底。
+
 ## 管理规范（建议）
 
 1. **部门归属**：每个活跃代理应归属到一个公司部门，由该部门 README 记录

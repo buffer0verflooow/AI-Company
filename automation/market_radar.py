@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -213,17 +214,35 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
     opener = urllib.request.build_opener(_NoRedirect())
     timeout = min(120, max(1, int(config.get("timeout_seconds", 30))))
     max_bytes = min(10 * 1024 * 1024, max(4096, int(config.get("max_response_bytes", 2_000_000))))
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            body = response.read(max_bytes + 1)
-    except urllib.error.HTTPError as exc:
+    # The radar is a daily cron whose single upstream dependency is this pinned
+    # endpoint; a transient network blip or a 5xx/429 gateway response must not
+    # fail the whole run.  Retry bounded times with small backoff, mirroring the
+    # retry discipline already used by ``security_intel.fetch``.
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
-            detail = str(exc.reason or exc)
-        finally:
-            exc.close()
-        raise RuntimeError(f"AnySearch HTTP error {exc.code}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"AnySearch request failed: {exc}") from exc
+            with opener.open(request, timeout=timeout) as response:
+                body = response.read(max_bytes + 1)
+            break
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = str(exc.reason or exc)
+            finally:
+                exc.close()
+            error = RuntimeError(f"AnySearch HTTP error {exc.code}: {detail}")
+            transient = exc.code in {429, 500, 502, 503, 504}
+            if not transient or attempt >= 2:
+                raise error from exc
+            last_error = error
+        except (urllib.error.URLError, TimeoutError) as exc:
+            error = RuntimeError(f"AnySearch request failed: {exc}")
+            if attempt >= 2:
+                raise error from exc
+            last_error = error
+        time.sleep(1 + attempt)
+    else:
+        # Only reachable when every attempt failed; keep the last error visible.
+        raise last_error if last_error is not None else RuntimeError("AnySearch request failed")
     if len(body) > max_bytes:
         raise RuntimeError(f"AnySearch response exceeds {max_bytes} bytes")
     try:

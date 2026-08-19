@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
@@ -72,14 +72,21 @@ def main() -> int:
             stale = 0
             for rid, name, status, created in rows:
                 try:
-                    created_dt = datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+                    # swarm_* timestamps are written by SQLite ``datetime('now')``,
+                    # which is UTC.  Compare against UTC now instead of naive
+                    # local time: on an Asia/Shanghai host a naive comparison
+                    # would age every run by 8 hours and false-alarm the cron.
+                    created_dt = datetime.strptime(
+                        created, "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=timezone.utc)
                 except (TypeError, ValueError):
                     continue
+                now_utc = datetime.now(timezone.utc)
                 # 只报警 24h 内创建的 run —— 更早的属于历史遗留(如 08-09 断点期),
                 # 不算当前链路断点
-                if datetime.now() - created_dt > timedelta(days=1):
+                if now_utc - created_dt > timedelta(days=1):
                     continue
-                if datetime.now() - created_dt > timedelta(minutes=30):
+                if now_utc - created_dt > timedelta(minutes=30):
                     # 检查该 run 的任务是否真的没消费
                     pend = db.execute(
                         "SELECT COUNT(*) FROM agent_tasks WHERE run_id=? AND status IN ('pending','claimed')",
@@ -117,7 +124,7 @@ def main() -> int:
             "healthy": not failed,
             "checks": CHECKS,
             "failed_count": len(failed),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }, ensure_ascii=False, indent=1))
     else:
         for c in CHECKS:

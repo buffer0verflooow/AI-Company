@@ -372,7 +372,9 @@ def list_candidates(gate_db: Path, statuses: Iterable[str] = ()) -> list[dict[st
         if status_list:
             marks = ",".join("?" for _ in status_list)
             rows = db.execute(
-                f"SELECT * FROM promotion_candidates WHERE status IN ({marks}) ORDER BY updated_at DESC",
+                # ``marks`` are only ``?`` placeholders; every status value is
+                # bound as a parameter below.
+                f"SELECT * FROM promotion_candidates WHERE status IN ({marks}) ORDER BY updated_at DESC",  # nosec B608 -- placeholder-only marks
                 status_list,
             ).fetchall()
         else:

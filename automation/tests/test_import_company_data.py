@@ -64,9 +64,11 @@ class SafeArchiveExtractionTests(unittest.TestCase):
                 archive.writestr("b.xls", b"b")
             destination = root / "out"
             destination.mkdir()
-            with patch("automation.import_company_data.MAX_ARCHIVE_MEMBERS", 1):
-                with self.assertRaises(ValueError):
-                    self._extract(archive_path, destination)
+            with (
+                patch("automation.import_company_data.MAX_ARCHIVE_MEMBERS", 1),
+                self.assertRaises(ValueError),
+            ):
+                self._extract(archive_path, destination)
 
     def test_rejects_suspicious_compression_ratio(self):
         with tempfile.TemporaryDirectory() as td:

@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -51,6 +52,7 @@ DEFAULT_CONFIG = HERE / "router_config.json"
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
 TVCR_INTERNAL_PREFIX = "[COMPANY_TVCR_INTERNAL]"
 OPERATOR_INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
+LOGGER = logging.getLogger(__name__)
 INTERNAL_MESSAGE_PREFIXES = (INTERNAL_WORKER_PREFIX, TVCR_INTERNAL_PREFIX, OPERATOR_INTERNAL_PREFIX)
 INTERNAL_MESSAGE_PREFIX_RE = re.compile(
     rf"^(?:\s*(?:{'|'.join(re.escape(prefix) for prefix in INTERNAL_MESSAGE_PREFIXES)})\s*)+",
@@ -471,9 +473,7 @@ def _is_meta_swarm_discussion(text: str) -> bool:
         return False
     if extract_target(text):
         return False
-    if _contains_any(text, {"漏洞", "exploit", "poc", "攻击面", "渗透", "recon", "赏金"}):
-        return False
-    return True
+    return not _contains_any(text, {"漏洞", "exploit", "poc", "攻击面", "渗透", "recon", "赏金"})
 
 
 def _is_company_execution_request(text: str) -> bool:
@@ -656,7 +656,7 @@ def _is_internal_target(target_type: str, target: str) -> bool:
     if target_type == "apk":
         return True
     value = (target or "").lower()
-    if value.startswith("/home/pwn/workspace/") or value.startswith("localhost"):
+    if value.startswith(("/home/pwn/workspace/", "localhost")):
         return True
     if target_type == "ip":
         try:
@@ -1092,7 +1092,7 @@ class RouterState:
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- destructor must never raise
             pass
 
     def existing(self, session_id: str, message_hash: str) -> sqlite3.Row | None:
@@ -1132,8 +1132,9 @@ class RouterState:
         if dedup_key:
             conditions.append("(dedup_key=? OR dedup_key='')")
             params.append(dedup_key)
+        # Conditions are fixed literals; only the bound params vary per query.
         rows = self.db.execute(
-            f"SELECT * FROM route_events WHERE {' AND '.join(conditions)} "
+            f"SELECT * FROM route_events WHERE {' AND '.join(conditions)} "  # nosec B608 -- fixed literals, values bound
             "ORDER BY created_at DESC",
             params,
         ).fetchall()
@@ -1230,8 +1231,10 @@ class RouterState:
             f"{quote_identifier(key, allowed=allowed)}=?" for key in fields
         )
         with file_lock(self.path):
+            # Identifiers are validated against the ``allowed`` whitelist by
+            # quote_identifier; only values are interpolated as parameters.
             self.db.execute(
-                f"UPDATE route_events SET {assignments} WHERE route_event_id=?",
+                f"UPDATE route_events SET {assignments} WHERE route_event_id=?",  # nosec B608 -- whitelisted identifiers
                 (*fields.values(), event_id),
             )
             self.db.commit()
@@ -1496,9 +1499,9 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
                         log_dir=Path(config.get("log_dir", "")),
                     )
                     state.update(row["route_event_id"], quality_status=quality)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 -- best-effort classification
                     # Best-effort quality classification — must not block result notification
-                    pass
+                    LOGGER.debug("security quality classification failed for run %s: %s", run_id, exc)
         elif status in {"running", "submitted"}:
             task_counts = result.get("tasks") or {}
             updates.append(f"- 蜂群 {run_id[:8]} 正在运行，任务状态：{json.dumps(task_counts, ensure_ascii=False)}")
@@ -1709,9 +1712,8 @@ def _pre_evaluate_task(
     status_markers = ("已发表", "已发布", "已完成", "已推送", "已更新",
                       "以下文章", "以下是",
                       "[async delegation", "[importan")
-    if decision.action == "dispatch_swarm":
-        if any(marker in lowered for marker in status_markers):
-            return "skip"
+    if decision.action == "dispatch_swarm" and any(marker in lowered for marker in status_markers):
+        return "skip"
 
     # Conversation vs. task disambiguation for security-classified messages.
     # A message that was keyword-scored as security but reads like a conversation
@@ -1870,8 +1872,10 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
                 "reason": "低置信度分发",
             })
             existing_updates = updates + [
-                f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
-                "未生成 run_id，已交由公司主 Agent 继续处理。"
+                (
+                    f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
+                    "未生成 run_id，已交由公司主 Agent 继续处理。"
+                )
             ]
         return {"context": build_context(
             decision,
@@ -1957,8 +1961,10 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
         return {"context": build_context(
             fallback_decision,
             status_updates=updates + [
-                f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
-                "未生成 run_id，已交由公司主 Agent 继续处理。"
+                (
+                    f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
+                    "未生成 run_id，已交由公司主 Agent 继续处理。"
+                )
             ],
         )}
     elif pre_eval == "needs_approval":
@@ -1988,8 +1994,10 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
                     "reason": f"该产线频繁失败，已降级（{product_line} 近窗口 {failures} 次失败）",
                 }),
                 status_updates=updates + [
-                    f"- [熔断] 产线 {product_line} 近窗口连续失败 {failures} 次，已降级由主 Agent 处理，"
-                    "避免持续消耗 Token。"
+                    (
+                        f"- [熔断] 产线 {product_line} 近窗口连续失败 {failures} 次，已降级由主 Agent 处理，"
+                        "避免持续消耗 Token。"
+                    )
                 ],
             )}
 

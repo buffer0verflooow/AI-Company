@@ -489,8 +489,10 @@ def _upsert_run(db: sqlite3.Connection, values: dict[str, Any]) -> None:
         f"{quote_identifier(key)}=excluded.{quote_identifier(key)}"
         for key in columns if key not in {"run_id", "created_at"}
     )
+    # Every identifier passes through quote_identifier (regex + whitelist);
+    # values are always bound as parameters.
     db.execute(
-        f"INSERT INTO operational_runs ({','.join(safe_columns)}) VALUES ({placeholders}) "
+        f"INSERT INTO operational_runs ({','.join(safe_columns)}) VALUES ({placeholders}) "  # nosec B608 -- quote_identifier on all identifiers
         f"ON CONFLICT(run_id) DO UPDATE SET {updates}",
         [values[column] for column in columns],
     )
@@ -1025,7 +1027,8 @@ def backfill_outcomes(
             fields["updated_at"] = now
             if not dry_run:
                 sql = ",".join(f"{key}=?" for key in fields)
-                db.execute(f"UPDATE operational_runs SET {sql} WHERE run_id=?", (*fields.values(), run_id))
+                # Field names come from the fixed mapping built above.
+                db.execute(f"UPDATE operational_runs SET {sql} WHERE run_id=?", (*fields.values(), run_id))  # nosec B608 -- fixed internal keys
             by_source[source] = by_source.get(source, 0) + 1
             matched.append({"run_id": run_id, "source": source,
                             "reach": fields.get("reach"), "revenue_amount": fields.get("revenue_amount")})
@@ -1065,7 +1068,8 @@ def record_outcome(db_path: Path, run_id: str, **fields: Any) -> None:
     db = connect(db_path)
     try:
         sql = ",".join(f"{key}=?" for key in fields)
-        cur = db.execute(f"UPDATE operational_runs SET {sql} WHERE run_id=?", (*fields.values(), run_id))
+        # Fields are validated against the ``allowed`` whitelist above.
+        cur = db.execute(f"UPDATE operational_runs SET {sql} WHERE run_id=?", (*fields.values(), run_id))  # nosec B608 -- whitelisted keys
         if cur.rowcount != 1:
             raise ValueError(f"unknown operational run: {run_id}")
         db.commit()
@@ -1128,7 +1132,8 @@ def update_review(db_path: Path, review_id: str, **fields: Any) -> None:
     db = connect(db_path)
     try:
         sql = ",".join(f"{key}=?" for key in fields)
-        db.execute(f"UPDATE tvcr_reviews SET {sql} WHERE review_id=?", (*fields.values(), review_id))
+        # Fields are validated against the ``allowed`` whitelist above.
+        db.execute(f"UPDATE tvcr_reviews SET {sql} WHERE review_id=?", (*fields.values(), review_id))  # nosec B608 -- whitelisted keys
         db.commit()
     finally:
         db.close()
@@ -1646,7 +1651,8 @@ def update_experiment(
         if conclusion:
             fields["conclusion"] = conclusion
         sql = ",".join(f"{key}=?" for key in fields)
-        cur = db.execute(f"UPDATE operating_experiments SET {sql} WHERE experiment_id=?", (*fields.values(), experiment_id))
+        # Field names come from the fixed mapping built above.
+        cur = db.execute(f"UPDATE operating_experiments SET {sql} WHERE experiment_id=?", (*fields.values(), experiment_id))  # nosec B608 -- fixed internal keys
         if cur.rowcount != 1:
             raise ValueError(f"unknown experiment: {experiment_id}")
         db.commit()

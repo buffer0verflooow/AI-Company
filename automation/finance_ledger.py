@@ -259,7 +259,9 @@ def _hermes_cost_snapshot(
         if has_model:
             select_cols.append("model")
         native = result["estimated_cost_native"]
-        for row in db.execute(f"SELECT {','.join(select_cols)} FROM sessions"):
+        # Column names come from fixed constants, filtered against the live
+        # table's PRAGMA columns -- never from user/configuration input.
+        for row in db.execute(f"SELECT {','.join(select_cols)} FROM sessions"):  # nosec B608 -- fixed column whitelist
             if str(row["cost_status"] or "").lower() in ACTUAL_COST_STATUSES:
                 try:
                     confirmed = float(row["estimated_cost_usd"])

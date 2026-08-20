@@ -276,19 +276,20 @@ def validate_outputs(
     if not isinstance(proposals, list):
         return ["proposals must be an array"]
     combined = report_text + "\n" + json.dumps(payload, ensure_ascii=False)
-    if all(str(run.get("outcome_status") or "unmeasured") == "unmeasured" for run in evidence.get("runs") or []):
-        if re.search(r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", combined, re.IGNORECASE):
-            errors.append("unmeasured business value was incorrectly stated as zero")
+    if all(str(run.get("outcome_status") or "unmeasured") == "unmeasured" for run in evidence.get("runs") or []) and re.search(
+        r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", combined, re.IGNORECASE
+    ):
+        errors.append("unmeasured business value was incorrectly stated as zero")
     if evidence.get("runs") and all(
         str(run.get("cost_status") or "unknown").lower()
         not in {"actual", "confirmed", "provider_reported", "billed"}
         for run in evidence.get("runs") or []
+    ) and re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.IGNORECASE):
+        errors.append("unknown model cost was incorrectly stated as zero")
+    if any(int(run.get("result_delivered") or 0) == 1 for run in evidence.get("runs") or []) and any(
+        phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")
     ):
-        if re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.IGNORECASE):
-            errors.append("unknown model cost was incorrectly stated as zero")
-    if any(int(run.get("result_delivered") or 0) == 1 for run in evidence.get("runs") or []):
-        if any(phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")):
-            errors.append("delivered technical results were incorrectly described as not reaching the user")
+        errors.append("delivered technical results were incorrectly described as not reaching the user")
     known_run_ids = {str(run.get("run_id") or "") for run in evidence.get("runs") or []}
     known_proposals = proposal_ids or set()
     for index, proposal in enumerate(proposals, 1):

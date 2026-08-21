@@ -394,9 +394,14 @@ def score_signal(record: dict[str, Any], query: dict[str, Any], config: dict[str
     if published:
         try:
             parsed = datetime.fromisoformat(str(published))
+            if parsed.tzinfo is None:
+                # Normalize naive timestamps to UTC before comparing against the
+                # aware ``current`` clock; a mixed comparison would raise
+                # TypeError and abort the whole radar run on one bad record.
+                parsed = parsed.replace(tzinfo=timezone.utc)
             age_days = max(0.0, (current - parsed).total_seconds() / 86400)
             freshness = 20.0 if age_days <= 7 else 15.0 if age_days <= 30 else 10.0 if age_days <= 180 else 4.0
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     channel = str(record.get("channel") or "web")
     source_score = {"research": 18.0, "web": 14.0, "jobs": 16.0, "social": 8.0}.get(channel, 10.0)

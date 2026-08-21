@@ -310,10 +310,12 @@ def _score_signal(item: dict, theme: dict) -> dict:
     pub = item.get("published_at", "")
     if pub:
         try:
-            age = max(0.0, (datetime.now(timezone.utc) -
-                           datetime.fromisoformat(pub)).total_seconds() / 86400)
+            parsed = datetime.fromisoformat(str(pub))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86400)
             freshness = 20.0 if age <= 7 else 15.0 if age <= 30 else 10.0 if age <= 180 else 4.0
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     source_score = 10.0  # agentkey web search — generic baseline
     total = max(0.0, min(100.0, relevance + commercial_score + freshness + source_score))

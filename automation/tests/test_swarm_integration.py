@@ -97,14 +97,25 @@ class SwarmIntegrationSmokeTests(unittest.TestCase):
     def test_runner_script_is_importable_syntax(self):
         """runner 脚本至少能通过语法检查 (py_compile)"""
         runner = Path(self.config["swarm_repo"]) / "scripts" / "swarm_runner.py"
+        import os
         import py_compile
+        import tempfile
 
+        # Compile into a writable temp location: the swarm repo is mounted
+        # read-only in this environment, and py_compile would otherwise try to
+        # write a .pyc into its __pycache__ and fail with OSError before ever
+        # checking syntax.
+        fd, cfile = tempfile.mkstemp(suffix=".pyc")
+        os.close(fd)
         try:
-            py_compile.compile(str(runner), doraise=True)
-            ok = True
-        except py_compile.PyCompileError as exc:
-            ok = False
-            self.fail(f"swarm_runner.py 语法错误: {exc}")
+            try:
+                py_compile.compile(str(runner), cfile=cfile, doraise=True)
+                ok = True
+            except py_compile.PyCompileError as exc:
+                ok = False
+                self.fail(f"swarm_runner.py 语法错误: {exc}")
+        finally:
+            os.unlink(cfile)
         self.assertTrue(ok)
 
 

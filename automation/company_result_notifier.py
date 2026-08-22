@@ -417,7 +417,7 @@ def _management_origin(config: dict[str, Any]) -> dict[str, str]:
     router_db = Path(str(config.get("router_db") or config.get("state_db") or ""))
     try:
         return latest_origin(router_db)
-    except (OSError, ValueError):
+    except (OSError, ValueError, sqlite3.Error):
         return {}
 
 
@@ -538,9 +538,11 @@ def _cron_recovery_payload(
                 from .operations_control import format_review_message
             except ImportError:
                 from operations_control import format_review_message
-            db = sqlite3.connect(sqlite_uri(operations_db, mode="ro"), uri=True)
-            db.row_factory = sqlite3.Row
+            row = None
+            db = None
             try:
+                db = sqlite3.connect(sqlite_uri(operations_db, mode="ro"), uri=True)
+                db.row_factory = sqlite3.Row
                 row = db.execute(
                     "SELECT delivery_platform,delivery_chat_id,delivery_thread_id,delivery_user_id "
                     "FROM tvcr_reviews WHERE review_id=?",
@@ -549,7 +551,8 @@ def _cron_recovery_payload(
             except sqlite3.Error:
                 row = None
             finally:
-                db.close()
+                if db is not None:
+                    db.close()
             origin = dict(fallback_origin)
             if row:
                 stored = {
@@ -563,12 +566,18 @@ def _cron_recovery_payload(
             limit = int((config.get("tvcr_delivery_chars_by_platform") or {}).get(
                 origin.get("platform", ""), config.get("tvcr_delivery_default_chars", 1000)
             ))
-            return (
-                origin,
-                format_review_message(operations_db, review_id, limit=limit),
-                "tvcr_cron",
-                {"review_id": review_id},
-            )
+            try:
+                return (
+                    origin,
+                    format_review_message(operations_db, review_id, limit=limit),
+                    "tvcr_cron",
+                    {"review_id": review_id},
+                )
+            except (OSError, sqlite3.Error, ValueError):
+                # A missing/unreadable operations DB (or a review that is not
+                # yet recorded there) must not abort the whole notifier tick:
+                # fall back to forwarding the raw saved cron output.
+                pass
     response = _extract_cron_response(output)
     return (
         fallback_origin,
@@ -597,8 +606,9 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
     db_path = _operations_db_path(config)
     if not review_id or db_path is None:
         return
-    db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
+    db = None
     try:
+        db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
         current = db.execute(
             "SELECT delivered,delivery_attempts FROM tvcr_reviews WHERE review_id=?",
             (review_id,),
@@ -606,7 +616,8 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
     except sqlite3.Error:
         current = None
     finally:
-        db.close()
+        if db is not None:
+            db.close()
     if current is None:
         return
 

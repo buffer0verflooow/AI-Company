@@ -67,6 +67,13 @@ def _int_config(config: dict[str, Any], key: str, default: int) -> int:
         return default
 
 
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _worker_model(config: dict[str, Any], retry_count: int) -> str:
     """Resolve the model slug for this attempt, degrading with each retry."""
     ladder = config.get("worker_model_ladder")
@@ -348,7 +355,7 @@ def discover_opportunities(
             }
             counts[_upsert_opportunity(db, item)] += 1
 
-        followup_hours = max(1, int(config.get("outcome_followup_after_hours", 24)))
+        followup_hours = max(1, _int_config(config, "outcome_followup_after_hours", 24))
         cutoff = current - timedelta(hours=followup_hours)
         rows = db.execute(
             """SELECT run_id,product_line,request_text,completed_at,artifacts_json
@@ -381,12 +388,12 @@ def discover_opportunities(
         market_db_value = str(config.get("market_signals_db") or "").strip()
         market_db_path = Path(market_db_value) if market_db_value else None
         if market_db_path and market_db_path.is_file():
-            pulse_statuses: dict[str, str] = {}
+            pulse_statuses: dict[str, str] | None = {}
             pulse_scores: dict[str, float] = {}
             market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
             market_db.row_factory = sqlite3.Row
             try:
-                minimum_market_score = float(config.get("market_min_pulse_score", 60))
+                minimum_market_score = _float_config(config, "market_min_pulse_score", 60)
                 all_pulse_rows = market_db.execute("SELECT * FROM market_pulses").fetchall()
                 pulse_statuses = {str(row["pulse_id"]): str(row["status"]) for row in all_pulse_rows}
                 pulse_scores = {str(row["pulse_id"]): float(row["score"] or 0) for row in all_pulse_rows}
@@ -396,6 +403,10 @@ def discover_opportunities(
                     (minimum_market_score,),
                 ).fetchall()
             except sqlite3.Error:
+                # A failed read must not be interpreted as "every pulse vanished":
+                # leave the status map unknown so stale open opportunities are not
+                # mass-dismissed by the comparison below.
+                pulse_statuses = None
                 pulses = []
             finally:
                 market_db.close()
@@ -403,14 +414,15 @@ def discover_opportunities(
                 """SELECT opportunity_id,source_ref FROM autonomy_opportunities
                    WHERE source_type='market_pulse' AND status IN ('open','waiting_approval')"""
             ).fetchall()
-            for opportunity in active_market_opportunities:
-                if pulse_statuses.get(str(opportunity["source_ref"])) != "new":
-                    now_text = utc_now()
-                    db.execute(
-                        """UPDATE autonomy_opportunities
-                           SET status='dismissed',completed_at=?,updated_at=? WHERE opportunity_id=?""",
-                        (now_text, now_text, opportunity["opportunity_id"]),
-                    )
+            if pulse_statuses is not None:
+                for opportunity in active_market_opportunities:
+                    if pulse_statuses.get(str(opportunity["source_ref"])) != "new":
+                        now_text = utc_now()
+                        db.execute(
+                            """UPDATE autonomy_opportunities
+                               SET status='dismissed',completed_at=?,updated_at=? WHERE opportunity_id=?""",
+                            (now_text, now_text, opportunity["opportunity_id"]),
+                        )
             evaluated_by_theme: dict[str, tuple[datetime, float]] = {}
             completed_market = db.execute(
                 """SELECT source_ref,evidence_json,completed_at FROM autonomy_opportunities
@@ -426,8 +438,8 @@ def discover_opportunities(
                 previous_score = pulse_scores.get(str(completed_opportunity["source_ref"]), 0.0)
                 if previous is None or completed_at > previous[0]:
                     evaluated_by_theme[theme] = (completed_at, previous_score)
-            cooldown_hours = max(0, int(config.get("market_theme_cooldown_hours", 168)))
-            material_delta = max(0.0, float(config.get("market_material_score_delta", 8)))
+            cooldown_hours = max(0, _int_config(config, "market_theme_cooldown_hours", 168))
+            material_delta = max(0.0, _float_config(config, "market_material_score_delta", 8))
             cooldown_pulses: list[str] = []
             for pulse in pulses:
                 previous = evaluated_by_theme.get(str(pulse["theme"]))
@@ -465,20 +477,26 @@ def discover_opportunities(
                 }
                 counts[_upsert_opportunity(db, item)] += 1
             if cooldown_pulses:
-                market_write = sqlite3.connect(market_db_path)
                 try:
-                    market_write.executemany(
-                        "UPDATE market_pulses SET status='dismissed',updated_at=? WHERE pulse_id=? AND status='new'",
-                        [(utc_now(), pulse_id) for pulse_id in cooldown_pulses],
-                    )
-                    market_write.commit()
-                finally:
-                    market_write.close()
+                    market_write = sqlite3.connect(market_db_path)
+                    try:
+                        market_write.executemany(
+                            "UPDATE market_pulses SET status='dismissed',updated_at=? WHERE pulse_id=? AND status='new'",
+                            [(utc_now(), pulse_id) for pulse_id in cooldown_pulses],
+                        )
+                        market_write.commit()
+                    finally:
+                        market_write.close()
+                except sqlite3.Error:
+                    # The UPDATE is idempotent (AND status='new') and the cooldown
+                    # is advisory; a transient write error must not abort the whole
+                    # discovery/cycle like the guarded read path above.
+                    pass
 
         for mission in config.get("standing_missions", []):
             if not isinstance(mission, dict) or not mission.get("enabled", True):
                 continue
-            cadence = max(1, int(mission.get("cadence_hours", 24)))
+            cadence = max(1, _int_config(mission, "cadence_hours", 24))
             bucket = _mission_bucket(current, cadence)
             mission_id = str(mission["id"])
             active = db.execute(
@@ -499,7 +517,7 @@ def discover_opportunities(
                 "action_kind": "internal_mission",
                 "risk_level": str(mission.get("risk_level", "low")),
                 "requires_approval": False,
-                "score": float(mission.get("base_score", 60)),
+                "score": _float_config(mission, "base_score", 60),
                 "evidence": {"mission": mission, "cadence_bucket": bucket},
             }
             counts[_upsert_opportunity(db, item)] += 1
@@ -517,12 +535,12 @@ def select_executable(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     allowed_risks = {str(value) for value in config.get("auto_execute_risk_levels", ["low"])}
-    minimum = float(config.get("minimum_score", 0))
+    minimum = _float_config(config, "minimum_score", 0)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    age_boost_per_day = max(0.0, float(config.get("queue_age_boost_per_day", 12)))
-    age_boost_cap = max(0.0, float(config.get("queue_age_boost_cap", 40)))
+    age_boost_per_day = max(0.0, _float_config(config, "queue_age_boost_per_day", 12))
+    age_boost_cap = max(0.0, _float_config(config, "queue_age_boost_cap", 40))
     db = connect(db_path)
     try:
         rows = db.execute(
@@ -544,9 +562,9 @@ def select_executable(
         if limit is not None:
             max_items = max(0, int(limit))
         else:
-            base = max(0, int(config.get("base_actions_per_cycle", 1)))
-            cap = max(base, int(config.get("max_actions_per_cycle", base)))
-            queue_per_action = max(1, int(config.get("queue_items_per_action", 2)))
+            base = max(0, _int_config(config, "base_actions_per_cycle", 1))
+            cap = max(base, _int_config(config, "max_actions_per_cycle", base))
+            queue_per_action = max(1, _int_config(config, "queue_items_per_action", 2))
             # Scale the cycle budget with executable inflow/backlog while retaining
             # a hard operator-controlled ceiling.
             scaled = base + max(0, len(eligible) - base) // queue_per_action
@@ -694,7 +712,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
     model = _worker_model(config, opportunity.get("retry_count", 0))
     cmd = [
         str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
-        "--source", "tool", "--max-turns", str(int(config.get("operator_max_turns", 30))),
+        "--source", "tool", "--max-turns", str(_int_config(config, "operator_max_turns", 30)),
         "--pass-session-id",
     ]
     if model:
@@ -706,7 +724,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
             env=worker_env,
             capture_output=True,
             text=True,
-            timeout=int(config.get("operator_timeout_seconds", 1200)),
+            timeout=_int_config(config, "operator_timeout_seconds", 1200),
             check=False,
         )
     except Exception as exc:
@@ -1040,7 +1058,7 @@ def run_cycle(
     discovery = discover_opportunities(db_path, config, now=now)
     selected = select_executable(db_path, config, now=now) if execute and config.get("enabled", True) else []
     executions: list[dict[str, Any]] = []
-    parallelism = min(len(selected), max(1, int(config.get("max_parallel_workers", 1))))
+    parallelism = min(len(selected), max(1, _int_config(config, "max_parallel_workers", 1)))
     if parallelism <= 1:
         for opportunity in selected:
             result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
@@ -1065,7 +1083,7 @@ def run_cycle(
                     **result,
                 }
         executions = [item for item in ordered if item is not None]
-    approvals = pending_approval_items(db_path, int(config.get("approval_digest_items", 3)))
+    approvals = pending_approval_items(db_path, _int_config(config, "approval_digest_items", 3))
     summary = {
         "cycle_id": cycle_id,
         "discovered_created": discovery["created"],
@@ -1075,7 +1093,7 @@ def run_cycle(
         "waiting_approval": approvals,
         "plan_only": not execute,
     }
-    message = format_cycle_message(summary, int(config.get("operator_delivery_chars", 1400)))
+    message = format_cycle_message(summary, _int_config(config, "operator_delivery_chars", 1400))
     origin = latest_origin(router_db)
     delivered = False
     delivery_error = ""

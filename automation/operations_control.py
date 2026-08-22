@@ -218,15 +218,6 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _sql_assignments(fields: dict[str, Any], allowed: set[str]) -> str:
-    """Return a parameterized ``SET`` clause for a trusted column allow-list."""
-
-    unknown = set(fields) - allowed
-    if unknown:
-        raise ValueError(f"unsupported SQL columns: {sorted(unknown)!r}")
-    return ",".join(f"{quote_identifier(key, allowed=allowed)}=?" for key in fields)
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(read_text_limited(path, max_bytes=2 * 1024 * 1024))
@@ -429,8 +420,8 @@ def _classify_security_findings(
                     return True
         return False
 
-    finding_match = finding_re.search(combined)
-    if finding_match and not _finding_is_noise(finding_match.span()):
+    finding_matches = list(finding_re.finditer(combined))
+    if any(not _finding_is_noise(match.span()) for match in finding_matches):
         return "actionable"
 
     # ── 4. Check for no-finding patterns ──────────────────────────────
@@ -444,24 +435,27 @@ def _classify_security_findings(
         return "no_business_value"
 
     # ── 5. Finding regex matched but only as noise? Check again ───────
-    #       If we got here, any finding_re match was inside a no-finding
+    #       If we got here, every finding_re match was inside a no-finding
     #       pattern.  Treat same as a no-finding-pattern hit.
-    if finding_match is not None:
+    if finding_matches:
         if len(combined) < min_finding_tokens:
             return "empty_output"
         return "no_business_value"
 
     # ── 6. Default: if the runner log shows completed tasks with no
     #       finding signal, count as no_business_value.
-    try:
-        for line in reversed(combined.strip().splitlines()):
+    #       One non-JSON line (partial trailing log write, pretty-printed
+    #       summary) must not abort the whole scan, so each line is parsed
+    #       independently instead of wrapping the loop in a single try.
+    for line in reversed(combined.strip().splitlines()):
+        try:
             obj = json.loads(line)
-            if isinstance(obj, dict) and "task_counts" in obj:
-                completed = obj["task_counts"].get("completed", 0)
-                if completed > 0:
-                    return "no_business_value"
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and "task_counts" in obj:
+            completed = obj["task_counts"].get("completed", 0)
+            if completed > 0:
+                return "no_business_value"
 
     return "empty_output"
 
@@ -680,10 +674,14 @@ def sync_operational_runs(
                 "created_at": now,
                 "updated_at": now,
             }
-            if values["input_tokens"] == 0 and values["output_tokens"] == 0 and output_bytes == 0:
+            if values["quality_status"] in {"unmeasured", "not_assessed"} and values["input_tokens"] == 0 and values["output_tokens"] == 0 and output_bytes == 0:
                 # Keep the execution outcome from the source of truth (for
                 # example ``failed``).  Empty output is a quality signal, not
-                # a replacement for the run's lifecycle status.
+                # a replacement for the run's lifecycle status.  Only apply it
+                # when no specific verdict (security log classification or QA
+                # report) was already derived: a run whose swarm log shows real
+                # findings must not be downgraded to empty_output just because
+                # its usage session was not found (tokens stay 0).
                 values["quality_status"] = "empty_output"
             # Join measured tokens to evidence-backed prices.  Never overwrites a
             # provider-confirmed cost; an unmatched model stays explicitly

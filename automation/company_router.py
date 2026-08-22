@@ -957,7 +957,9 @@ def classify_with_fallback(
     # 结果，置信度 0.84-0.99），不允许 LLM 兜底推翻。
     # 历史教训：hybrid 模式下 0.84 的 company 判定被 LLM 兜底改判为 article
     # （“先将公司文章产线整理好”→article 0.95），造成产线被误分发污染。
-    if decision.route != "main_agent":
+    # main_agent 判定用 action 标记（route 恒为 company/产品线，不存在
+    # route="main_agent"），此处按 action 判断，避免 LLM 兜底整段成为死代码。
+    if decision.action != "main_agent":
         return decision
     # main_agent 判定但置信度不低（≥0.6，即已识别为公司相关但缺执行指令，
     # 或管理/数据/流程问题），同样保持主 Agent 处理，不交给 LLM 改判。
@@ -1698,9 +1700,9 @@ def _pre_evaluate_task(
     session_id: str,
     config: dict[str, Any],
 ) -> str:
-    """Determines if a task should proceed, be skipped, or require approval BEFORE dispatch.
+    """Determines if a task should proceed or be skipped BEFORE dispatch.
 
-    Returns one of: 'proceed', 'skip', 'skip_low_confidence', 'needs_approval'
+    Returns one of: 'proceed', 'skip', 'skip_low_confidence'
     """
     pre_eval_enabled = bool(config.get("pre_evaluation_enabled", True))
     if not pre_eval_enabled:
@@ -1815,6 +1817,14 @@ def _circuit_breaker_state(
 
 
 def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, str]:
+    """Route one Hermes hook message.
+
+    Bypass gates run before the ``RouterState`` connection is opened, so a
+    message that should not be routed never touches the state DB.  Once routing
+    is needed, ``_handle_hook`` runs under a ``try/finally`` that closes the
+    connection on every return path (including exceptions) instead of relying
+    on ``__del__``/GC.
+    """
     if not config.get("enabled", True):
         return {}
 
@@ -1853,8 +1863,23 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
     decision_context = handle_tvcr_decision(message, config, actor=f"{platform}:{session_id}")
     if decision_context is not None:
         return {"context": decision_context}
-    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
+
     state = RouterState(config["state_db"])
+    try:
+        return _handle_hook(state, payload, config, message, session_id, platform)
+    finally:
+        state.close()
+
+
+def _handle_hook(
+    state: RouterState,
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    message: str,
+    session_id: str,
+    platform: str,
+) -> dict[str, str]:
+    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
     updates = refresh_session_runs(config, state, session_id)
     updates.extend(refresh_session_content_jobs(config, state, session_id))
 
@@ -1965,15 +1990,6 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
                     f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
                     "未生成 run_id，已交由公司主 Agent 继续处理。"
                 )
-            ],
-        )}
-    elif pre_eval == "needs_approval":
-        state.update(event_id, status="waiting_approval")
-        return {"context": build_context(
-            RouteDecision(**{**asdict(decision), "action": "approval_required",
-                           "reason": "pre-evaluation: task requires user review before execution"}),
-            status_updates=updates + [
-                "- [预评估] 此任务被标记为需要用户审批，已暂停派发。"
             ],
         )}
 

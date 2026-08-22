@@ -45,6 +45,72 @@ def build_prompt(payload: dict[str, Any]) -> str:
 """
 
 
+def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
+    """免费池执行引擎: opencode run --format json --model <free-model>。
+
+    模型对照表 (migration 020): tier='free' 的任务由 opencode 调用
+    ZenMux / OpenCode Zen 免费模型。输出解析:
+      - 文本事件拼接为 content
+      - step_finish 事件的 tokens.total 上报为 token_cost (尽力)
+    """
+    model = profile.get("resolved_model") or profile.get("model") or ""
+    if not model:
+        return {"success": False, "error": "free model missing resolved_model", "capture": False}
+    cmd = ["opencode", "run", "--format", "json", "--model", model, prompt]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=WORKSPACE,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "capture": False}
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": proc.stderr.strip() or f"opencode exited {proc.returncode}",
+            "capture": False,
+        }
+
+    content_parts: list[str] = []
+    token_cost = 0
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        etype = event.get("type", "")
+        if etype == "text":
+            part = event.get("part") or {}
+            if part.get("type") == "text":
+                content_parts.append(str(part.get("text") or ""))
+        elif etype == "step_finish":
+            tokens = event.get("tokens") or {}
+            token_cost = int(tokens.get("total") or 0)
+
+    content = "\n".join(content_parts).strip()
+    return {
+        "success": True,
+        "content": content,
+        "capture": bool(content),
+        "token_cost": token_cost,
+        "metadata": {
+            "executor": "opencode",
+            "model": model,
+            "tier": "free",
+            "router_bypass": True,
+        },
+    }
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -61,6 +127,15 @@ def main() -> int:
     # 蜂群 agent 执行环境门（审计 A2）：capture.py --force-capture 仅接受该标记，
     # 防止任意本机进程伪造 agent 身份强制入库
     env["SWARM_AGENT_EXEC"] = "1"
+
+    profile = payload.get("model_profile") or {}
+    # 模型对照表分流 (migration 020): tier='free' → opencode 免费池,
+    # 其余 → hermes chat (付费, 现状)。
+    if (profile.get("tier") == "free") or (profile.get("engine") == "opencode"):
+        result = _run_opencode(profile, prompt, env)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
     cmd = [
         "hermes", "chat", "-q", prompt, "-Q",
         "--source", "tool", "--max-turns", "40",

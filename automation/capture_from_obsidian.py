@@ -127,7 +127,10 @@ def find_candidate_notes(vault: Path) -> list[Path]:
             continue
         try:
             raw = read_text_limited(md_file, max_bytes=10 * 1024 * 1024, errors="replace")
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            # An unreadable note is skipped, but must not vanish silently: it
+            # may be a `swarm: capture` candidate the scan would otherwise miss.
+            print(f"WARNING: skipping unreadable note {md_file}: {exc}", file=sys.stderr)
             continue
         fm = parse_frontmatter(raw)
         if fm.get("swarm") == "capture" or str(fm.get("swarm", "")).lower() == "capture":

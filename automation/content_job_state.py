@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from contextlib import suppress
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -95,8 +95,13 @@ def log_event(job_dir: Path, state: str, event: str, detail: str) -> None:
     record = {"ts": utc_now(), "state": state, "event": event}
     if detail:
         record["detail"] = detail
-    with suppress(OSError):
+    try:
         locked_append_text(job_dir / "events.jsonl", json.dumps(record, ensure_ascii=False))
+    except OSError as exc:
+        # The durable state machine lives in lifecycle.json, so a failed audit
+        # append must not roll back the transition — but the lost audit record
+        # should still be visible instead of silently swallowed.
+        print(f"WARNING: could not append audit event to {job_dir / 'events.jsonl'}: {exc}", file=sys.stderr)
 
 
 def transition(job_dir: Path, target: str, detail: str = "") -> int:

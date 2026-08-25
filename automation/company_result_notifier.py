@@ -955,7 +955,10 @@ def process_once(
                 delivery_thread_id=origin.get("thread_id", ""),
                 delivery_user_id=origin.get("user_id", ""),
             )
-            ok, error = deliverer(config, origin, message)
+            try:
+                ok, error = deliverer(config, origin, message)
+            except Exception as exc:  # noqa: BLE001 -- sender plugins must not stop the tick
+                ok, error = False, f"{exc.__class__.__name__}: {exc}"
             if ok:
                 state.update(
                     event_id,
@@ -1099,7 +1102,10 @@ def process_once(
                 delivery_thread_id=origin.get("thread_id", ""),
                 delivery_user_id=origin.get("user_id", ""),
             )
-            ok, error = deliverer(config, origin, message)
+            try:
+                ok, error = deliverer(config, origin, message)
+            except Exception as exc:  # noqa: BLE001 -- sender plugins must not stop the tick
+                ok, error = False, f"{exc.__class__.__name__}: {exc}"
             if ok:
                 state.update(
                     event_id,
@@ -1211,7 +1217,10 @@ def process_once(
                 )
                 summary["terminal"] += 1
                 continue
-            ok, error = deliverer(config, origin, message)
+            try:
+                ok, error = deliverer(config, origin, message)
+            except Exception as exc:  # noqa: BLE001 -- sender plugins must not stop the tick
+                ok, error = False, f"{exc.__class__.__name__}: {exc}"
             if ok:
                 update_review(
                     Path(operations_db), review_id,

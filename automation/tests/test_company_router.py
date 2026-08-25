@@ -148,6 +148,17 @@ class ClassificationTests(unittest.TestCase):
         decision = classify_message("我们的竞品是谁？")
         self.assertNotEqual(decision.action, "dispatch_swarm")
 
+    def test_explicit_research_prefix_routes_to_research(self):
+        # /research 与 研究： 前缀必须走 research 产线 (dispatch_research 门),
+        # 不能落入 security (dispatch_security 门 + recon/analyze intent)。
+        for message in ("/research 调研一下竞品 X 的技术方案", "研究：竞品对比分析"):
+            with self.subTest(message=message):
+                decision = classify_message(message)
+                self.assertEqual(decision.route, "research")
+                self.assertEqual(decision.action, "dispatch_swarm")
+                self.assertEqual(decision.intent, "research")
+                self.assertEqual(decision.confidence, 0.99)
+
     def test_security_request_not_swallowed_by_research(self):
         # research 词表含"分析/评估"等, 不得抢走 security 判定
         decision = classify_message("扫描并分析 10.0.0.5 的漏洞")

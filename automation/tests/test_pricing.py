@@ -123,6 +123,36 @@ class PricingTests(unittest.TestCase):
         est = estimate_cost("deepseek/deepseek-v4-pro", {"input_tokens": 100}, table)
         self.assertEqual(est["cost_status"], "unpriced")
 
+    def test_non_million_token_unit_is_never_priced(self):
+        # A price quoted per a non-million-token unit must degrade to
+        # "unpriced" instead of being silently multiplied against million-token
+        # usage (which would misreport cost by orders of magnitude).
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "finance.db"
+            db = sqlite3.connect(db_path)
+            db.executescript(
+                """
+                CREATE TABLE model_prices (
+                    price_id TEXT PRIMARY KEY, provider TEXT, model TEXT, model_slug TEXT,
+                    endpoint TEXT, currency TEXT, unit TEXT DEFAULT 'millionTokens',
+                    input_price REAL, output_price REAL, cache_read_price REAL, cache_write_price REAL,
+                    source_url TEXT, evidence_path TEXT, evidence_sha256 TEXT, collected_at TEXT,
+                    status TEXT, notes TEXT
+                );
+                """
+            )
+            db.execute(
+                "INSERT INTO model_prices VALUES "
+                "('1','x','DeepSeek V4 Pro','deepseek-v4-pro','','USD','perThousandTokens',"
+                "1,2,NULL,NULL,'u','e','h','t','observed','')"
+            )
+            db.commit()
+            db.close()
+            table = load_price_table(db_path)
+            self.assertIsNone(match_price("deepseek-v4-pro", table))
+            est = estimate_cost("deepseek-v4-pro", {"input_tokens": 100}, table)
+            self.assertEqual(est["cost_status"], "unpriced")
+
     def test_finance_db_path_with_uri_metacharacters_is_loaded_literally(self):
         special = Path(self._tmp.name) / "finance?archive#1.db"
         _finance_db(special)

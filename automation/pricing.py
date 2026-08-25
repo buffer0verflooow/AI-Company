@@ -105,6 +105,12 @@ def load_price_table(finance_db: Path = DEFAULT_FINANCE_DB) -> dict[str, Any]:
             slug = _norm(info["model_slug"])
             if not slug:
                 continue
+            # Every price below is divided by PER_MILLION (1M tokens).  A row
+            # quoted per a different unit must never be silently priced against
+            # million-token usage; keep it out of the table so such a model
+            # degrades to "unpriced" instead of misreporting cost.
+            if info["unit"].strip().lower() != "milliontokens":
+                continue
             by_slug.setdefault(slug, []).append(info)
             by_base.setdefault(_base(slug), []).append(info)
     except sqlite3.Error:

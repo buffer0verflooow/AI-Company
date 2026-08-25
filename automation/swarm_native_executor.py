@@ -107,10 +107,14 @@ def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[
         return _payload_error(
             "SWARM_NATIVE_BACKEND=command requires SWARM_NATIVE_AGENT_COMMAND"
         )
-    argv = shlex.split(command)
     env, _dropped = scrub_environment()
     env["SWARM_AGENT_EXEC"] = "1"
     try:
+        # A malformed SWARM_NATIVE_AGENT_COMMAND (e.g. an unbalanced quote)
+        # makes shlex.split raise ValueError; it must return a clean JSON
+        # failure instead of a raw traceback with no stdout payload, so the
+        # executor's stdin/stdout contract holds on any configuration error.
+        argv = shlex.split(command)
         proc = subprocess.run(
             argv,
             input=json.dumps(payload, ensure_ascii=False),

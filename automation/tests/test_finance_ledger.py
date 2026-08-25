@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from automation.finance_ledger import (
+    _route_counts,
     add_actual,
     connect,
     report,
@@ -123,6 +124,17 @@ class SessionPricingSnapshotTests(unittest.TestCase):
             self.assertEqual(snap["estimated_cost_usd"], 0.0)
             self.assertEqual(snap["unpriced_sessions"], 3)    # s1, s2, s3
             self.assertAlmostEqual(snap["confirmed_cost_usd"], 2.5, places=6)
+
+    def test_route_counts_degrade_gracefully_without_route_events_table(self):
+        # An older/partial router DB without route_events must not crash the
+        # --sync cron; _route_counts returns zeroed counts like its sibling.
+        with tempfile.TemporaryDirectory() as td:
+            router = Path(td) / "router.db"
+            db = sqlite3.connect(router)
+            db.execute("CREATE TABLE unrelated (x TEXT)")
+            db.commit()
+            db.close()
+            self.assertEqual(_route_counts(router), {"security": 0, "article": 0, "video": 0})
 
 
 if __name__ == "__main__":

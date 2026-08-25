@@ -146,10 +146,14 @@ def compute_content_hash(content: str) -> str:
 def load_tracking() -> dict:
     if TRACKING_FILE.exists():
         try:
-            value = json.loads(TRACKING_FILE.read_text(encoding="utf-8"))
+            value = json.loads(read_text_limited(TRACKING_FILE, max_bytes=10 * 1024 * 1024))
             return value if isinstance(value, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (OSError, ValueError) as exc:
+            # The tracking file is the only dedup guard against re-capturing a
+            # note (the child always runs with --force-capture).  An unreadable
+            # file must be visible instead of silently treated as an empty
+            # history, which would re-capture every note into the KB.
+            print(f"WARNING: unreadable capture tracking file {TRACKING_FILE}: {exc}", file=sys.stderr)
     return {}
 
 
@@ -159,11 +163,16 @@ def save_tracking(tracking: dict) -> None:
         current: dict = {}
         if TRACKING_FILE.is_file():
             try:
-                value = json.loads(TRACKING_FILE.read_text(encoding="utf-8"))
+                value = json.loads(read_text_limited(TRACKING_FILE, max_bytes=10 * 1024 * 1024))
                 if isinstance(value, dict):
                     current = value
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, ValueError) as exc:
+                # Never atomically replace an unreadable tracking history: the
+                # failure is almost always corruption, and overwriting it with
+                # just this run's entries would silently re-capture every
+                # previously tracked note (duplicates in the KB).
+                print(f"WARNING: refusing to overwrite unreadable tracking file {TRACKING_FILE}: {exc}", file=sys.stderr)
+                return
         current.update(tracking)
         atomic_write_text(TRACKING_FILE, json.dumps(current, ensure_ascii=False, indent=2))
 
@@ -217,7 +226,7 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
 
     cmd = [
         sys.executable, "-c", CAPTURE_BOOTSTRAP, str(CAPTURE_PY), str(SWARM_DB),
-        agent, source, tags or "obsidian", intent, title,
+        agent, source, tags, intent, title,
     ]
 
     try:

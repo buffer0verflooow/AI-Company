@@ -73,6 +73,33 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _derive_initial_state(job_dir: Path) -> str:
+    """Derive the lifecycle state for a job that has no lifecycle.json yet.
+
+    The executor only writes status.json/events.jsonl/progress.json, so every
+    job created after the state machine shipped starts without lifecycle.json.
+    Without this derivation the machine would pin such jobs to "pending",
+    where the only allowed transition is "terminated" and the documented
+    human-in-the-loop flow (review → published/archived) is unreachable.
+    The mapping mirrors backfill_job_states.py so old and new jobs agree.
+    """
+    status_path = job_dir / "status.json"
+    if status_path.is_file():
+        try:
+            status = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+            value = str(status.get("status") or "").strip().lower()
+        except (OSError, ValueError):
+            value = ""
+        return {
+            "completed": "review",        # worker finished, awaiting human
+            "needs_approval": "review",
+            "failed": "terminated",       # matches backfill_job_states.py
+            "running": "running",
+            "qa": "qa",
+        }.get(value, "pending")
+    return "pending"
+
+
 def read_lifecycle(job_dir: Path) -> dict[str, Any]:
     path = job_dir / "lifecycle.json"
     try:
@@ -81,7 +108,7 @@ def read_lifecycle(job_dir: Path) -> dict[str, Any]:
             return data
     except (OSError, ValueError):
         pass
-    return {"state": "pending", "history": []}
+    return {"state": _derive_initial_state(job_dir), "history": []}
 
 
 def write_lifecycle(job_dir: Path, data: dict[str, Any]) -> None:

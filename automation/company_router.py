@@ -682,8 +682,8 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
 
     explicit = ""
     for prefix, route in (
-        ("/research", "security"), ("/security", "security"),
-        ("研究：", "security"), ("安全：", "security"),
+        ("/research", "research"), ("/security", "security"),
+        ("研究：", "research"), ("安全：", "security"),
         ("/article", "article"), ("文章：", "article"),
         ("/video", "video"), ("视频：", "video"),
         ("/company", "company"), ("公司：", "company"),
@@ -843,6 +843,7 @@ _LLM_FALLBACK_PREFIX = {
     "article": "/article ",
     "video": "/video ",
     "company": "/company ",
+    "research": "/research ",
 }
 _LLM_FALLBACK_JSON_RE = re.compile(r"\{[^{}]*\"route\"[^{}]*\}", re.DOTALL)
 

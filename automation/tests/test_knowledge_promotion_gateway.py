@@ -11,6 +11,7 @@ from automation.knowledge_promotion_gateway import (
     connect_gate,
     list_candidates,
     promote,
+    sanitize_preview,
     scan,
 )
 
@@ -175,6 +176,14 @@ class KnowledgePromotionTests(unittest.TestCase):
             text = promote(gate, candidate["candidate_id"], wiki).read_text(encoding="utf-8")
             self.assertNotIn("\nstatus: hacked\n", text)
             self.assertIn('approved_by: "reviewer\\nstatus: hacked"', text)
+
+    def test_sanitize_preview_redacts_internal_endpoints(self):
+        # sensitivity_hits flags internal endpoints as a must-redact class, so
+        # the sanitized preview must not retain them verbatim.
+        preview = sanitize_preview("https://example.com/api/v1/admin/users?token=abc123")
+        self.assertNotIn("/api/v1/admin/users", preview)
+        self.assertIn("[REDACTED_ENDPOINT]", preview)
+        self.assertIn("[REDACTED_CREDENTIAL]", preview)
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ def fetch_top_entries(db_path: Path) -> list[dict]:
             FROM knowledge_entries
             WHERE level >= 3 AND status = 'active'
             ORDER BY level DESC, created_at DESC
-            LIMIT 300
+            LIMIT 3000
             """,
         ).fetchall()
     finally:

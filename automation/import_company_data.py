@@ -283,6 +283,7 @@ def _extract_xls_exports(archive: zipfile.ZipFile, destination: Path) -> list[Pa
 
     exports: list[Path] = []
     extracted_total = 0
+    seen_members: set[str] = set()
     for info in infos:
         name = info.filename
         member = PurePosixPath(name)
@@ -309,6 +310,11 @@ def _extract_xls_exports(archive: zipfile.ZipFile, destination: Path) -> list[Pa
             raise ValueError(f"suspicious compression ratio for archive member: {name!r}")
         if len(member.parts) != 1 or member.suffix.lower() != ".xls":
             continue
+        # Two members sharing a name would collide in the destination dir and
+        # abort the whole import with a raw FileExistsError; reject cleanly.
+        if member.name in seen_members:
+            raise ValueError(f"duplicate archive member: {name!r}")
+        seen_members.add(member.name)
 
         target = destination / member.name
         written = 0

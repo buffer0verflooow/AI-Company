@@ -311,6 +311,11 @@ def _route_counts(path: Path) -> dict[str, int]:
             if route in counts:
                 counts[route] = int(count)
         return counts
+    except sqlite3.Error:
+        # An older/partial router DB without the route_events table must not
+        # abort the whole --sync cron job; degrade to zeroed counts like the
+        # sibling _hermes_cost_snapshot does for its schema mismatch.
+        return counts
     finally:
         db.close()
 

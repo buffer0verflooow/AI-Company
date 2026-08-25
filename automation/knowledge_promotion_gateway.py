@@ -177,6 +177,9 @@ def sanitize_preview(text: str, limit: int = 600) -> str:
     value = SECRET_RE.sub("[REDACTED_CREDENTIAL]", text)
     value = EMAIL_RE.sub("[REDACTED_EMAIL]", value)
     value = DOMAIN_RE.sub("[REDACTED_DOMAIN]", value)
+    # sensitivity_hits flags internal endpoints (/api/…, /admin/…) as a
+    # must-redact class; a "sanitized" preview must not retain them verbatim.
+    value = ENDPOINT_RE.sub("[REDACTED_ENDPOINT]", value)
     value = IP_RE.sub("[REDACTED_IP]", value)
     value = PATH_RE.sub("[REDACTED_PATH]", value)
     value = " ".join(value.split())

@@ -566,12 +566,15 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
                 lines.append(f"- [{title}]({it['url']}) ({src})")
         lines.append("")
 
-    # ---- KEV 漏洞情报 (独立区, 全量显示不过滤) ----
+    # ---- KEV 漏洞情报 (独立区, 按 CISA dateAdded 倒序, 展示最新 15 条) ----
+    # CISA's KEV feed is ordered ascending by dateAdded, so the feed order must
+    # not be trusted for display: without the sort the section would show the
+    # oldest entries and silently drop the newest (most actionable) ones.
     kev_items = by_track.get("kev", [])
     if kev_items:
         lines.append(f"## ⚠️ KEV 已利用漏洞 ({len(kev_items)} 条, 按 CISA dateAdded 倒序)")
         lines.append("")
-        for it in kev_items[:15]:
+        for it in sorted(kev_items, key=lambda item: str(item.get("published") or ""), reverse=True)[:15]:
             title = it["title"].replace("|", "｜")
             lines.append(f"- [{title}]({it['url']}) (CISA {it.get('published', '')[:10]})")
         lines.append("")

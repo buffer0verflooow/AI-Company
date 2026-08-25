@@ -954,7 +954,26 @@ def execute_opportunity(
     # a genuinely productive completion — never on an empty_output/retrying run.
     postprocess_ok = result["status"] in {"completed", "needs_approval"} and not failed
     if postprocess_ok and opportunity["action_kind"] == "kickoff_experiment":
-        update_experiment(db_path, opportunity["source_ref"], status="running")
+        try:
+            update_experiment(db_path, opportunity["source_ref"], status="running")
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # The worker finished; a concurrent stop/success/failure of the
+            # experiment (or a missing row) must not crash the whole cycle or
+            # misreport the completed run — record it like the market path below.
+            detail = f"experiment kickoff update failed: {exc}"
+            result["postprocess_error"] = detail
+            try:
+                post_db = connect(db_path)
+                try:
+                    post_db.execute(
+                        "UPDATE autonomy_runs SET error=?,updated_at=? WHERE run_id=?",
+                        (detail, utc_now(), run_id),
+                    )
+                    post_db.commit()
+                finally:
+                    post_db.close()
+            except (OSError, sqlite3.Error):
+                pass
     if postprocess_ok and opportunity["source_type"] == "market_pulse":
         try:
             try:

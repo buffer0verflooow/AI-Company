@@ -81,6 +81,28 @@ class SafeArchiveExtractionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self._extract(archive_path, destination)
 
+    def test_rejects_duplicate_member_names(self):
+        # Two members sharing a name would collide in the destination dir and
+        # previously aborted the whole import with a raw FileExistsError; it
+        # must be rejected with a clean ValueError instead.
+        import warnings
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive_path = root / "dup.zip"
+            # zipfile warns about the duplicate while writing the fixture; the
+            # duplicate is exactly what this test needs to exercise.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("a.xls", b"first")
+                    archive.writestr("a.xls", b"second")
+            destination = root / "out"
+            destination.mkdir()
+            with self.assertRaises(ValueError) as ctx:
+                self._extract(archive_path, destination)
+            self.assertIn("duplicate archive member", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

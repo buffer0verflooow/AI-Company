@@ -14,6 +14,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -60,6 +61,27 @@ TRACKING_QUERY_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"}
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a config value to int, falling back on malformed values.
+
+    The radar config is hand-edited JSON; a single non-numeric value must
+    not crash the whole radar cycle or the pulse builder.
+    """
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a config value to float, falling back on malformed values."""
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -212,8 +234,8 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(ANYSEARCH_ENDPOINT, data=payload, headers=headers, method="POST")
     opener = urllib.request.build_opener(_NoRedirect())
-    timeout = min(120, max(1, int(config.get("timeout_seconds", 30))))
-    max_bytes = min(10 * 1024 * 1024, max(4096, int(config.get("max_response_bytes", 2_000_000))))
+    timeout = min(120, max(1, _int_config(config, "timeout_seconds", 30)))
+    max_bytes = min(10 * 1024 * 1024, max(4096, _int_config(config, "max_response_bytes", 2_000_000)))
     # The radar is a daily cron whose single upstream dependency is this pinned
     # endpoint; a transient network blip or a 5xx/429 gateway response must not
     # fail the whole run.  Retry bounded times with small backoff, mirroring the
@@ -417,7 +439,7 @@ def score_signal(record: dict[str, Any], query: dict[str, Any], config: dict[str
 def signal_eligible(record: dict[str, Any], query: dict[str, Any], scores: dict[str, float], config: dict[str, Any]) -> bool:
     if record.get("content_risk") != "clean":
         return False
-    if scores["total"] < float(config.get("minimum_signal_score", 42)):
+    if scores["total"] < _float_config(config, "minimum_signal_score", 42):
         return False
     text = f"{record['title']} {record['snippet']}".lower()
     required_any = [str(term).lower() for term in query.get("required_any") or []]
@@ -497,8 +519,8 @@ def build_pulses(
     for signal in signals:
         if signal.get("eligible_for_pulse"):
             grouped[signal["theme"]].append(signal)
-    minimum_sources = max(2, int(config.get("minimum_independent_sources", 2)))
-    minimum_average = float(config.get("minimum_average_signal_score", 45))
+    minimum_sources = max(2, _int_config(config, "minimum_independent_sources", 2))
+    minimum_average = _float_config(config, "minimum_average_signal_score", 45)
     now = utc_now()
     pulses: list[dict[str, Any]] = []
     for theme, items in grouped.items():
@@ -601,7 +623,7 @@ def run_radar(
     configured_queries = config.get("queries") or []
     validate_queries(configured_queries)
     queries = [dict(item) for item in configured_queries if item.get("enabled", True)]
-    max_queries = min(50, max(1, int(config.get("max_queries_per_cycle", 10))))
+    max_queries = min(50, max(1, _int_config(config, "max_queries_per_cycle", 10)))
     queries = queries[:max_queries]
     run_id = f"MKT-RUN-{uuid.uuid4().hex[:12]}"
     run_root = Path(config.get("run_root") or DEFAULT_RUN_ROOT)
@@ -630,7 +652,7 @@ def run_radar(
     raw_sections: list[str] = []
     error = ""
     try:
-        batch_size = min(5, max(1, int(config.get("batch_size", 5))))
+        batch_size = min(5, max(1, _int_config(config, "batch_size", 5)))
         for batch_no, batch in enumerate(_chunks(queries, batch_size), 1):
             response = fetcher("batch_search", {"queries": [_api_query(item) for item in batch]}, config)
             raw_sections.append(f"<!-- batch {batch_no} -->\n{response}")

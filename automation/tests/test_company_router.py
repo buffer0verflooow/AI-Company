@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from automation.company_router import (
     RouterState,
+    _float_config,
+    _int_config,
     build_context,
     classify_message,
     classify_with_fallback,
@@ -738,6 +740,39 @@ class LowConfidenceFallbackTests(unittest.TestCase):
         )
         self.assertEqual(decision.action, "main_agent")
         self.assertEqual(called, [])
+
+
+class ConfigCoercionTests(unittest.TestCase):
+    """Malformed hand-edited config values must not crash router/notifier ticks."""
+
+    def test_int_config_defaults_on_missing(self):
+        self.assertEqual(_int_config({}, "missing", 7), 7)
+
+    def test_int_config_accepts_valid_values(self):
+        self.assertEqual(_int_config({"max_runs": "3"}, "max_runs", 7), 3)
+        self.assertEqual(_int_config({"max_runs": 4}, "max_runs", 7), 4)
+
+    def test_int_config_falls_back_on_malformed_values(self):
+        for bad in ("abc", None, [1, 2], {"a": 1}, "3.5", float("inf")):
+            self.assertEqual(_int_config({"max_runs": bad}, "max_runs", 7), 7, bad)
+
+    def test_float_config_defaults_on_missing(self):
+        self.assertEqual(_float_config({}, "missing", 0.5), 0.5)
+
+    def test_float_config_accepts_valid_values(self):
+        self.assertEqual(_float_config({"skip": "0.86"}, "skip", 0.5), 0.86)
+
+    def test_float_config_falls_back_on_malformed_values(self):
+        for bad in ("abc", None, [1, 2], {"a": 1}, "nan", float("inf"), float("-inf")):
+            self.assertEqual(_float_config({"skip": bad}, "skip", 0.5), 0.5, bad)
+
+    def test_hybrid_skip_threshold_survives_malformed_config(self):
+        """A non-numeric threshold must degrade to the default instead of raising."""
+        decision = classify_with_fallback(
+            "查看公司当前项目状态", {"router_mode": "hybrid", "hybrid_high_confidence_skip": "oops"},
+            fallback=lambda msg, cfg: {"route": "company", "confidence": 0.99},
+        )
+        self.assertEqual(decision.action, "main_agent")
 
 
 class HybridRoutingTests(unittest.TestCase):

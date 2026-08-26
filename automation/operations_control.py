@@ -233,6 +233,19 @@ def _safe_counter(value: Any) -> int:
         return 0
 
 
+def _safe_float(value: Any) -> float:
+    """Coerce a DB/JSON amount to float, degrading to 0.0 on malformed values.
+
+    Rows come from the router/finance/hermes DBs written by sibling processes;
+    a corrupt numeric cell must not crash the sync/rollup cron.
+    """
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 def _artifact_paths(job_dir: Path, raw_artifacts: Any) -> list[Path]:
     """Return regular, non-symlink artifacts contained by one job directory."""
 
@@ -647,8 +660,8 @@ def sync_operational_runs(
                 "status": str(status.get("status") or router.get("status") or "unknown"),
                 "origin_platform": str(router.get("delivery_platform") or request.get("platform") or router.get("platform") or ""),
                 "origin_chat_id": str(router.get("delivery_chat_id") or ""),
-                "result_delivered": int(router.get("result_delivered") or 0),
-                "proactive_delivered": int(router.get("proactive_delivered") or 0),
+                "result_delivered": _safe_counter(router.get("result_delivered")),
+                "proactive_delivered": _safe_counter(router.get("proactive_delivered")),
                 "started_at": started_at,
                 "completed_at": completed_at,
                 "duration_seconds": duration,
@@ -782,7 +795,7 @@ def cost_report(db_path: Path = DEFAULT_DB) -> dict[str, Any]:
         bucket = by_model.setdefault(model, {"runs": 0, "estimated_cost_usd": 0.0, "cost_status": set()})
         bucket["runs"] += 1
         if run.get("estimated_cost_usd") is not None:
-            bucket["estimated_cost_usd"] += float(run["estimated_cost_usd"])
+            bucket["estimated_cost_usd"] += _safe_float(run["estimated_cost_usd"])
         bucket["cost_status"].add(str(run.get("cost_status") or "unknown"))
     for bucket in by_model.values():
         bucket["estimated_cost_usd"] = round(bucket["estimated_cost_usd"], 6)
@@ -991,7 +1004,7 @@ def backfill_outcomes(
                 if matches_run:
                     fields = {
                         "outcome_status": "measured", "accepted": 1, "published": 1,
-                        "revenue_amount": float(tx.get("amount") or 0),
+                        "revenue_amount": _safe_float(tx.get("amount")),
                         "revenue_currency": str(tx.get("currency") or ""),
                         "outcome_notes": f"auto-backfill: finance revenue tx {tx.get('transaction_id')}",
                     }

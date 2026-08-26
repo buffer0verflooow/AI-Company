@@ -8,7 +8,12 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from automation.company_daily_digest import build_digest, run
+from automation.company_daily_digest import (
+    _safe_counter,
+    _safe_float,
+    build_digest,
+    run,
+)
 from automation.company_router import RouterState, classify_message
 from automation.notification_outbox import pending
 from automation.operations_control import (
@@ -18,6 +23,25 @@ from automation.operations_control import (
     import_proposals,
     utc_now,
 )
+
+
+class SafeValueCoercionTests(unittest.TestCase):
+    """Malformed DB rows must not crash the read-only digest cron."""
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter(""), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
+
+    def test_safe_float_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_float(None), 0.0)
+        self.assertEqual(_safe_float(""), 0.0)
+        self.assertEqual(_safe_float("2.5"), 2.5)
+        for bad in ("abc", [1], {"a": 1}, "nan", float("inf"), float("-inf")):
+            self.assertEqual(_safe_float(bad), 0.0, bad)
 
 
 class CompanyDailyDigestTests(unittest.TestCase):

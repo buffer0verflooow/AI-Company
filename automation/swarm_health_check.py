@@ -70,7 +70,7 @@ def main() -> int:
                    FROM swarm_runs WHERE status='running' ORDER BY created_at DESC LIMIT 20"""
             ).fetchall()
             stale = 0
-            for rid, name, status, created in rows:
+            for rid, _name, _status, created in rows:
                 try:
                     # swarm_* timestamps are written by SQLite ``datetime('now')``,
                     # which is UTC.  Compare against UTC now instead of naive

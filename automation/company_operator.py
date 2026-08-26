@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 import subprocess
 import time
@@ -63,15 +64,16 @@ DEFAULT_AUTO_RETRY_MAX = 1
 def _int_config(config: dict[str, Any], key: str, default: int) -> int:
     try:
         return int(config.get(key, default))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
 def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     try:
-        return float(config.get(key, default))
-    except (TypeError, ValueError):
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
         return default
+    return value if math.isfinite(value) else default
 
 
 def _worker_model(config: dict[str, Any], retry_count: int) -> str:
@@ -396,7 +398,7 @@ def discover_opportunities(
                 minimum_market_score = _float_config(config, "market_min_pulse_score", 60)
                 all_pulse_rows = market_db.execute("SELECT * FROM market_pulses").fetchall()
                 pulse_statuses = {str(row["pulse_id"]): str(row["status"]) for row in all_pulse_rows}
-                pulse_scores = {str(row["pulse_id"]): float(row["score"] or 0) for row in all_pulse_rows}
+                pulse_scores = {str(row["pulse_id"]): _safe_float(row["score"]) for row in all_pulse_rows}
                 pulses = market_db.execute(
                     """SELECT * FROM market_pulses
                        WHERE status='new' AND score>=? ORDER BY score DESC,created_at ASC""",
@@ -551,12 +553,12 @@ def select_executable(
         ).fetchall()
         eligible: list[dict[str, Any]] = []
         for row in rows:
-            if row["risk_level"] not in allowed_risks and not int(row["approval_granted"] or 0):
+            if row["risk_level"] not in allowed_risks and not _safe_counter(row["approval_granted"]):
                 continue
             item = dict(row)
             created = _parse_dt(str(row["created_at"])) or current
             age_days = max(0.0, (current - created).total_seconds() / 86400)
-            item["effective_score"] = float(row["score"] or 0) + min(age_boost_cap, age_days * age_boost_per_day)
+            item["effective_score"] = _safe_float(row["score"]) + min(age_boost_cap, age_days * age_boost_per_day)
             eligible.append(item)
         eligible.sort(key=lambda item: (-item["effective_score"], item["created_at"]))
         if limit is not None:
@@ -810,6 +812,19 @@ def _safe_counter(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _safe_float(value: Any) -> float:
+    """Coerce a DB/JSON score to float, degrading to 0.0 on malformed values.
+
+    Opportunity rows are written by other subsystems (market radar, swarm
+    workers); a corrupt score must not crash the whole operator cycle.
+    """
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _record_operational_run(
@@ -1139,29 +1154,28 @@ def run_cycle(
                 )
             except OSError as exc:
                 delivery_error = f"terminal fallback write failed: {exc}"
-        else:
-            if deliverer is None and config.get("notification_outbox_enabled", True):
+        elif deliverer is None and config.get("notification_outbox_enabled", True):
+            try:
                 try:
-                    try:
-                        from .notification_outbox import enqueue as enqueue_outbox
-                    except ImportError:
-                        from notification_outbox import enqueue as enqueue_outbox
-                    enqueue_outbox(
-                        db_path,
-                        dedup_key=f"autonomy-cycle:{cycle_id}",
-                        kind="autonomy_cycle",
-                        source_id=cycle_id,
-                        origin=origin,
-                        message=message,
-                        metadata={"cycle_id": cycle_id},
-                    )
-                    delivered = False
-                    delivery_error = "queued in notification outbox"
-                except (OSError, sqlite3.Error, ValueError) as exc:
-                    delivered = False
-                    delivery_error = f"notification outbox enqueue failed: {exc}"
-            else:
-                delivered, delivery_error = chosen_deliverer(config, origin, message)
+                    from .notification_outbox import enqueue as enqueue_outbox
+                except ImportError:
+                    from notification_outbox import enqueue as enqueue_outbox
+                enqueue_outbox(
+                    db_path,
+                    dedup_key=f"autonomy-cycle:{cycle_id}",
+                    kind="autonomy_cycle",
+                    source_id=cycle_id,
+                    origin=origin,
+                    message=message,
+                    metadata={"cycle_id": cycle_id},
+                )
+                delivered = False
+                delivery_error = "queued in notification outbox"
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                delivered = False
+                delivery_error = f"notification outbox enqueue failed: {exc}"
+        else:
+            delivered, delivery_error = chosen_deliverer(config, origin, message)
     elif config.get("proactive_delivery", True):
         delivery_error = "no management delivery target"
     completed = utc_now()

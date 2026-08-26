@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,6 +56,27 @@ def _db_rows(path: Path, query: str, params: tuple[Any, ...] = ()) -> list[sqlit
         return []
     finally:
         db.close()
+
+
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    The digest is a read-only cron that must keep reporting even when a
+    sibling subsystem wrote a corrupt row.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    """Coerce a DB/JSON score to float, degrading to 0.0 on malformed values."""
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _operator_status(config: dict[str, Any]) -> str:
@@ -152,7 +174,7 @@ def _market_summary(market_db: Path) -> list[str]:
         return [f"市场雷达：{run_id} 已完成，无合格脉冲"]
     lines = [f"市场雷达：{run_id}，Top {len(pulses)}"]
     lines.extend(
-        f"- {row['theme_title']}（{float(row['score'] or 0):.1f} 分，{int(row['independent_sources'] or 0)} 个独立来源）"
+        f"- {row['theme_title']}（{_safe_float(row['score']):.1f} 分，{_safe_counter(row['independent_sources'])} 个独立来源）"
         for row in pulses
     )
     return lines

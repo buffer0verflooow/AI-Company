@@ -11,6 +11,8 @@ from unittest.mock import patch
 from automation.company_result_notifier import (
     _find_cron_output,
     _fit_delivery_message,
+    _float_config,
+    _int_config,
     list_terminal_deliveries,
     process_once,
     recover_failed_cron_deliveries,
@@ -53,6 +55,22 @@ class OriginResolutionTests(unittest.TestCase):
                 "thread_id": "",
                 "user_id": "user-1",
             })
+
+
+class NotifierConfigCoercionTests(unittest.TestCase):
+    """Malformed hand-edited config values must not crash the delivery tick."""
+
+    def test_int_config_defaults_and_fallbacks(self):
+        self.assertEqual(_int_config({}, "missing", 7), 7)
+        self.assertEqual(_int_config({"n": "3"}, "n", 7), 3)
+        for bad in ("abc", None, [1], "2.5", float("inf")):
+            self.assertEqual(_int_config({"n": bad}, "n", 7), 7, bad)
+
+    def test_float_config_defaults_and_fallbacks(self):
+        self.assertEqual(_float_config({}, "missing", 0.5), 0.5)
+        self.assertEqual(_float_config({"t": "1.5"}, "t", 0.5), 1.5)
+        for bad in ("abc", None, "nan", float("inf"), {"a": 1}):
+            self.assertEqual(_float_config({"t": bad}, "t", 0.5), 0.5, bad)
 
 
 class NotifierTests(unittest.TestCase):

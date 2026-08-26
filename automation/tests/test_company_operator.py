@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from automation.company_operator import (
+    _safe_counter,
+    _safe_float,
     _worker_model,
     build_worker_prompt,
     connect,
@@ -694,6 +696,20 @@ class CompanyOperatorTests(unittest.TestCase):
         self.assertEqual(_worker_model(config, 5), "flash")
         # An empty ladder disables model override entirely.
         self.assertEqual(_worker_model({"worker_model_ladder": []}, 0), "")
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(-3), 0)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
+
+    def test_safe_float_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_float(None), 0.0)
+        self.assertEqual(_safe_float("2.5"), 2.5)
+        self.assertEqual(_safe_float(-1.0), -1.0)
+        for bad in ("abc", [1], {"a": 1}, "nan", float("inf"), float("-inf")):
+            self.assertEqual(_safe_float(bad), 0.0, bad)
 
 
 if __name__ == "__main__":

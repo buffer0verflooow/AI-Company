@@ -12,6 +12,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -42,6 +43,27 @@ MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a config value to int, falling back on malformed values.
+
+    The probe reads the market-radar config; a single non-numeric value must
+    not crash the whole probe cycle.
+    """
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a config value to float, falling back on malformed values."""
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -381,13 +403,13 @@ def run_probe(config: dict) -> dict:
         db.close()
 
     searches = _topic_searches(themes)
-    max_searches = min(50, max(1, int(config.get("agentkey_max_queries", config.get("max_queries_per_cycle", 10)))))
+    max_searches = min(50, max(1, _int_config(config, "agentkey_max_queries", _int_config(config, "max_queries_per_cycle", 10))))
     searches = searches[:max_searches]
     all_results: list[dict] = []
     errors: list[str] = []
     report_path = run_dir / "agentkey-probe-report.md"
     try:
-        workers = max(1, min(len(searches), max(1, int(config.get("agentkey_max_workers", MAX_WORKERS)))))
+        workers = max(1, min(len(searches), max(1, _int_config(config, "agentkey_max_workers", MAX_WORKERS))))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agentkey-radar") as pool:
             futures = {
                 pool.submit(_run_one_query, search["theme_title"], search["query"], run_dir): (index, search)

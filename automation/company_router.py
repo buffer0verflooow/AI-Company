@@ -15,6 +15,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -328,6 +329,27 @@ class RouteDecision:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a config value to int, falling back on malformed values.
+
+    The router config is hand-edited JSON; a single non-numeric value must
+    not crash the whole pre_llm_call hook or a cron tick.
+    """
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a config value to float, falling back on malformed values."""
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -893,7 +915,7 @@ def _llm_fallback_classify(message: str, config: dict[str, Any], *, timeout: int
             env=env,
             capture_output=True,
             text=True,
-            timeout=int(config.get("llm_fallback_timeout_seconds", timeout)),
+            timeout=_int_config(config, "llm_fallback_timeout_seconds", timeout),
             check=False,
         )
     except Exception:
@@ -968,9 +990,9 @@ def classify_with_fallback(
         return decision
 
     if router_mode == "hybrid":
-        skip_threshold = float(config.get("hybrid_high_confidence_skip", 0.86))
+        skip_threshold = _float_config(config, "hybrid_high_confidence_skip", 0.86)
     else:
-        skip_threshold = float(config.get("llm_fallback_confidence", 0.5))
+        skip_threshold = _float_config(config, "llm_fallback_confidence", 0.5)
     if decision.confidence >= skip_threshold:
         return decision
 
@@ -987,7 +1009,7 @@ def classify_with_fallback(
     except (TypeError, ValueError):
         return decision
     prefix = _LLM_FALLBACK_PREFIX.get(route)
-    threshold = float(config.get("llm_fallback_confidence", 0.5))
+    threshold = _float_config(config, "llm_fallback_confidence", 0.5)
     if not prefix or llm_confidence < threshold:
         return decision
 
@@ -1485,7 +1507,7 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
         status = result.get("status", "unknown")
         state.update(row["route_event_id"], status=status)
         if status == "completed" and not row["result_delivered"]:
-            limit = int(config.get("result_context_chars", 6000))
+            limit = _int_config(config, "result_context_chars", 6000)
             content = select_company_result(result)[:limit]
             updates.append(f"- 蜂群 {run_id[:8]} 已完成。结果：\n{content}")
             state.update(row["route_event_id"], result_delivered=1)
@@ -1756,8 +1778,8 @@ def _pre_evaluate_task(
 
     # Skill review: check for actual conversation content to review
     if decision.action == "dispatch_company" and SKILL_REVIEW_MARKER in message.lower():
-        min_messages = int(config.get("pre_eval_skill_review_min_messages", PRE_EVAL_MIN_PRIOR_MESSAGES))
-        min_user = int(config.get("pre_eval_skill_review_min_user_messages", PRE_EVAL_MIN_PRIOR_USER_MESSAGES))
+        min_messages = _int_config(config, "pre_eval_skill_review_min_messages", PRE_EVAL_MIN_PRIOR_MESSAGES)
+        min_user = _int_config(config, "pre_eval_skill_review_min_user_messages", PRE_EVAL_MIN_PRIOR_USER_MESSAGES)
         hermes_db = Path(str(config.get("hermes_state_db", HERMES_STATE_DB)) or HERMES_STATE_DB)
         if not _session_has_meaningful_content(
             session_id,
@@ -1795,13 +1817,13 @@ def _circuit_breaker_state(
     """
     if not config.get("circuit_breaker_enabled", True):
         return None
-    threshold = int(config.get("circuit_breaker_threshold", 3))
+    threshold = _int_config(config, "circuit_breaker_threshold", 3)
     if threshold <= 0:
         return None
     operations_db_value = str(config.get("operations_db") or "").strip()
     if not operations_db_value:
         return None
-    window_hours = int(config.get("circuit_breaker_window_hours", 24))
+    window_hours = _int_config(config, "circuit_breaker_window_hours", 24)
     product_line = _route_product_line(route)
     current = now or datetime.now(timezone.utc)
     try:
@@ -1914,7 +1936,7 @@ def _handle_hook(
     decision = classify_with_fallback(message, config, config.get("authorized_targets") or [])
     dedup_key = _build_dedup_key(session_id, targets, decision.intent)
     if decision.action == "dispatch_swarm" and not EXPLICIT_NEW_SWARM_RE.search(message):
-        dedup_minutes = int(config.get("swarm_dedup_window_minutes", 10))
+        dedup_minutes = _int_config(config, "swarm_dedup_window_minutes", 10)
         recent = state.recent_for_session(
             session_id,
             decision.action,
@@ -1935,7 +1957,7 @@ def _handle_hook(
 
     is_skill_review = decision.action == "dispatch_company" and SKILL_REVIEW_MARKER in message.lower()
     if is_skill_review:
-        cooldown_hours = int(config.get("content_job_skill_review_cooldown_hours", 4))
+        cooldown_hours = _int_config(config, "content_job_skill_review_cooldown_hours", 4)
         recent = state.recent_for_session(
             session_id,
             decision.action,
@@ -2030,7 +2052,7 @@ def _handle_hook(
             )
         else:
             active = [row for row in state.active_for_session(session_id) if row["status"] in {"submitted", "running"}]
-            if len(active) >= int(config.get("max_active_runs_per_session", 2)):
+            if len(active) >= _int_config(config, "max_active_runs_per_session", 2):
                 state.update(event_id, status="deferred", error="active run limit reached")
                 return {"context": build_context(
                     RouteDecision(**{**asdict(decision), "action": "main_agent", "reason": "active run limit reached"}),
@@ -2063,7 +2085,7 @@ def _handle_hook(
         if config.get(enabled_key, True):
             active = state.active_for_session(session_id, action=decision.action)
             running = [row for row in active if row["status"] in {"submitted", "running"}]
-            if len(running) >= int(config.get("max_active_content_jobs_per_session", 2)):
+            if len(running) >= _int_config(config, "max_active_content_jobs_per_session", 2):
                 state.update(event_id, status="deferred", error="active content job limit reached")
                 updates.append("- 已达到本会话内容产线并发上限，新任务暂未提交。")
             else:

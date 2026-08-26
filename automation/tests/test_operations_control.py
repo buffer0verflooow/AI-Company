@@ -10,6 +10,8 @@ from pathlib import Path
 from automation.company_router import RouterState, classify_message
 from automation.operations_control import (
     _apportion_shared_sessions,
+    _safe_counter,
+    _safe_float,
     apply_user_decision,
     auto_approve_proposals,
     backfill_outcomes,
@@ -28,6 +30,24 @@ from automation.operations_control import (
     update_experiment,
     utc_now,
 )
+
+
+class SafeValueCoercionTests(unittest.TestCase):
+    """Corrupt DB cells must not crash the sync/rollup cron."""
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(-2), 0)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
+
+    def test_safe_float_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_float(None), 0.0)
+        self.assertEqual(_safe_float("2.5"), 2.5)
+        self.assertEqual(_safe_float(-1.5), -1.5)
+        for bad in ("abc", [1], {"a": 1}, "nan", float("inf"), float("-inf")):
+            self.assertEqual(_safe_float(bad), 0.0, bad)
 
 
 class OperatingLedgerTests(unittest.TestCase):

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import sqlite3
 import sys
@@ -115,6 +116,27 @@ def _ensure_hermes_imports(config: dict[str, Any]) -> None:
     repo = str(config.get("hermes_repo") or "").strip()
     if repo and repo not in sys.path:
         sys.path.insert(0, repo)
+
+
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a config value to int, falling back on malformed values.
+
+    The notifier reads the same hand-edited router config as the hook; a
+    single non-numeric value must not crash the one-minute delivery tick.
+    """
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a config value to float, falling back on malformed values."""
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
@@ -240,7 +262,7 @@ def _mark_suspected_dead_if_stale(
     if alive or restarts < max_restarts:
         return False
     reference = str(row["last_heartbeat"] or row["created_at"] or "")
-    timeout = float(config.get("heartbeat_timeout_minutes", 15))
+    timeout = _float_config(config, "heartbeat_timeout_minutes", 15)
     if _age_minutes(reference) < timeout:
         return False
     state.update(
@@ -262,8 +284,8 @@ def _delivery_retry_ready(config: dict[str, Any], row: Any) -> bool:
             last_at = last_at.replace(tzinfo=timezone.utc)
     except ValueError:
         return True
-    base = max(1, int(config.get("delivery_retry_base_seconds", 60)))
-    maximum = max(base, int(config.get("delivery_retry_max_seconds", 900)))
+    base = max(1, _int_config(config, "delivery_retry_base_seconds", 60))
+    maximum = max(base, _int_config(config, "delivery_retry_max_seconds", 900))
     delay = min(maximum, base * (2 ** min(attempts - 1, 8)))
     return (datetime.now(timezone.utc) - last_at).total_seconds() >= delay
 
@@ -345,7 +367,7 @@ def _format_terminal_message(config: dict[str, Any], row: Any, result: dict[str,
     run_id = str(row["run_id"])
     status = str(result.get("status") or row["status"] or "unknown")
     if status == "completed":
-        limit = int(config.get("proactive_result_chars", 6000))
+        limit = _int_config(config, "proactive_result_chars", 6000)
         content = select_company_result(result)[:limit].strip() or "任务已完成，但未返回可展示的结果正文。"
         return f"Research 安全探索任务已完成\nRun: {run_id}\n\n{content}"
     detail = str(result.get("error") or result.get("summary") or "请检查公司运行日志。")
@@ -748,7 +770,7 @@ def process_outbox(
     fallback = _delivery_fallback_path(config)
     rows = pending_outbox(
         db_path,
-        limit=int(config.get("outbox_batch_size", 20)),
+        limit=_int_config(config, "outbox_batch_size", 20),
     )
     for row in rows:
         result["checked"] += 1
@@ -792,9 +814,9 @@ def process_outbox(
             db_path,
             notification_id,
             error,
-            max_attempts=int(config.get("outbox_max_attempts", 12)),
-            retry_base_seconds=int(config.get("delivery_retry_base_seconds", 60)),
-            retry_max_seconds=int(config.get("delivery_retry_max_seconds", 3600)),
+            max_attempts=_int_config(config, "outbox_max_attempts", 12),
+            retry_base_seconds=_int_config(config, "delivery_retry_base_seconds", 60),
+            retry_max_seconds=_int_config(config, "delivery_retry_max_seconds", 3600),
         )
         if updated.get("state") == "dead_letter":
             append_outbox_dead_letter(fallback, updated, reason=str(error or "delivery failed"))
@@ -856,7 +878,7 @@ def process_once(
 
     state = RouterState(config["state_db"])
     try:
-        rows = state.pending_notifications(int(config.get("max_delivery_attempts", 10)))
+        rows = state.pending_notifications(_int_config(config, "max_delivery_attempts", 10))
         for row in rows:
             summary["checked"] += 1
             event_id = str(row["route_event_id"])
@@ -874,9 +896,9 @@ def process_once(
                 summary["running"] += 1
                 alive = runner_is_alive(row["runner_pid"], run_id)
                 _beat_heartbeat(state, event_id, alive)
-                stale = _age_minutes(str(row["created_at"] or "")) >= float(config.get("stale_run_minutes", 15))
+                stale = _age_minutes(str(row["created_at"] or "")) >= _float_config(config, "stale_run_minutes", 15)
                 restarts = int(row["runner_restarts"] or 0)
-                max_restarts = int(config.get("max_runner_restarts", 2))
+                max_restarts = _int_config(config, "max_runner_restarts", 2)
                 if stale and not alive and restarts < max_restarts:
                     try:
                         raw_decision = json.loads(row["decision_json"])
@@ -905,7 +927,7 @@ def process_once(
             attempts = int(row["delivery_attempts"] or 0) + 1
             if not origin:
                 missing_target = "could not resolve original conversation"
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
                     terminal_error = _record_retry_exhaustion(
                         config,
                         kind="swarm",
@@ -941,7 +963,7 @@ def process_once(
                 )
                 state.update(
                     event_id,
-                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_attempts=_int_config(config, "max_delivery_attempts", 10),
                     delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
                     last_delivery_at=utc_now(),
                 )
@@ -973,32 +995,31 @@ def process_once(
                 else:
                     mirror(origin, message)
                 summary["delivered"] += 1
+            elif attempts >= _int_config(config, "max_delivery_attempts", 10):
+                terminal_error = _record_retry_exhaustion(
+                    config,
+                    kind="swarm",
+                    identifier=run_id,
+                    origin=origin,
+                    message=message,
+                    error=error,
+                )
+                state.update(
+                    event_id,
+                    delivery_attempts=attempts,
+                    delivery_error=terminal_error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["terminal"] += 1
             else:
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
-                    terminal_error = _record_retry_exhaustion(
-                        config,
-                        kind="swarm",
-                        identifier=run_id,
-                        origin=origin,
-                        message=message,
-                        error=error,
-                    )
-                    state.update(
-                        event_id,
-                        delivery_attempts=attempts,
-                        delivery_error=terminal_error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["terminal"] += 1
-                else:
-                    state.update(
-                        event_id,
-                        delivery_attempts=attempts,
-                        delivery_error=error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["failed"] += 1
-        content_rows = state.pending_content_notifications(int(config.get("max_delivery_attempts", 10)))
+                state.update(
+                    event_id,
+                    delivery_attempts=attempts,
+                    delivery_error=error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["failed"] += 1
+        content_rows = state.pending_content_notifications(_int_config(config, "max_delivery_attempts", 10))
         for row in content_rows:
             summary["checked"] += 1
             event_id = str(row["route_event_id"])
@@ -1028,9 +1049,9 @@ def process_once(
                 summary["running"] += 1
                 alive = content_runner_is_alive(row["runner_pid"], run_id)
                 _beat_heartbeat(state, event_id, alive)
-                stale = _age_minutes(str(row["created_at"] or "")) >= float(config.get("stale_run_minutes", 15))
+                stale = _age_minutes(str(row["created_at"] or "")) >= _float_config(config, "stale_run_minutes", 15)
                 restarts = int(row["runner_restarts"] or 0)
-                max_restarts = int(config.get("max_runner_restarts", 2))
+                max_restarts = _int_config(config, "max_runner_restarts", 2)
                 if stale and not alive and restarts < max_restarts:
                     try:
                         pid = launch_content_job(config, run_id)
@@ -1054,7 +1075,7 @@ def process_once(
             attempts = int(row["delivery_attempts"] or 0) + 1
             if not origin:
                 missing_target = "could not resolve original conversation"
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
                     terminal_error = _record_retry_exhaustion(
                         config,
                         kind="content",
@@ -1089,7 +1110,7 @@ def process_once(
                 )
                 state.update(
                     event_id,
-                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_attempts=_int_config(config, "max_delivery_attempts", 10),
                     delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
                     last_delivery_at=utc_now(),
                 )
@@ -1120,31 +1141,30 @@ def process_once(
                 else:
                     mirror(origin, message)
                 summary["delivered"] += 1
+            elif attempts >= _int_config(config, "max_delivery_attempts", 10):
+                terminal_error = _record_retry_exhaustion(
+                    config,
+                    kind="content",
+                    identifier=run_id,
+                    origin=origin,
+                    message=message,
+                    error=error,
+                )
+                state.update(
+                    event_id,
+                    delivery_attempts=attempts,
+                    delivery_error=terminal_error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["terminal"] += 1
             else:
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
-                    terminal_error = _record_retry_exhaustion(
-                        config,
-                        kind="content",
-                        identifier=run_id,
-                        origin=origin,
-                        message=message,
-                        error=error,
-                    )
-                    state.update(
-                        event_id,
-                        delivery_attempts=attempts,
-                        delivery_error=terminal_error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["terminal"] += 1
-                else:
-                    state.update(
-                        event_id,
-                        delivery_attempts=attempts,
-                        delivery_error=error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["failed"] += 1
+                state.update(
+                    event_id,
+                    delivery_attempts=attempts,
+                    delivery_error=error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["failed"] += 1
     finally:
         state.close()
 
@@ -1152,7 +1172,7 @@ def process_once(
     if operations_db and not config.get("tvcr_delivery_via_outbox", False):
         format_review_message, pending_review_deliveries, update_review = _operations_api()
         review_rows = pending_review_deliveries(
-            Path(operations_db), int(config.get("max_delivery_attempts", 10))
+            Path(operations_db), _int_config(config, "max_delivery_attempts", 10)
         )
         for row in review_rows:
             summary["checked"] += 1
@@ -1168,10 +1188,10 @@ def process_once(
             }
             if not origin["platform"] or not origin["chat_id"]:
                 missing_target = "TVCR review has no delivery target"
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
                     missing_message = format_review_message(
                         Path(operations_db), review_id,
-                        limit=int(config.get("tvcr_delivery_default_chars", 1000)),
+                        limit=_int_config(config, "tvcr_delivery_default_chars", 1000),
                     )
                     terminal_error = _record_retry_exhaustion(
                         config,
@@ -1211,7 +1231,7 @@ def process_once(
                 )
                 update_review(
                     Path(operations_db), review_id,
-                    delivery_attempts=int(config.get("max_delivery_attempts", 10)),
+                    delivery_attempts=_int_config(config, "max_delivery_attempts", 10),
                     delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
                     last_delivery_at=utc_now(),
                 )
@@ -1234,31 +1254,30 @@ def process_once(
                 else:
                     mirror(origin, message)
                 summary["delivered"] += 1
+            elif attempts >= _int_config(config, "max_delivery_attempts", 10):
+                terminal_error = _record_retry_exhaustion(
+                    config,
+                    kind="tvcr",
+                    identifier=review_id,
+                    origin=origin,
+                    message=message,
+                    error=error,
+                )
+                update_review(
+                    Path(operations_db), review_id,
+                    delivery_attempts=attempts,
+                    delivery_error=terminal_error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["terminal"] += 1
             else:
-                if attempts >= int(config.get("max_delivery_attempts", 10)):
-                    terminal_error = _record_retry_exhaustion(
-                        config,
-                        kind="tvcr",
-                        identifier=review_id,
-                        origin=origin,
-                        message=message,
-                        error=error,
-                    )
-                    update_review(
-                        Path(operations_db), review_id,
-                        delivery_attempts=attempts,
-                        delivery_error=terminal_error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["terminal"] += 1
-                else:
-                    update_review(
-                        Path(operations_db), review_id,
-                        delivery_attempts=attempts,
-                        delivery_error=error,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["failed"] += 1
+                update_review(
+                    Path(operations_db), review_id,
+                    delivery_attempts=attempts,
+                    delivery_error=error,
+                    last_delivery_at=utc_now(),
+                )
+                summary["failed"] += 1
     return summary
 
 

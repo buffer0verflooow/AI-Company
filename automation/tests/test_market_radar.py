@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from automation.market_radar import (
+    _float_config,
+    _int_config,
     canonical_url,
     connect,
     parse_batch_markdown,
@@ -14,6 +16,22 @@ from automation.market_radar import (
     run_radar,
     validate_queries,
 )
+
+
+class ConfigCoercionTests(unittest.TestCase):
+    """Malformed hand-edited config values must not crash the radar cycle."""
+
+    def test_int_config_defaults_and_fallbacks(self):
+        self.assertEqual(_int_config({}, "missing", 2), 2)
+        self.assertEqual(_int_config({"n": "4"}, "n", 2), 4)
+        for bad in ("abc", None, [1], "2.5", float("inf")):
+            self.assertEqual(_int_config({"n": bad}, "n", 2), 2, bad)
+
+    def test_float_config_defaults_and_fallbacks(self):
+        self.assertEqual(_float_config({}, "missing", 45.0), 45.0)
+        self.assertEqual(_float_config({"s": "50.5"}, "s", 45.0), 50.5)
+        for bad in ("abc", None, "nan", float("inf"), {"a": 1}):
+            self.assertEqual(_float_config({"s": bad}, "s", 45.0), 45.0, bad)
 
 
 class MarketRadarTests(unittest.TestCase):

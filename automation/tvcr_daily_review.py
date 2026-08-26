@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 from collections import defaultdict
@@ -57,6 +58,27 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "operations_control_config.json"
 TVCR_INTERNAL_PREFIX = "[COMPANY_TVCR_INTERNAL]"
+
+
+def _int_config(config: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a config value to int, falling back on malformed values.
+
+    The operations config is hand-edited JSON; a single non-numeric value
+    must not crash the daily TVCR review cron.
+    """
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_config(config: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a config value to float, falling back on malformed values."""
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -300,7 +322,7 @@ def validate_outputs(
         if not isinstance(metrics, list) or not metrics:
             errors.append(f"proposal {index} has no success metrics")
         scopes = proposal.get("change_scopes")
-        if scopes == ["technology"] or scopes == ["code"]:
+        if scopes in (["technology"], ["code"]):
             errors.append(f"proposal {index} jumps directly to a technology-only change")
         evidence_ids = proposal.get("evidence_run_ids")
         if not isinstance(evidence_ids, list):
@@ -390,7 +412,7 @@ def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: 
         proc = subprocess.run(
             [
                 str(config.get("hermes_executable") or "hermes"), "chat", "-q", prompt, "-Q",
-                "--source", "tool", "--max-turns", str(int(config.get("tvcr_max_turns", 20))),
+                "--source", "tool", "--max-turns", str(_int_config(config, "tvcr_max_turns", 20)),
                 "--pass-session-id", "--toolsets", "file",
             ],
             cwd=str(review_dir),

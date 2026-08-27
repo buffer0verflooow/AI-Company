@@ -81,6 +81,18 @@ def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     return value if math.isfinite(value) else default
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    Run rows are written by sibling subsystems; a corrupt reach/accepted
+    counter must not crash the daily TVCR review cron.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
@@ -204,7 +216,7 @@ def build_evidence_pack(
             # "business value = 0" (unmeasured must stay unmeasured, not become 0).
             "accepted": sum(1 for item in measured if item["accepted"] == 1) if measured else None,
             "published": sum(1 for item in measured if item["published"] == 1) if measured else None,
-            "reach": sum(int(item["reach"] or 0) for item in measured) if measured else None,
+            "reach": sum(_safe_counter(item["reach"]) for item in measured) if measured else None,
             "revenue_amounts_by_currency": {},
         }
 

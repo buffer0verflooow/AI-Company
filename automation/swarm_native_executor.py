@@ -50,7 +50,7 @@ def _normalize_backend_output(raw: str, task: dict[str, Any]) -> dict[str, Any]:
             "success": True,
             "content": "",
             "capture": False,
-            "token_cost": 0,
+            "token_cost": 0,  # nosec B105 -- numeric cost counter, not a credential
         }
     try:
         data = json.loads(text)
@@ -62,7 +62,7 @@ def _normalize_backend_output(raw: str, task: dict[str, Any]) -> dict[str, Any]:
         "success": True,
         "content": text,
         "capture": bool(text),
-        "token_cost": 0,
+        "token_cost": 0,  # nosec B105 -- numeric cost counter, not a credential
     }
 
 
@@ -86,7 +86,7 @@ def _simulate(task: dict[str, Any], context: str, profile: dict[str, Any]) -> di
         "success": True,
         "content": content,
         "capture": True,
-        "token_cost": 32,
+        "token_cost": 32,  # nosec B105 -- numeric cost counter, not a credential
         "result_summary": {
             "content": content[:500],
             "worker_agent": f"native-{role}",

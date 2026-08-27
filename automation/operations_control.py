@@ -845,7 +845,7 @@ def _run_article_titles(run: dict[str, Any]) -> list[str]:
         try:
             lines: list[str] = []
             with candidate.open("r", encoding="utf-8", errors="replace") as stream:
-                for _, line in zip(range(60), stream):
+                for _, line in zip(range(60), stream, strict=False):
                     lines.append(line.rstrip("\r\n"))
         except OSError:
             continue

@@ -9,7 +9,23 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import automation.capture_from_obsidian as capture
-from automation.swarm_kb_to_obsidian import fetch_top_entries, generate_strategy_md
+from automation.swarm_kb_to_obsidian import (
+    _safe_level,
+    fetch_top_entries,
+    generate_strategy_md,
+)
+
+
+class SwarmKBSafeLevelTests(unittest.TestCase):
+    """Malformed knowledge rows must not crash the strategy-panel sync."""
+
+    def test_safe_level_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_level(None), 0)
+        self.assertEqual(_safe_level(""), 0)
+        self.assertEqual(_safe_level("4"), 4)
+        self.assertEqual(_safe_level(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_level(bad), 0, bad)
 
 
 class ObsidianCaptureTests(unittest.TestCase):

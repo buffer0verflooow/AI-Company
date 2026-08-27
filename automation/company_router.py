@@ -1117,7 +1117,7 @@ class RouterState:
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:  # noqa: BLE001, S110 -- destructor must never raise
+        except Exception:  # nosec B110 -- destructor must never raise  # noqa: BLE001, S110
             pass
 
     def existing(self, session_id: str, message_hash: str) -> sqlite3.Row | None:

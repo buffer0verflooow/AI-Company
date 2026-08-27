@@ -35,6 +35,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _safe_float(value: Any) -> float:
+    """Coerce a DB/JSON amount to float, degrading to 0.0 on malformed values.
+
+    The ledger aggregates rows written by sibling subsystems; a corrupt
+    amount must not crash the finance report cron.
+    """
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 # Columns added after usage_snapshots first shipped.  The names are hard-coded
 # literals (never user input), so a plain ALTER is safe.
 _USAGE_SNAPSHOT_MIGRATIONS = {
@@ -370,7 +383,7 @@ def report(db_path: Path) -> dict[str, Any]:
         )]
         return {
             "actual": actual,
-            "actual_revenue_is_zero": not any(row["kind"] == "revenue" and float(row["amount"] or 0) > 0 for row in actual),
+            "actual_revenue_is_zero": not any(row["kind"] == "revenue" and _safe_float(row["amount"]) > 0 for row in actual),
             "forecasts_excluded_from_actual": forecasts,
             "latest_usage_snapshot": dict(snapshot) if snapshot else None,
             "model_prices": model_prices,

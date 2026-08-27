@@ -7,12 +7,24 @@ from pathlib import Path
 
 from automation.finance_ledger import (
     _route_counts,
+    _safe_float,
     add_actual,
     connect,
     report,
     sync_forecast,
     sync_snapshot,
 )
+
+
+class FinanceLedgerSafeFloatTests(unittest.TestCase):
+    """Malformed ledger rows must not crash the finance report cron."""
+
+    def test_safe_float_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_float(None), 0.0)
+        self.assertEqual(_safe_float(""), 0.0)
+        self.assertEqual(_safe_float("2.5"), 2.5)
+        for bad in ("abc", [1], {"a": 1}, "nan", float("inf"), float("-inf")):
+            self.assertEqual(_safe_float(bad), 0.0, bad)
 
 
 class FinanceLedgerTests(unittest.TestCase):

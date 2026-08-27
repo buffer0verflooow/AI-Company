@@ -13,6 +13,7 @@ from automation.company_result_notifier import (
     _fit_delivery_message,
     _float_config,
     _int_config,
+    _safe_counter,
     list_terminal_deliveries,
     process_once,
     recover_failed_cron_deliveries,
@@ -71,6 +72,14 @@ class NotifierConfigCoercionTests(unittest.TestCase):
         self.assertEqual(_float_config({"t": "1.5"}, "t", 0.5), 1.5)
         for bad in ("abc", None, "nan", float("inf"), {"a": 1}):
             self.assertEqual(_float_config({"t": bad}, "t", 0.5), 0.5, bad)
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter(""), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
 
 
 class NotifierTests(unittest.TestCase):

@@ -447,7 +447,7 @@ def discover_opportunities(
                 previous = evaluated_by_theme.get(str(pulse["theme"]))
                 if previous:
                     age_hours = max(0.0, (current - previous[0]).total_seconds() / 3600)
-                    if age_hours < cooldown_hours and float(pulse["score"] or 0) < previous[1] + material_delta:
+                    if age_hours < cooldown_hours and _safe_float(pulse["score"]) < previous[1] + material_delta:
                         cooldown_pulses.append(str(pulse["pulse_id"]))
                         continue
                 source_domains = _parse_json(pulse["source_domains_json"], [])
@@ -466,7 +466,7 @@ def discover_opportunities(
                     "action_kind": "market_validation",
                     "risk_level": "low",
                     "requires_approval": False,
-                    "score": float(pulse["score"]),
+                    "score": _safe_float(pulse["score"]),
                     "evidence": {
                         "pulse_id": pulse["pulse_id"], "theme": pulse["theme"],
                         "summary": pulse["summary"], "confidence": pulse["confidence"],

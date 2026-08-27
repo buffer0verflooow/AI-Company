@@ -6,12 +6,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from automation.notification_outbox import (
+    _safe_counter,
     enqueue,
     get,
     mark_delivered,
     pending,
     record_failure,
 )
+
+
+class OutboxSafeCounterTests(unittest.TestCase):
+    """Malformed outbox rows must not crash the delivery batch."""
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter(""), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
 
 
 class NotificationOutboxTests(unittest.TestCase):

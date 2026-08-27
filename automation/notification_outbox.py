@@ -31,6 +31,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    The outbox rows are written by the router and delivery tick; a corrupt
+    attempt counter must not crash the notifier batch.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _parse_dt(value: str) -> datetime | None:
     if not value:
         return None
@@ -258,7 +270,7 @@ def record_failure(
         ).fetchone()
         if not row:
             raise KeyError(f"unknown notification: {notification_id}")
-        attempts = int(row["attempts"] or 0) + 1
+        attempts = _safe_counter(row["attempts"]) + 1
         exhausted = attempts >= max(1, int(max_attempts))
         if exhausted:
             state = "dead_letter"
@@ -338,7 +350,7 @@ def summary(db_path: Path) -> dict[str, int]:
         ).fetchall()
         result = {"pending": 0, "delivered": 0, "dead_letter": 0}
         for row in rows:
-            result[str(row["state"])] = int(row["count"])
+            result[str(row["state"])] = _safe_counter(row["count"])
         return result
     finally:
         db.close()

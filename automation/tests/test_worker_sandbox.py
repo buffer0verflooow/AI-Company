@@ -14,7 +14,7 @@ def _mtime(path: Path, when: float) -> None:
 
 class WorkerEnvScrubTests(unittest.TestCase):
     def test_drops_external_service_credentials(self):
-        base = {
+        base = {  # nosec B105 -- fake fixture values, never real credentials
             "PATH": "/usr/bin", "HOME": "/home/x", "LANG": "en_US.UTF-8", "TERM": "xterm",
             "OPENAI_API_KEY": "sk-x", "ANTHROPIC_API_KEY": "sk-y", "WEIXIN_APP_SECRET": "s",
             "WEIXIN_APP_ID": "wx1", "DASHSCOPE_API_KEY": "sk-z", "MY_DB_PASSWORD": "p",

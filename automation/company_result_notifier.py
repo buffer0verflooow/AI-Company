@@ -139,6 +139,18 @@ def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     return value if math.isfinite(value) else default
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    State rows are written by the router and sibling subsystems; a corrupt
+    attempt/restart counter must not crash the one-minute delivery tick.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
     """Use Hermes' supported standalone sender for a confirmed delivery."""
     _ensure_hermes_imports(config)
@@ -274,7 +286,7 @@ def _mark_suspected_dead_if_stale(
 
 
 def _delivery_retry_ready(config: dict[str, Any], row: Any) -> bool:
-    attempts = int(row["delivery_attempts"] or 0)
+    attempts = _safe_counter(row["delivery_attempts"])
     last = str(row["last_delivery_at"] or "")
     if attempts <= 0 or not last:
         return True
@@ -644,8 +656,8 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
         return
 
     state = str(row.get("state") or "")
-    outbox_attempts = int(row.get("attempts") or 0)
-    attempts = max(int(current[1] or 0), outbox_attempts)
+    outbox_attempts = _safe_counter(row.get("attempts"))
+    attempts = max(_safe_counter(current[1]), outbox_attempts)
     fields: dict[str, Any]
     if state == "delivered":
         fields = {
@@ -655,7 +667,7 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
             "last_delivery_at": str(row.get("delivered_at") or row.get("updated_at") or utc_now()),
         }
     elif state == "dead_letter":
-        if int(current[0] or 0):
+        if _safe_counter(current[0]):
             return
         reason = str(row.get("last_error") or "delivery failed")
         fields = {
@@ -672,7 +684,7 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
             ),
         }
     elif state == "pending" and outbox_attempts > 0:
-        if int(current[0] or 0):
+        if _safe_counter(current[0]):
             return
         fields = {
             "delivered": 0,
@@ -897,7 +909,7 @@ def process_once(
                 alive = runner_is_alive(row["runner_pid"], run_id)
                 _beat_heartbeat(state, event_id, alive)
                 stale = _age_minutes(str(row["created_at"] or "")) >= _float_config(config, "stale_run_minutes", 15)
-                restarts = int(row["runner_restarts"] or 0)
+                restarts = _safe_counter(row["runner_restarts"])
                 max_restarts = _int_config(config, "max_runner_restarts", 2)
                 if stale and not alive and restarts < max_restarts:
                     try:
@@ -924,7 +936,7 @@ def process_once(
                 continue
 
             origin = _origin_for_row(config, row)
-            attempts = int(row["delivery_attempts"] or 0) + 1
+            attempts = _safe_counter(row["delivery_attempts"]) + 1
             if not origin:
                 missing_target = "could not resolve original conversation"
                 if attempts >= _int_config(config, "max_delivery_attempts", 10):
@@ -1050,7 +1062,7 @@ def process_once(
                 alive = content_runner_is_alive(row["runner_pid"], run_id)
                 _beat_heartbeat(state, event_id, alive)
                 stale = _age_minutes(str(row["created_at"] or "")) >= _float_config(config, "stale_run_minutes", 15)
-                restarts = int(row["runner_restarts"] or 0)
+                restarts = _safe_counter(row["runner_restarts"])
                 max_restarts = _int_config(config, "max_runner_restarts", 2)
                 if stale and not alive and restarts < max_restarts:
                     try:
@@ -1072,7 +1084,7 @@ def process_once(
                 continue
 
             origin = _origin_for_row(config, row)
-            attempts = int(row["delivery_attempts"] or 0) + 1
+            attempts = _safe_counter(row["delivery_attempts"]) + 1
             if not origin:
                 missing_target = "could not resolve original conversation"
                 if attempts >= _int_config(config, "max_delivery_attempts", 10):
@@ -1179,7 +1191,7 @@ def process_once(
             if not _delivery_retry_ready(config, row):
                 continue
             review_id = str(row["review_id"])
-            attempts = int(row["delivery_attempts"] or 0) + 1
+            attempts = _safe_counter(row["delivery_attempts"]) + 1
             origin = {
                 "platform": str(row["delivery_platform"] or ""),
                 "chat_id": str(row["delivery_chat_id"] or ""),

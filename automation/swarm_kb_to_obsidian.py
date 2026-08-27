@@ -36,6 +36,18 @@ MIN_TRUST = 0.50
 AUTO_MARKER = "<!-- swarm-kb-auto -->"
 
 
+def _safe_level(value: Any) -> int:
+    """Coerce a knowledge level to int, degrading to 0 on malformed values.
+
+    The swarm knowledge DB is written by isolated workers; a corrupt level
+    must not crash the strategy-panel sync.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _parse_trust(raw: str | None) -> float:
     """Parse trust_vector JSON field into a single numeric score (0-1)."""
     if not raw:
@@ -96,7 +108,7 @@ def fetch_top_entries(db_path: Path) -> list[dict]:
             "created": r["created_at"] or "",
         })
     result.sort(
-        key=lambda item: (int(item["level"] or 0), float(item["trust"]), str(item["created"])),
+        key=lambda item: (_safe_level(item["level"]), float(item["trust"]), str(item["created"])),
         reverse=True,
     )
     return result[:30]

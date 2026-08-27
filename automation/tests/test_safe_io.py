@@ -16,7 +16,7 @@ from automation._safe_io import (
 
 class SafeIOTests(unittest.TestCase):
     def test_scrub_environment_drops_secrets_and_credentialed_urls(self):
-        env, dropped = scrub_environment({
+        env, dropped = scrub_environment({  # nosec B105 -- fake fixture values
             "PATH": "/bin",
             "GIT_AUTHOR_NAME": "Codex",
             "SERVICE_URL": "https://user:password@example.com/api",

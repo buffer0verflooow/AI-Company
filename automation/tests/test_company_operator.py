@@ -110,7 +110,7 @@ class CompanyOperatorTests(unittest.TestCase):
         prompt = build_worker_prompt({
             "title": "测试", "product_line": "company", "action_kind": "internal_mission",
             "description": "生成内部脚本", "evidence_json": "{}",
-        }, Path("/tmp/operator-run"))
+        }, Path(tempfile.mkdtemp(prefix="operator-run-")))
         self.assertIn("非破坏性验证", prompt)
         self.assertIn("缺少依赖时不得声称", prompt)
         self.assertIn("禁止填充 actual", prompt)
@@ -119,7 +119,7 @@ class CompanyOperatorTests(unittest.TestCase):
         prompt = build_worker_prompt({
             "title": "市场验证", "product_line": "company", "action_kind": "market_validation",
             "description": "验证需求", "evidence_json": "{}",
-        }, Path("/tmp/operator-market"))
+        }, Path(tempfile.mkdtemp(prefix="operator-market-")))
         self.assertIn("market-opportunity-brief.md", prompt)
         self.assertIn("至少打开并核对两个独立来源", prompt)
         self.assertIn("不得写成“已验证来源”", prompt)
@@ -333,8 +333,8 @@ class CompanyOperatorTests(unittest.TestCase):
                    VALUES ('pulse-1','mrun','agent-demand','智能体安全需求','security-exploration',
                            '企业预算和治理需求上升','[]','[\"a.example\",\"b.example\"]',
                            '[\"https://a.example/x\",\"https://b.example/y\"]',2,2,70,80,0.8,82,
-                           'new','/tmp/evidence',?,?)""",
-                (now, now),
+                           'new',?,?,?)""",
+                (str(root / "evidence"), now, now),
             )
             market.commit()
             market.close()
@@ -378,8 +378,8 @@ class CompanyOperatorTests(unittest.TestCase):
                     source_domains_json,source_urls_json,independent_sources,signal_count,
                     average_score,max_score,confidence,score,status,evidence_path,created_at,updated_at)
                    VALUES ('pulse-stale','mrun','theme','主题','company','summary','[]','[]','[]',
-                           2,2,70,80,0.8,82,'new','/tmp/evidence',?,?)""",
-                (now, now),
+                           2,2,70,80,0.8,82,'new',?,?,?)""",
+                (str(root / "evidence"), now, now),
             )
             market.commit()
             market.close()
@@ -421,7 +421,7 @@ class CompanyOperatorTests(unittest.TestCase):
             pulse_values = (
                 "theme", "主题", "company", "summary", "[]", "[\"a\",\"b\"]",
                 "[\"https://a/x\",\"https://b/y\"]", 2, 2, 70, 82, 0.8,
-                "/tmp/evidence", now_text, now_text,
+                str(root / "evidence"), now_text, now_text,
             )
             market.execute(
                 """INSERT INTO market_pulses

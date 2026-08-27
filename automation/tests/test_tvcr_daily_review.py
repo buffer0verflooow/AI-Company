@@ -6,10 +6,23 @@ from datetime import date
 from pathlib import Path
 
 from automation.tvcr_daily_review import (
+    _safe_counter,
     build_evidence_pack,
     build_prompt,
     validate_outputs,
 )
+
+
+class TVCRSafeCounterTests(unittest.TestCase):
+    """Malformed run rows must not crash the daily TVCR review cron."""
+
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter(""), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
 
 
 class TVCRDailyReviewTests(unittest.TestCase):

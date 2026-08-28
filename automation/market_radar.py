@@ -84,6 +84,17 @@ def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     return value if math.isfinite(value) else default
 
 
+def _safe_query_int(value: Any, default: int) -> int:
+    """Coerce a per-query numeric setting to int, falling back on malformed
+    values.  Query entries live in the hand-edited radar config; a single
+    non-numeric max_results must not fail the whole radar cycle.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
@@ -579,7 +590,10 @@ def _chunks(items: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, A
 
 
 def _api_query(item: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {"query": item["query"], "max_results": int(item.get("max_results", 5))}
+    result: dict[str, Any] = {
+        "query": item["query"],
+        "max_results": _safe_query_int(item.get("max_results", 5), 5),
+    }
     for key in ("domain", "sub_domain", "sub_domain_params"):
         if item.get(key):
             result[key] = item[key]

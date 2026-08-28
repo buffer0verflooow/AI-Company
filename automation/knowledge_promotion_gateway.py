@@ -75,6 +75,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    Knowledge rows are written by isolated swarm workers; a corrupt level or
+    counter must not crash the promotion gate.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def connect_gate(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db: sqlite3.Connection | None = None
@@ -200,7 +212,7 @@ def assess(entry: sqlite3.Row) -> dict[str, Any]:
     trust = _trust(entry["trust_vector"])
     validated = (
         str(entry["status"] or "") == "active"
-        and int(entry["level"] or 0) >= 2
+        and _safe_counter(entry["level"]) >= 2
         and bool(entry["last_validated_at"])
         and trust["base_confidence"] >= 0.7
         and trust["cross_validation"] >= 0.8

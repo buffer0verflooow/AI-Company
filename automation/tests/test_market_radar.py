@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from automation.market_radar import (
+    _api_query,
     _float_config,
     _int_config,
+    _safe_query_int,
     canonical_url,
     connect,
     parse_batch_markdown,
@@ -32,6 +34,20 @@ class ConfigCoercionTests(unittest.TestCase):
         self.assertEqual(_float_config({"s": "50.5"}, "s", 45.0), 50.5)
         for bad in ("abc", None, "nan", float("inf"), {"a": 1}):
             self.assertEqual(_float_config({"s": bad}, "s", 45.0), 45.0, bad)
+
+    def test_safe_query_int_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_query_int("3", 5), 3)
+        self.assertEqual(_safe_query_int(3, 5), 3)
+        self.assertEqual(_safe_query_int(None, 5), 5)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_query_int(bad, 5), 5, bad)
+
+    def test_api_query_tolerates_corrupt_max_results(self):
+        self.assertEqual(_api_query({"query": "q", "max_results": "abc"}), {
+            "query": "q", "max_results": 5,
+        })
+        self.assertEqual(_api_query({"query": "q"}), {"query": "q", "max_results": 5})
+        self.assertEqual(_api_query({"query": "q", "max_results": 7}), {"query": "q", "max_results": 7})
 
 
 class MarketRadarTests(unittest.TestCase):

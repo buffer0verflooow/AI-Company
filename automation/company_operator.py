@@ -922,7 +922,7 @@ def execute_opportunity(
     completed = utc_now()
     artifacts = [str(path) for path in _regular_artifacts(run_dir)]
     final_status = "completed" if result["status"] == "completed" else "waiting_approval" if result["status"] == "needs_approval" else "failed"
-    retry_count = int(opportunity.get("retry_count") or 0)
+    retry_count = _safe_counter(opportunity.get("retry_count"))
     # A nominally completed run that produced nothing is treated as a failure so
     # the auto-retry ladder can take another (cheaper) pass at it.
     empty_output = _is_empty_output(result, artifacts)

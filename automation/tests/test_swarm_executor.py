@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
-from automation.swarm_hermes_executor import build_prompt
+from automation.swarm_hermes_executor import _run_opencode, _safe_counter, build_prompt
 from automation.swarm_native_executor import _run_command_backend
 
 
@@ -51,6 +53,35 @@ class SwarmNativeExecutorContractTests(unittest.TestCase):
             result = _run_command_backend({"task": {}}, {})
         self.assertFalse(result["success"])
         self.assertIn("SWARM_NATIVE_AGENT_COMMAND", str(result.get("error") or ""))
+
+
+class SwarmHermesExecutorTokenTests(unittest.TestCase):
+    def test_safe_counter_defaults_and_fallbacks(self):
+        self.assertEqual(_safe_counter(None), 0)
+        self.assertEqual(_safe_counter(""), 0)
+        self.assertEqual(_safe_counter("7"), 7)
+        self.assertEqual(_safe_counter(3.9), 3)
+        for bad in ("abc", [1], {"a": 1}, float("inf")):
+            self.assertEqual(_safe_counter(bad), 0, bad)
+
+    def test_corrupt_token_event_does_not_crash_opencode_parse(self):
+        # The opencode JSON event stream is external input; a corrupt
+        # tokens.total must degrade to 0 instead of crashing the executor.
+        events = [
+            {"type": "text", "part": {"type": "text", "text": "hello"}},
+            {"type": "step_finish", "tokens": {"total": "not-a-number"}},
+        ]
+        fake = subprocess.CompletedProcess(
+            args=["opencode"],
+            returncode=0,
+            stdout="\n".join(json.dumps(event) for event in events) + "\n",
+            stderr="",
+        )
+        with patch("automation.swarm_hermes_executor.subprocess.run", return_value=fake):
+            result = _run_opencode({"resolved_model": "free-model"}, "prompt", {})
+        self.assertTrue(result["success"])
+        self.assertEqual(result["content"], "hello")
+        self.assertEqual(result["token_cost"], 0)
 
 
 if __name__ == "__main__":

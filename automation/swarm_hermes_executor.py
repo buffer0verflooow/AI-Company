@@ -18,6 +18,18 @@ WORKSPACE = "/home/pwn/workspace"
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a JSON event counter to int, degrading to 0 on malformed values.
+
+    The opencode JSON event stream is external, untrusted input; a corrupt
+    tokens.total must not crash the executor mid-run.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def build_prompt(payload: dict[str, Any]) -> str:
     task = payload.get("task") or {}
     context = str(payload.get("context") or "")
@@ -94,7 +106,7 @@ def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
                 content_parts.append(str(part.get("text") or ""))
         elif etype == "step_finish":
             tokens = event.get("tokens") or {}
-            token_cost = int(tokens.get("total") or 0)
+            token_cost = _safe_counter(tokens.get("total"))
 
     content = "\n".join(content_parts).strip()
     return {

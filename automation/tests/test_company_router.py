@@ -603,6 +603,46 @@ class HookTests(unittest.TestCase):
             self.assertEqual(count, 1)
             state.close()
 
+    def test_corrupt_delivery_attempts_does_not_crash_swarm_dedup(self):
+        # A corrupt delivery_attempts counter on a recent run must not crash
+        # the routing hook: the dedup branch degrades it to 0 via
+        # _safe_counter and increments from there.
+        with tempfile.TemporaryDirectory() as td:
+            config = {
+                "enabled": True,
+                "dispatch_security": True,
+                "auto_run_security": False,
+                "state_db": str(Path(td) / "router.db"),
+                "swarm_repo": td,
+                "swarm_db": str(Path(td) / "swarm.db"),
+                "log_dir": str(Path(td) / "logs"),
+                "executor": "/bin/false",
+                "max_active_runs_per_session": 2,
+            }
+            message = "调研一下竞品 X 的技术方案"
+            payload = {"session_id": "s-dedup", "extra": {"user_message": message, "platform": "cli"}}
+            decision = classify_message(message)
+            self.assertEqual(decision.action, "dispatch_swarm")
+
+            state = RouterState(config["state_db"])
+            event_id = state.insert("s-dedup", "cli", "hash-dedup", message, decision)
+            state.update(event_id, run_id="run-dedup", status="running")
+            state.db.execute(
+                "UPDATE route_events SET delivery_attempts='not-a-number' WHERE route_event_id=?",
+                (event_id,),
+            )
+            state.db.commit()
+            state.close()
+
+            result = handle_hook(payload, config)
+            self.assertIn("run-dedup", result["context"])
+            state = RouterState(config["state_db"])
+            row = state.db.execute(
+                "SELECT delivery_attempts FROM route_events WHERE route_event_id=?", (event_id,)
+            ).fetchone()
+            self.assertEqual(row["delivery_attempts"], 1)
+            state.close()
+
     def test_approval_gate_never_submits(self):
         with tempfile.TemporaryDirectory() as td:
             config = {

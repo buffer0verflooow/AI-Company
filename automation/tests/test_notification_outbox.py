@@ -7,6 +7,7 @@ from pathlib import Path
 
 from automation.notification_outbox import (
     _safe_counter,
+    append_dead_letter,
     enqueue,
     get,
     mark_delivered,
@@ -92,6 +93,27 @@ class NotificationOutboxTests(unittest.TestCase):
             mark_delivered(db_path, notification_id)
             self.assertEqual(pending(db_path), [])
             self.assertEqual(get(db_path, notification_id)["state"], "delivered")
+
+    def test_dead_letter_record_tolerates_corrupt_attempts(self):
+        # A corrupt attempts counter must not crash the dead-letter record.
+        with tempfile.TemporaryDirectory() as td:
+            ledger = Path(td) / "dead-letter.jsonl"
+            append_dead_letter(
+                ledger,
+                {
+                    "kind": "tvcr_cron",
+                    "source_id": "TVCR-R-1",
+                    "notification_id": "n-1",
+                    "platform": "weixin",
+                    "chat_id": "chat-1",
+                    "last_error": "boom",
+                    "message": "m",
+                    "attempts": "not-a-number",
+                },
+                reason="boom",
+            )
+            line = ledger.read_text(encoding="utf-8").strip()
+            self.assertIn('"attempts": 0', line)
 
 
 if __name__ == "__main__":

@@ -639,6 +639,45 @@ class CompanyOperatorTests(unittest.TestCase):
             ).fetchone()[0], "open")
             db.close()
 
+    def test_corrupt_retry_counter_does_not_crash_cycle(self):
+        # A corrupt retry_count in the opportunity row must not crash the
+        # cycle: it degrades to 0 via _safe_counter and the auto-retry ladder
+        # still re-opens the opportunity with retry_count=1.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["auto_retry_enabled"] = True
+            config["auto_retry_max"] = 1
+            db_path = Path(config["operations_db"])
+
+            def failed_worker(_opportunity, _run_dir, _config):
+                return {"status": "failed", "summary": "", "next_action": "", "metrics": {}, "error": "boom"}
+
+            # Plant a corrupt counter before the cycle picks the row up.
+            db = connect(db_path)
+            db.execute(
+                "UPDATE autonomy_opportunities SET retry_count='not-a-number' WHERE status='open'"
+            )
+            db.commit()
+            db.close()
+
+            result = run_cycle(
+                config,
+                now=datetime(2026, 7, 15, 1, tzinfo=timezone.utc),
+                worker=failed_worker,
+            )
+            self.assertEqual(result["executions"][0]["status"], "failed")
+            self.assertTrue(result["executions"][0]["auto_retry"])
+            opportunity_id = result["executions"][0]["opportunity_id"]
+            db = connect(db_path)
+            row = db.execute(
+                "SELECT status,retry_count FROM autonomy_opportunities WHERE opportunity_id=?",
+                (opportunity_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "open")
+            self.assertEqual(row["retry_count"], 1)
+            db.close()
+
     def test_failed_worker_parks_immediately_when_auto_retry_disabled(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

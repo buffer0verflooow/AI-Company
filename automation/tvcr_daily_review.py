@@ -123,32 +123,32 @@ def build_evidence_pack(
     evidence_runs: list[dict[str, Any]] = []
     for run in runs:
         product_line = str(run.get("product_line") or "unknown")
-        direct_tokens = int(run.get("input_tokens") or 0) + int(run.get("output_tokens") or 0) + int(run.get("reasoning_tokens") or 0)
+        direct_tokens = _safe_counter(run.get("input_tokens")) + _safe_counter(run.get("output_tokens")) + _safe_counter(run.get("reasoning_tokens"))
         item = {
             "run_id": run.get("run_id"),
             "product_line": product_line,
             "request_excerpt": str(run.get("request_text") or "")[:500],
             "status": run.get("status"),
-            "result_delivered": int(run.get("result_delivered") or 0),
-            "proactive_delivered": int(run.get("proactive_delivered") or 0),
+            "result_delivered": _safe_counter(run.get("result_delivered")),
+            "proactive_delivered": _safe_counter(run.get("proactive_delivered")),
             "started_at": run.get("started_at"),
             "completed_at": run.get("completed_at"),
             "duration_seconds": run.get("duration_seconds"),
             "worker_session_id": run.get("worker_session_id"),
             "model": run.get("model"),
             "direct_tokens": direct_tokens,
-            "input_tokens": int(run.get("input_tokens") or 0),
-            "output_tokens": int(run.get("output_tokens") or 0),
-            "cache_read_tokens": int(run.get("cache_read_tokens") or 0),
-            "cache_write_tokens": int(run.get("cache_write_tokens") or 0),
-            "reasoning_tokens": int(run.get("reasoning_tokens") or 0),
-            "tool_call_count": int(run.get("tool_call_count") or 0),
+            "input_tokens": _safe_counter(run.get("input_tokens")),
+            "output_tokens": _safe_counter(run.get("output_tokens")),
+            "cache_read_tokens": _safe_counter(run.get("cache_read_tokens")),
+            "cache_write_tokens": _safe_counter(run.get("cache_write_tokens")),
+            "reasoning_tokens": _safe_counter(run.get("reasoning_tokens")),
+            "tool_call_count": _safe_counter(run.get("tool_call_count")),
             "actual_cost_usd": run.get("actual_cost_usd"),
             "estimated_cost_usd": run.get("estimated_cost_usd"),
             "estimated_cost_native": run.get("estimated_cost_native"),
             "estimated_cost_currency": run.get("estimated_cost_currency"),
             "cost_status": run.get("cost_status"),
-            "output_bytes": int(run.get("output_bytes") or 0),
+            "output_bytes": _safe_counter(run.get("output_bytes")),
             "quality_status": run.get("quality_status"),
             "outcome_status": run.get("outcome_status"),
             "accepted": run.get("accepted"),
@@ -320,7 +320,7 @@ def validate_outputs(
         for run in evidence.get("runs") or []
     ) and re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.IGNORECASE):
         errors.append("unknown model cost was incorrectly stated as zero")
-    if any(int(run.get("result_delivered") or 0) == 1 for run in evidence.get("runs") or []) and any(
+    if any(_safe_counter(run.get("result_delivered")) == 1 for run in evidence.get("runs") or []) and any(
         phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")
     ):
         errors.append("delivered technical results were incorrectly described as not reaching the user")

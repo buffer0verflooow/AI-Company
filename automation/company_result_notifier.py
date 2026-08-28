@@ -151,6 +151,19 @@ def _safe_counter(value: Any) -> int:
         return 0
 
 
+def _positive_limit(value: Any, default: int) -> int:
+    """Coerce a delivery character limit to a positive int with fallback.
+
+    The per-platform limit maps in the hand-edited config are nested JSON; a
+    single non-numeric or non-positive value must not crash the delivery tick.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if number > 0 else default
+
+
 def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
     """Use Hermes' supported standalone sender for a confirmed delivery."""
     _ensure_hermes_imports(config)
@@ -411,7 +424,8 @@ def _format_content_message(row: Any, payload: dict[str, Any]) -> str:
 
 def _fit_delivery_message(config: dict[str, Any], origin: dict[str, str], message: str) -> str:
     limits = config.get("proactive_delivery_chars_by_platform") or {}
-    limit = int(limits.get(origin.get("platform", ""), config.get("proactive_delivery_default_chars", 3000)))
+    default_limit = _positive_limit(config.get("proactive_delivery_default_chars", 3000), 3000)
+    limit = _positive_limit(limits.get(origin.get("platform", "")), default_limit)
     if limit <= 0 or len(message) <= limit:
         return message
     suffix = "\n\n[通知已截断；完整结果与产物保存在公司运行目录。]"
@@ -597,9 +611,12 @@ def _cron_recovery_payload(
                 }
                 if stored["platform"] and stored["chat_id"]:
                     origin = stored
-            limit = int((config.get("tvcr_delivery_chars_by_platform") or {}).get(
-                origin.get("platform", ""), config.get("tvcr_delivery_default_chars", 1000)
-            ))
+            limit = _positive_limit(
+                (config.get("tvcr_delivery_chars_by_platform") or {}).get(
+                    origin.get("platform", ""),
+                ),
+                _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
+            )
             try:
                 return (
                     origin,
@@ -1231,9 +1248,10 @@ def process_once(
                 continue
             message = format_review_message(
                 Path(operations_db), review_id,
-                limit=int((config.get("tvcr_delivery_chars_by_platform") or {}).get(
-                    origin["platform"], config.get("tvcr_delivery_default_chars", 1000)
-                )),
+                limit=_positive_limit(
+                    (config.get("tvcr_delivery_chars_by_platform") or {}).get(origin["platform"]),
+                    _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
+                ),
             )
             terminal_reason = _terminal_reason(config, origin)
             if terminal_reason:

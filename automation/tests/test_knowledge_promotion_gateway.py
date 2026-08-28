@@ -185,6 +185,22 @@ class KnowledgePromotionTests(unittest.TestCase):
         self.assertIn("[REDACTED_ENDPOINT]", preview)
         self.assertIn("[REDACTED_CREDENTIAL]", preview)
 
+    def test_corrupt_level_degrades_without_crashing_scan(self):
+        # A corrupt level counter in a swarm knowledge row must not crash the
+        # promotion gate: it degrades to 0 and the entry fails validation
+        # instead of raising ValueError/TypeError.
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "swarm.db"
+            gate = Path(td) / "gate.db"
+            self._source(source, [(
+                "k-corrupt-level", "abc", "technique", "Generic lesson.", "Lesson",
+                "general", "understand",
+                json.dumps({"base_confidence": 0.9, "cross_validation": 1.0}),
+                "active", json.dumps(["public"]), "2026-07-15",
+            )])
+            counts = scan(source, gate)
+            self.assertEqual(counts["needs_validation"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

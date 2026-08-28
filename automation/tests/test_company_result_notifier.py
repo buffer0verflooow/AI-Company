@@ -13,6 +13,7 @@ from automation.company_result_notifier import (
     _fit_delivery_message,
     _float_config,
     _int_config,
+    _positive_limit,
     _safe_counter,
     list_terminal_deliveries,
     process_once,
@@ -80,6 +81,27 @@ class NotifierConfigCoercionTests(unittest.TestCase):
         self.assertEqual(_safe_counter(3.9), 3)
         for bad in ("abc", [1], {"a": 1}, float("inf")):
             self.assertEqual(_safe_counter(bad), 0, bad)
+
+    def test_positive_limit_defaults_and_fallbacks(self):
+        self.assertEqual(_positive_limit("1800", 3000), 1800)
+        self.assertEqual(_positive_limit(1800, 3000), 1800)
+        self.assertEqual(_positive_limit(0, 3000), 3000)
+        self.assertEqual(_positive_limit(-5, 3000), 3000)
+        for bad in ("abc", None, [1], {"a": 1}, float("inf")):
+            self.assertEqual(_positive_limit(bad, 3000), 3000, bad)
+
+    def test_fit_delivery_message_tolerates_corrupt_limits(self):
+        message = "x" * 5000
+        fitted = _fit_delivery_message(
+            {
+                "proactive_delivery_chars_by_platform": {"weixin": "not-a-number"},
+                "proactive_delivery_default_chars": "also-bad",
+            },
+            {"platform": "weixin", "chat_id": "chat"},
+            message,
+        )
+        self.assertLessEqual(len(fitted), 3000)
+        self.assertIn("通知已截断", fitted)
 
 
 class NotifierTests(unittest.TestCase):

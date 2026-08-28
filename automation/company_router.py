@@ -352,6 +352,18 @@ def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     return value if math.isfinite(value) else default
 
 
+def _safe_counter(value: Any) -> int:
+    """Coerce a DB/JSON counter to int, degrading to 0 on malformed values.
+
+    State rows are written by sibling subsystems; a corrupt attempt/restart
+    counter must not crash the routing hook.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     data = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(data, dict):
@@ -1946,7 +1958,7 @@ def _handle_hook(
         if recent:
             state.update(
                 recent["route_event_id"],
-                delivery_attempts=int(recent["delivery_attempts"] or 0) + 1,
+                delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
             )
             return {"context": build_context(
                 RouteDecision(**json.loads(recent["decision_json"])),
@@ -1968,7 +1980,7 @@ def _handle_hook(
         if recent:
             state.update(
                 recent["route_event_id"],
-                delivery_attempts=int(recent["delivery_attempts"] or 0) + 1,
+                delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
             )
             return {"context": build_context(
                 RouteDecision(**json.loads(recent["decision_json"])),

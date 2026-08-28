@@ -337,7 +337,7 @@ def append_dead_letter(path: Path, row: dict[str, Any], *, reason: str = "") -> 
         },
         "reason": reason or row.get("last_error", "delivery failed"),
         "message": row.get("message", ""),
-        "attempts": int(row.get("attempts") or 0),
+        "attempts": _safe_counter(row.get("attempts")),
     }
     locked_append_text(path, json.dumps(record, ensure_ascii=False) + "\n")
 

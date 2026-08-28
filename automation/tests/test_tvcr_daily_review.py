@@ -178,6 +178,55 @@ class TVCRDailyReviewTests(unittest.TestCase):
         errors = validate_outputs(evidence, "report", payload)
         self.assertEqual(errors, [])
 
+    def test_evidence_pack_tolerates_corrupt_counters(self):
+        # A corrupt token/delivered counter in a run row must not crash the
+        # daily TVCR cron; it degrades to 0 like the established _safe_counter
+        # contract instead of raising ValueError/TypeError.
+        pack = build_evidence_pack(
+            [{
+                "run_id": "r-corrupt",
+                "product_line": "security-exploration",
+                "status": "completed",
+                "input_tokens": "abc",
+                "output_tokens": None,
+                "reasoning_tokens": [1],
+                "cache_read_tokens": "12.5",
+                "cache_write_tokens": float("inf"),
+                "tool_call_count": "7",
+                "output_bytes": -4,
+                "result_delivered": "yes",
+                "proactive_delivered": {"n": 1},
+                "outcome_status": "measured",
+                "artifacts_json": "[]",
+                "evidence_json": "{}",
+            }],
+            review_day=date(2026, 7, 22),
+            period_start="2026-07-21T16:00:00+00:00",
+            period_end="2026-07-22T16:00:00+00:00",
+            thresholds={},
+        )
+        run = pack["runs"][0]
+        self.assertEqual(run["input_tokens"], 0)
+        self.assertEqual(run["output_tokens"], 0)
+        self.assertEqual(run["reasoning_tokens"], 0)
+        self.assertEqual(run["cache_read_tokens"], 0)
+        self.assertEqual(run["cache_write_tokens"], 0)
+        self.assertEqual(run["tool_call_count"], 7)
+        self.assertEqual(run["output_bytes"], 0)
+        self.assertEqual(run["result_delivered"], 0)
+        self.assertEqual(run["proactive_delivered"], 0)
+        self.assertEqual(run["direct_tokens"], 0)
+
+    def test_validator_tolerates_corrupt_result_delivered(self):
+        # A non-numeric result_delivered must not crash validate_outputs.
+        evidence = {"runs": [{"run_id": "r1", "outcome_status": "measured", "result_delivered": "abc"}]}
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["process"], "evidence_run_ids": ["r1"],
+        }]}
+        errors = validate_outputs(evidence, "报告无价值为0表述，无到达用户表述", payload)
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

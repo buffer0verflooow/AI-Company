@@ -56,6 +56,7 @@ __all__ = [
     "locked_atomic_write_text",
     "quote_identifier",
     "read_text_limited",
+    "read_text_limited_nofollow",
     "scrub_environment",
     "sqlite_connection",
     "sqlite_uri",
@@ -128,6 +129,35 @@ def read_text_limited(
         raise ValueError("max_bytes must be non-negative")
     with Path(path).open("rb") as stream:
         payload = stream.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ValueError(f"file exceeds {max_bytes} bytes: {path}")
+    return payload.decode(encoding, errors)
+
+
+def read_text_limited_nofollow(
+    path: Path,
+    *,
+    max_bytes: int,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+) -> str:
+    """Read a text file via ``O_NOFOLLOW``, rejecting symlinks atomically.
+
+    Callers that validate ``is_symlink()`` before ``open()`` leave a TOCTOU
+    window: between the check and the open an untrusted writer can swap the
+    file for a symlink, and the open would follow it.  Opening with
+    ``O_NOFOLLOW`` makes the guard atomic; on platforms without the flag it
+    degrades to a plain read-only open.
+    """
+
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        payload = os.read(fd, max_bytes + 1)
+    finally:
+        os.close(fd)
     if len(payload) > max_bytes:
         raise ValueError(f"file exceeds {max_bytes} bytes: {path}")
     return payload.decode(encoding, errors)

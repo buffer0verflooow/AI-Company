@@ -28,6 +28,7 @@ try:
     from ._safe_io import (
         atomic_write_text,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_uri,
     )
@@ -37,6 +38,7 @@ except ImportError:  # direct ``python automation/company_operator.py`` invocati
     from _safe_io import (
         atomic_write_text,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_uri,
     )
@@ -83,7 +85,7 @@ def _worker_model(config: dict[str, Any], retry_count: int) -> str:
         ladder = DEFAULT_WORKER_MODEL_LADDER
     if not isinstance(ladder, (list, tuple)) or not ladder:
         return ""
-    index = min(max(0, int(retry_count or 0)), len(ladder) - 1)
+    index = min(max(0, _safe_counter(retry_count)), len(ladder) - 1)
     return str(ladder[index] or "")
 
 
@@ -104,7 +106,7 @@ def _should_auto_retry(config: dict[str, Any], retry_count: int, failed: bool) -
         return False
     if not config.get("auto_retry_enabled", True):
         return False
-    return int(retry_count or 0) < _int_config(config, "auto_retry_max", DEFAULT_AUTO_RETRY_MAX)
+    return _safe_counter(retry_count) < _int_config(config, "auto_retry_max", DEFAULT_AUTO_RETRY_MAX)
 
 
 
@@ -392,26 +394,35 @@ def discover_opportunities(
         if market_db_path and market_db_path.is_file():
             pulse_statuses: dict[str, str] | None = {}
             pulse_scores: dict[str, float] = {}
-            market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
-            market_db.row_factory = sqlite3.Row
             try:
-                minimum_market_score = _float_config(config, "market_min_pulse_score", 60)
-                all_pulse_rows = market_db.execute("SELECT * FROM market_pulses").fetchall()
-                pulse_statuses = {str(row["pulse_id"]): str(row["status"]) for row in all_pulse_rows}
-                pulse_scores = {str(row["pulse_id"]): _safe_float(row["score"]) for row in all_pulse_rows}
-                pulses = market_db.execute(
-                    """SELECT * FROM market_pulses
-                       WHERE status='new' AND score>=? ORDER BY score DESC,created_at ASC""",
-                    (minimum_market_score,),
-                ).fetchall()
+                market_db = sqlite3.connect(sqlite_uri(market_db_path, mode="ro"), uri=True)
             except sqlite3.Error:
                 # A failed read must not be interpreted as "every pulse vanished":
                 # leave the status map unknown so stale open opportunities are not
                 # mass-dismissed by the comparison below.
                 pulse_statuses = None
                 pulses = []
-            finally:
-                market_db.close()
+                market_db = None
+            if market_db is not None:
+                market_db.row_factory = sqlite3.Row
+                try:
+                    minimum_market_score = _float_config(config, "market_min_pulse_score", 60)
+                    all_pulse_rows = market_db.execute("SELECT * FROM market_pulses").fetchall()
+                    pulse_statuses = {str(row["pulse_id"]): str(row["status"]) for row in all_pulse_rows}
+                    pulse_scores = {str(row["pulse_id"]): _safe_float(row["score"]) for row in all_pulse_rows}
+                    pulses = market_db.execute(
+                        """SELECT * FROM market_pulses
+                           WHERE status='new' AND score>=? ORDER BY score DESC,created_at ASC""",
+                        (minimum_market_score,),
+                    ).fetchall()
+                except sqlite3.Error:
+                    # A failed read must not be interpreted as "every pulse vanished":
+                    # leave the status map unknown so stale open opportunities are not
+                    # mass-dismissed by the comparison below.
+                    pulse_statuses = None
+                    pulses = []
+                finally:
+                    market_db.close()
             active_market_opportunities = db.execute(
                 """SELECT opportunity_id,source_ref FROM autonomy_opportunities
                    WHERE source_type='market_pulse' AND status IN ('open','waiting_approval')"""
@@ -752,7 +763,10 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
             "summary": proc.stdout.strip()[-2000:], "next_action": "", "metrics": {},
         }
     try:
-        payload = json.loads(read_text_limited(result_path, max_bytes=2 * 1024 * 1024))
+        # O_NOFOLLOW makes the symlink rejection atomic: the worker is
+        # untrusted, and a swap between the is_symlink() check and the open
+        # would otherwise be followed (leaking file content into the summary).
+        payload = json.loads(read_text_limited_nofollow(result_path, max_bytes=2 * 1024 * 1024))
         if not isinstance(payload, dict):
             raise ValueError("result root must be an object")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -774,7 +788,10 @@ def worker_usage(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     state_db = Path(config.get("hermes_state_db") or "/home/pwn/.hermes/state.db")
     if not state_db.is_file():
         return {}
-    db = sqlite3.connect(sqlite_uri(state_db, mode="ro"), uri=True)
+    try:
+        db = sqlite3.connect(sqlite_uri(state_db, mode="ro"), uri=True)
+    except sqlite3.Error:
+        return {}
     db.row_factory = sqlite3.Row
     try:
         row = db.execute(

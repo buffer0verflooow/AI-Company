@@ -67,11 +67,19 @@ def parse_rows(source: Path) -> list[dict[str, object]]:
             ratio = pattern.search(body)
             if ratio:
                 ratios.append(f"{label}={ratio.group(1)}")
+        # The pricing page is external HTML: a malformed figure (e.g. "1.2.3")
+        # can still match the [0-9.]+ pattern; skip the row rather than abort
+        # the whole import.
+        try:
+            input_price = float(input_match.group(1))
+            output_price = float(output_match.group(1))
+        except ValueError:
+            continue
         rows.append(
             {
                 "slug": match.group("slug"),
-                "input": float(input_match.group(1)),
-                "output": float(output_match.group(1)),
+                "input": input_price,
+                "output": output_price,
                 "notes": "Pay as you go; default; " + "; ".join(ratios),
             }
         )

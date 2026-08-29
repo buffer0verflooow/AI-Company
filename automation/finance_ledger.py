@@ -176,6 +176,13 @@ def add_actual(
         raise ValueError("amount must be non-negative")
     if not evidence_path.is_file():
         raise ValueError("an evidence file is required for actual transactions")
+    try:
+        evidence_sha = sha256_file(evidence_path)
+    except OSError as exc:
+        # The is_file() check above is not atomic: the file may vanish or be
+        # swapped between the check and the read.  Surface it as a clean
+        # validation error instead of a raw OSError mid-insert.
+        raise ValueError(f"evidence file unreadable: {exc}") from exc
     transaction_id = str(uuid.uuid4())
     db = connect(db_path)
     try:
@@ -187,7 +194,7 @@ def add_actual(
             (
                 transaction_id, occurred_at, product_line, kind, category, amount_value,
                 currency.upper(), description, source_ref, str(evidence_path.resolve()),
-                sha256_file(evidence_path), utc_now(),
+                evidence_sha, utc_now(),
             ),
         )
         db.commit()
@@ -199,7 +206,12 @@ def add_actual(
 def sync_forecast(db_path: Path, submissions: Path) -> bool:
     if not submissions.is_file():
         return False
-    content = read_text_limited(submissions, max_bytes=10 * 1024 * 1024)
+    try:
+        content = read_text_limited(submissions, max_bytes=10 * 1024 * 1024)
+    except (OSError, ValueError):
+        # The is_file() check is not atomic; a vanished or oversized file must
+        # degrade to "nothing to sync" rather than crash the --sync cron.
+        return False
     match = BOUNTY_RANGE_RE.search(content)
     if not match:
         return False

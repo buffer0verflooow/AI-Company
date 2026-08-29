@@ -14,13 +14,23 @@ import sys
 from datetime import datetime, timezone
 
 CONTENT_JOBS = '/home/pwn/workspace/company/operations/runtime/content-jobs'
-STALE_HOURS = float(os.environ.get('STALE_HOURS', '48'))
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a numeric env var, falling back on malformed cron values."""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+STALE_HOURS = _env_float('STALE_HOURS', 48.0)
 
 TERMINAL_STATES = {'published', 'archived', 'terminated', 'cancelled'}
 # 活跃异常状态: 应该持续推进但卡住 (review 是等人工发布, 合法, 不在此列)
 ACTIVE_STATES = {'pending', 'running', 'qa', 'retrying', 'started'}
 # 超过该时长未完成的 review 才提示 (汇总行)
-REVIEW_STALE_HOURS = float(os.environ.get('REVIEW_STALE_HOURS', '168'))
+REVIEW_STALE_HOURS = _env_float('REVIEW_STALE_HOURS', 168.0)
 
 
 def job_state(job_dir: str):

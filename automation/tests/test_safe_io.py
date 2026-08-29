@@ -9,6 +9,7 @@ from pathlib import Path
 from automation._safe_io import (
     atomic_write_text,
     read_text_limited,
+    read_text_limited_nofollow,
     scrub_environment,
     stream_contains,
 )
@@ -41,6 +42,24 @@ class SafeIOTests(unittest.TestCase):
             self.assertEqual(read_text_limited(path, max_bytes=5), "12345")
             with self.assertRaises(ValueError):
                 read_text_limited(path, max_bytes=4)
+
+    def test_read_text_limited_nofollow_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "secret.txt"
+            target.write_text("secret", encoding="utf-8")
+            link = root / "payload.txt"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported on this platform")
+            # O_NOFOLLOW must refuse to follow the link atomically.
+            with self.assertRaises(OSError):
+                read_text_limited_nofollow(link, max_bytes=1024)
+            # Regular files still read normally.
+            self.assertEqual(
+                read_text_limited_nofollow(target, max_bytes=1024), "secret"
+            )
 
     def test_atomic_write_preserves_existing_permissions(self):
         with tempfile.TemporaryDirectory() as td:

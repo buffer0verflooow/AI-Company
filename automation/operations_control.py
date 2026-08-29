@@ -314,7 +314,10 @@ def previous_business_day(timezone_name: str = DEFAULT_TIMEZONE) -> date:
 def _find_worker_session(hermes_db: Path, job_dir: Path) -> dict[str, Any]:
     if not hermes_db.is_file():
         return {}
-    db = sqlite3.connect(sqlite_uri(hermes_db, mode="ro"), uri=True)
+    try:
+        db = sqlite3.connect(sqlite_uri(hermes_db, mode="ro"), uri=True)
+    except sqlite3.Error:
+        return {}
     db.row_factory = sqlite3.Row
     try:
         session = db.execute(
@@ -466,8 +469,10 @@ def _classify_security_findings(
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
         if isinstance(obj, dict) and "task_counts" in obj:
-            completed = obj["task_counts"].get("completed", 0)
-            if completed > 0:
+            task_counts = obj.get("task_counts")
+            # Log lines are arbitrary runner output; a non-dict task_counts or
+            # a non-numeric counter must not crash the sync cron.
+            if isinstance(task_counts, dict) and _safe_counter(task_counts.get("completed")) > 0:
                 return "no_business_value"
 
     return "empty_output"
@@ -584,19 +589,26 @@ def sync_operational_runs(
     price_table = pricing.load_price_table(finance_db)
     router_rows: dict[str, dict[str, Any]] = {}
     if router_db.is_file():
-        source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
-        source.row_factory = sqlite3.Row
         try:
-            for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
-                router_rows[str(row["run_id"])] = dict(row)
-        finally:
-            source.close()
+            source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
+        except sqlite3.Error:
+            source = None
+        if source is not None:
+            source.row_factory = sqlite3.Row
+            try:
+                for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
+                    router_rows[str(row["run_id"])] = dict(row)
+            finally:
+                source.close()
 
     job_dirs: dict[str, Path] = {}
-    if content_jobs.is_dir():
-        for path in content_jobs.iterdir():
-            if path.is_dir() and (path / "request.json").is_file():
-                job_dirs[path.name] = path
+    try:
+        job_entries = list(content_jobs.iterdir()) if content_jobs.is_dir() else []
+    except OSError:
+        job_entries = []
+    for path in job_entries:
+        if path.is_dir() and (path / "request.json").is_file():
+            job_dirs[path.name] = path
 
     all_run_ids = set(router_rows) | set(job_dirs)
     db = connect(db_path)
@@ -1365,7 +1377,7 @@ def _create_experiment_for_proposal(db: sqlite3.Connection, proposal: sqlite3.Ro
             proposal["success_metrics_json"],
             _json({
                 "recommended_action": proposal["recommended_action"],
-                "change_scopes": json.loads(proposal["change_scopes_json"] or "[]"),
+                "change_scopes": _load_json_list(proposal["change_scopes_json"]),
                 "rule": "先落实经营方案，再决定是否需要代码变更",
             }), now, now,
         ),
@@ -1413,6 +1425,20 @@ def _is_low_risk(risk: Any) -> bool:
     if not text:
         return True
     return any(marker in text for marker in _LOW_RISK_MARKERS)
+
+
+def _load_json_list(value: Any) -> list[Any]:
+    """Parse a stored JSON array column, degrading to [] on corrupt cells.
+
+    Proposal rows are written by sibling subsystems and hand-edited tooling; a
+    malformed change_scopes/success_metrics cell must not crash the decision
+    or experiment-creation path.
+    """
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def _proposal_change_scopes(row: sqlite3.Row) -> set[str]:
@@ -1597,8 +1623,8 @@ def apply_user_decision(
             "proposal_id": proposal["proposal_id"],
             "proposal_title": proposal["title"],
             "recommended_action": proposal["recommended_action"],
-            "change_scopes": json.loads(proposal["change_scopes_json"] or "[]"),
-            "success_metrics": json.loads(proposal["success_metrics_json"] or "[]"),
+            "change_scopes": _load_json_list(proposal["change_scopes_json"]),
+            "success_metrics": _load_json_list(proposal["success_metrics_json"]),
             "experiment_id": experiment_id,
         }
     finally:
@@ -1778,13 +1804,17 @@ def reap_stale_runs(
     # Runner PIDs live in the router DB; join them back to each run.
     runner_pids: dict[str, Any] = {}
     if router_db.is_file():
-        source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
-        source.row_factory = sqlite3.Row
         try:
-            for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
-                runner_pids[str(row["run_id"])] = row["runner_pid"]
-        finally:
-            source.close()
+            source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
+        except sqlite3.Error:
+            source = None
+        if source is not None:
+            source.row_factory = sqlite3.Row
+            try:
+                for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
+                    runner_pids[str(row["run_id"])] = row["runner_pid"]
+            finally:
+                source.close()
 
     reaped: list[str] = []
     skipped_alive: list[str] = []
@@ -1856,7 +1886,10 @@ def reap_stale_runs(
 def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> dict[str, str]:
     if not router_db.is_file():
         return {}
-    db = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
+    try:
+        db = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
+    except sqlite3.Error:
+        return {}
     db.row_factory = sqlite3.Row
     try:
         row = db.execute(

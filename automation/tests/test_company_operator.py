@@ -12,6 +12,7 @@ from pathlib import Path
 from automation.company_operator import (
     _safe_counter,
     _safe_float,
+    _should_auto_retry,
     _worker_model,
     build_worker_prompt,
     connect,
@@ -735,6 +736,13 @@ class CompanyOperatorTests(unittest.TestCase):
         self.assertEqual(_worker_model(config, 5), "flash")
         # An empty ladder disables model override entirely.
         self.assertEqual(_worker_model({"worker_model_ladder": []}, 0), "")
+        # A corrupt retry counter (planted in the DB row) must not crash the
+        # direct worker path; it degrades to 0 like _safe_counter.
+        self.assertEqual(_worker_model(config, "not-a-number"), "primary")
+        self.assertEqual(
+            _should_auto_retry(config, "not-a-number", failed=True),
+            _should_auto_retry(config, 0, failed=True),
+        )
 
     def test_safe_counter_defaults_and_fallbacks(self):
         self.assertEqual(_safe_counter(None), 0)

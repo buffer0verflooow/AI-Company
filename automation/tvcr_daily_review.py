@@ -93,6 +93,15 @@ def _safe_counter(value: Any) -> int:
         return 0
 
 
+def _safe_float(value: Any) -> float:
+    """Coerce a DB/JSON numeric to float, degrading to 0.0 on malformed values."""
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
@@ -169,8 +178,8 @@ def build_evidence_pack(
             ("tool_calls", item["tool_call_count"]),
             ("duration_seconds", item["duration_seconds"] or 0),
         ):
-            threshold = float(limits.get(metric) or 0)
-            if threshold and float(actual) >= threshold:
+            threshold = _safe_float(limits.get(metric))
+            if threshold and _safe_float(actual) >= threshold:
                 signals.append({
                     "kind": "resource_threshold_exceeded",
                     "run_id": item["run_id"],

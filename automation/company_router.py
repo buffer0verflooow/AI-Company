@@ -34,6 +34,7 @@ try:
         locked_atomic_write_text,
         quote_identifier,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_uri,
     )
@@ -43,6 +44,7 @@ except ImportError:  # direct ``python automation/company_router.py`` invocation
         locked_atomic_write_text,
         quote_identifier,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_uri,
     )
@@ -362,6 +364,25 @@ def _safe_counter(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _stored_decision(json_text: Any) -> RouteDecision | None:
+    """Rehydrate a stored route decision, returning None on corrupt cells.
+
+    State rows are written by sibling subsystems; a corrupt ``decision_json``
+    must not crash the routing hook.  Callers fall back to fresh classification
+    when this returns None.
+    """
+    try:
+        parsed = json.loads(str(json_text or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return RouteDecision(**parsed)
+    except (TypeError, ValueError):
+        return None
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -930,7 +951,8 @@ def _llm_fallback_classify(message: str, config: dict[str, Any], *, timeout: int
             timeout=_int_config(config, "llm_fallback_timeout_seconds", timeout),
             check=False,
         )
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        LOGGER.debug("LLM fallback classification failed: %s", exc)
         return None
     if proc.returncode != 0:
         return None
@@ -1011,7 +1033,8 @@ def classify_with_fallback(
     classifier = fallback or _llm_fallback_classify
     try:
         result = classifier(message, config)
-    except Exception:
+    except Exception as exc:  # a broken injected classifier must not crash the hook
+        LOGGER.debug("fallback classifier raised: %s", exc)
         return decision
     if not isinstance(result, dict):
         return decision
@@ -1564,9 +1587,11 @@ def refresh_session_content_jobs(config: dict[str, Any], state: RouterState, ses
                 updates.append(f"- {label}任务 {row['run_id'][:8]} 正在启动。")
                 continue
             try:
-                if status_path.is_symlink():
-                    raise ValueError("status file may not be a symlink")
-                payload = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+                # O_NOFOLLOW makes the symlink rejection atomic: the content
+                # jobs directory is written by an untrusted worker, and a swap
+                # between the is_symlink() check and the open would otherwise
+                # be followed (leaking file content into the LLM context).
+                payload = json.loads(read_text_limited_nofollow(status_path, max_bytes=2 * 1024 * 1024))
                 if not isinstance(payload, dict):
                     raise ValueError("status root must be an object")
             except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
@@ -1920,29 +1945,32 @@ def _handle_hook(
 
     existing = state.existing(session_id, message_hash)
     if existing:
-        decision = RouteDecision(**json.loads(existing["decision_json"]))
-        existing_updates = updates
-        if (
-            str(existing["status"] or "") == "skipped"
-            and "低置信度分发" in str(existing["error"] or "")
-        ):
-            decision = RouteDecision(**{
-                **asdict(decision),
-                "action": "main_agent",
-                "reason": "低置信度分发",
-            })
-            existing_updates = updates + [
-                (
-                    f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
-                    "未生成 run_id，已交由公司主 Agent 继续处理。"
-                )
-            ]
-        return {"context": build_context(
-            decision,
-            existing_run_id=existing["run_id"],
-            existing_status=existing["status"],
-            status_updates=existing_updates,
-        )}
+        decision = _stored_decision(existing["decision_json"])
+        if decision is None:
+            LOGGER.warning("corrupt stored decision_json for session %s; re-classifying", session_id)
+        else:
+            existing_updates = updates
+            if (
+                str(existing["status"] or "") == "skipped"
+                and "低置信度分发" in str(existing["error"] or "")
+            ):
+                decision = RouteDecision(**{
+                    **asdict(decision),
+                    "action": "main_agent",
+                    "reason": "低置信度分发",
+                })
+                existing_updates = updates + [
+                    (
+                        f"- [预评估] 未自动分发：低置信度分发（置信度 {decision.confidence:.2f}）。"
+                        "未生成 run_id，已交由公司主 Agent 继续处理。"
+                    )
+                ]
+            return {"context": build_context(
+                decision,
+                existing_run_id=existing["run_id"],
+                existing_status=existing["status"],
+                status_updates=existing_updates,
+            )}
 
     targets = extract_target(message)
     decision = classify_with_fallback(message, config, config.get("authorized_targets") or [])
@@ -1956,16 +1984,23 @@ def _handle_hook(
             dedup_key=dedup_key,
         )
         if recent:
-            state.update(
-                recent["route_event_id"],
-                delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
-            )
-            return {"context": build_context(
-                RouteDecision(**json.loads(recent["decision_json"])),
-                existing_run_id=recent["run_id"],
-                existing_status=recent["status"],
-                status_updates=updates,
-            )}
+            recent_decision = _stored_decision(recent["decision_json"])
+            if recent_decision is None:
+                LOGGER.warning(
+                    "corrupt stored decision_json for route event %s; skipping swarm dedup",
+                    recent["route_event_id"],
+                )
+            else:
+                state.update(
+                    recent["route_event_id"],
+                    delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
+                )
+                return {"context": build_context(
+                    recent_decision,
+                    existing_run_id=recent["run_id"],
+                    existing_status=recent["status"],
+                    status_updates=updates,
+                )}
 
     is_skill_review = decision.action == "dispatch_company" and SKILL_REVIEW_MARKER in message.lower()
     if is_skill_review:
@@ -1978,16 +2013,23 @@ def _handle_hook(
             message_marker=SKILL_REVIEW_MARKER,
         )
         if recent:
-            state.update(
-                recent["route_event_id"],
-                delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
-            )
-            return {"context": build_context(
-                RouteDecision(**json.loads(recent["decision_json"])),
-                existing_run_id=recent["run_id"],
-                existing_status=recent["status"],
-                status_updates=updates,
-            )}
+            recent_decision = _stored_decision(recent["decision_json"])
+            if recent_decision is None:
+                LOGGER.warning(
+                    "corrupt stored decision_json for route event %s; skipping skill-review dedup",
+                    recent["route_event_id"],
+                )
+            else:
+                state.update(
+                    recent["route_event_id"],
+                    delivery_attempts=_safe_counter(recent["delivery_attempts"]) + 1,
+                )
+                return {"context": build_context(
+                    recent_decision,
+                    existing_run_id=recent["run_id"],
+                    existing_status=recent["status"],
+                    status_updates=updates,
+                )}
 
     origin = resolve_session_origin(str(config.get("gateway_sessions_index") or ""), session_id)
     event_id = state.insert(

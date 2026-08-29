@@ -176,6 +176,21 @@ class TestClassifySecurityFindings(unittest.TestCase):
         )
         self.assertEqual(result, "no_business_value")
 
+    def test_corrupt_task_counts_does_not_crash(self):
+        """Malformed task_counts in arbitrary log lines must not crash the sync."""
+        body = "scanning...\n" + ("detail " * 40) + "\n"
+        body += json.dumps({"task_counts": "not-a-dict"}) + "\n"
+        body += json.dumps({"task_counts": {"completed": "abc"}}) + "\n"
+        body += json.dumps({"task_counts": {"completed": [1, 2]}})
+        self._make_log(self.log_dir, self.run_id, body)
+        result = _classify_security_findings(
+            self.run_id,
+            swarm_db=self.tmp / "nonexistent.db",
+            log_dir=self.log_dir,
+            min_finding_tokens=200,
+        )
+        self.assertEqual(result, "empty_output")
+
 
 if __name__ == "__main__":
     unittest.main()

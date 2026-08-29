@@ -269,7 +269,7 @@ def parse_nitter(body: str, src: dict[str, Any], now: datetime) -> list[dict[str
         if pub:
             try:
                 published = parsedate_to_datetime(pub.group(1).strip()).astimezone(timezone.utc).isoformat(timespec="seconds")
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 published = None
         author = creator.group(1).strip() if creator else ""
         # strip RT by @xxx: / R to @xxx: prefixes for classification
@@ -305,7 +305,7 @@ def parse_rss(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, A
             raw_date = (pub.group(1) or pub.group(2) or pub.group(3) or "").strip()
             try:
                 published = parsedate_to_datetime(raw_date).astimezone(timezone.utc).isoformat(timespec="seconds")
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 published = None
         items.append({"source": src["id"], "source_title": src["title"], "cat": src["cat"],
                       "title": title, "url": url, "published": published})
@@ -544,7 +544,7 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)  # naive date (e.g. CISA dateAdded) → UTC
             return (now - dt).days <= FRESH_DAYS
-        except Exception:
+        except (TypeError, ValueError):
             return True
 
     # ---- 选题池就绪区 (战略贴合, 优先展示) ----

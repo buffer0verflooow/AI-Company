@@ -206,7 +206,12 @@ def update_wiki(md_section: str) -> bool:
 
     with file_lock(WIKI_PATH):
         if WIKI_PATH.exists():
-            existing = read_text_limited(WIKI_PATH, max_bytes=10 * 1024 * 1024)
+            try:
+                existing = read_text_limited(WIKI_PATH, max_bytes=10 * 1024 * 1024)
+            except (OSError, ValueError):
+                # The exists() check is not atomic; a file removed between the
+                # check and the read is treated as absent and recreated below.
+                existing = ""
             # Replace existing auto section
             if AUTO_MARKER in existing:
                 start = existing.index(AUTO_MARKER)
@@ -237,7 +242,13 @@ def main():
         print(f"Swarm DB not found: {SWARM_DB}")
         return
 
-    entries = fetch_top_entries(SWARM_DB)
+    try:
+        entries = fetch_top_entries(SWARM_DB)
+    except sqlite3.Error as exc:
+        # The is_file() check is not atomic; a DB rotated between the check
+        # and the read-only connect must degrade cleanly.
+        print(f"Swarm DB unreadable: {SWARM_DB} ({exc})")
+        return
     if not entries:
         print("No L3/L4 entries found in Swarm KB.")
         return

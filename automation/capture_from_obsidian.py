@@ -284,8 +284,12 @@ def main():
                 continue
             content_hash = compute_content_hash(raw)
 
-            # Skip if already captured (same content hash)
-            existing = tracking.get(rel, {})
+            # Skip if already captured (same content hash). A legacy/corrupt
+            # tracking entry that is not a dict must degrade to "new" instead
+            # of aborting the whole scan with AttributeError.
+            existing = tracking.get(rel)
+            if not isinstance(existing, dict):
+                existing = {}
             if existing.get("content_hash") == content_hash:
                 if args.verbose:
                     print(f"  SKIP {rel} (unchanged)")

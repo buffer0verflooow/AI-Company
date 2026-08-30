@@ -258,18 +258,26 @@ def assess(entry: sqlite3.Row) -> dict[str, Any]:
 
 
 def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
-    source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
+    counts: dict[str, int] = {}
+    try:
+        source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
+    except sqlite3.Error:
+        # A missing/corrupt swarm DB must degrade to "nothing scanned" instead
+        # of aborting the promotion cron with a traceback.
+        return counts
     source.row_factory = sqlite3.Row
     gate: sqlite3.Connection | None = None
-    counts: dict[str, int] = {}
     now = utc_now()
     try:
         gate = connect_gate(gate_db)
-        entries = source.execute(
-            """SELECT id,level,knowledge_type,content,title,domain,knowledge_intent,
-                      trust_vector,status,tags,last_validated_at
-               FROM knowledge_entries WHERE status='active'"""
-        )
+        try:
+            entries = source.execute(
+                """SELECT id,level,knowledge_type,content,title,domain,knowledge_intent,
+                          trust_vector,status,tags,last_validated_at
+                   FROM knowledge_entries WHERE status='active'"""
+            )
+        except sqlite3.Error:
+            return counts
         for entry in entries:
             result = assess(entry)
             existing = gate.execute(

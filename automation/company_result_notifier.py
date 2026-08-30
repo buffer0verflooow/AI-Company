@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -15,6 +16,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from ._safe_io import locked_append_text, read_text_limited, sqlite_uri
@@ -209,7 +212,11 @@ def mirror_message(config: dict[str, Any], origin: dict[str, str], message: str)
             user_id=origin.get("user_id") or None,
             role="user",
         ))
-    except Exception:
+    except Exception as exc:
+        # Mirroring is best-effort, but a silent swallow hides real bugs (e.g. a
+        # missing origin key or a failure inside mirror_to_session) that are
+        # otherwise impossible to diagnose.
+        LOGGER.warning("mirror_message failed: %s", exc, exc_info=True)
         return False
 
 
@@ -228,7 +235,8 @@ def mirror_tvcr_message(config: dict[str, Any], origin: dict[str, str], message:
             user_id=origin.get("user_id") or None,
             role="user",
         ))
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("mirror_tvcr_message failed: %s", exc, exc_info=True)
         return False
 
 
@@ -447,7 +455,8 @@ def mirror_management_message(config: dict[str, Any], origin: dict[str, str], me
             user_id=origin.get("user_id") or None,
             role="user",
         ))
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("mirror_management_message failed: %s", exc, exc_info=True)
         return False
 
 
@@ -896,14 +905,18 @@ def process_once(
 
     # Import failed Hermes-origin deliveries before polling normal worker
     # results.  The outbox sender is deliberately single-owner (this cron job)
-    # so a live-adapter failure cannot race a second recovery sender.
+    # so a live-adapter failure cannot race a second recovery sender.  A locked
+    # or unavailable operations DB must not abort the whole one-minute tick.
     if _operations_db_path(config) is not None:
-        summary["outbox_enqueued"] = recover_failed_cron_deliveries(config)
-        outbox_result = process_outbox(config, deliverer=deliverer, mirror=mirror)
-        summary["outbox_checked"] = outbox_result["checked"]
-        summary["outbox_delivered"] = outbox_result["delivered"]
-        summary["outbox_failed"] = outbox_result["failed"]
-        summary["outbox_dead_letter"] = outbox_result["dead_letter"]
+        try:
+            summary["outbox_enqueued"] = recover_failed_cron_deliveries(config)
+            outbox_result = process_outbox(config, deliverer=deliverer, mirror=mirror)
+            summary["outbox_checked"] = outbox_result["checked"]
+            summary["outbox_delivered"] = outbox_result["delivered"]
+            summary["outbox_failed"] = outbox_result["failed"]
+            summary["outbox_dead_letter"] = outbox_result["dead_letter"]
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            LOGGER.warning("outbox recovery/processing failed: %s", exc, exc_info=True)
 
     state = RouterState(config["state_db"])
     try:
@@ -1199,36 +1212,100 @@ def process_once(
 
     operations_db = str(config.get("operations_db") or "").strip()
     if operations_db and not config.get("tvcr_delivery_via_outbox", False):
-        format_review_message, pending_review_deliveries, update_review = _operations_api()
-        review_rows = pending_review_deliveries(
-            Path(operations_db), _int_config(config, "max_delivery_attempts", 10)
-        )
-        for row in review_rows:
-            summary["checked"] += 1
-            if not _delivery_retry_ready(config, row):
-                continue
-            review_id = str(row["review_id"])
-            attempts = _safe_counter(row["delivery_attempts"]) + 1
-            origin = {
-                "platform": str(row["delivery_platform"] or ""),
-                "chat_id": str(row["delivery_chat_id"] or ""),
-                "thread_id": str(row["delivery_thread_id"] or ""),
-                "user_id": str(row["delivery_user_id"] or ""),
-            }
-            if not origin["platform"] or not origin["chat_id"]:
-                missing_target = "TVCR review has no delivery target"
-                if attempts >= _int_config(config, "max_delivery_attempts", 10):
-                    missing_message = format_review_message(
-                        Path(operations_db), review_id,
-                        limit=_int_config(config, "tvcr_delivery_default_chars", 1000),
+        try:
+            format_review_message, pending_review_deliveries, update_review = _operations_api()
+            review_rows = pending_review_deliveries(
+                Path(operations_db), _int_config(config, "max_delivery_attempts", 10)
+            )
+            for row in review_rows:
+                summary["checked"] += 1
+                if not _delivery_retry_ready(config, row):
+                    continue
+                review_id = str(row["review_id"])
+                attempts = _safe_counter(row["delivery_attempts"]) + 1
+                origin = {
+                    "platform": str(row["delivery_platform"] or ""),
+                    "chat_id": str(row["delivery_chat_id"] or ""),
+                    "thread_id": str(row["delivery_thread_id"] or ""),
+                    "user_id": str(row["delivery_user_id"] or ""),
+                }
+                if not origin["platform"] or not origin["chat_id"]:
+                    missing_target = "TVCR review has no delivery target"
+                    if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                        missing_message = format_review_message(
+                            Path(operations_db), review_id,
+                            limit=_int_config(config, "tvcr_delivery_default_chars", 1000),
+                        )
+                        terminal_error = _record_retry_exhaustion(
+                            config,
+                            kind="tvcr",
+                            identifier=review_id,
+                            origin=origin,
+                            message=missing_message,
+                            error=missing_target,
+                        )
+                        update_review(
+                            Path(operations_db), review_id,
+                            delivery_attempts=attempts,
+                            delivery_error=terminal_error,
+                            last_delivery_at=utc_now(),
+                        )
+                        summary["terminal"] += 1
+                    else:
+                        update_review(
+                            Path(operations_db), review_id,
+                            delivery_attempts=attempts,
+                            delivery_error=missing_target,
+                            last_delivery_at=utc_now(),
+                        )
+                        summary["waiting_target"] += 1
+                    continue
+                message = format_review_message(
+                    Path(operations_db), review_id,
+                    limit=_positive_limit(
+                        (config.get("tvcr_delivery_chars_by_platform") or {}).get(origin["platform"]),
+                        _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
+                    ),
+                )
+                terminal_reason = _terminal_reason(config, origin)
+                if terminal_reason:
+                    fallback = record_terminal_delivery(
+                        config, kind="tvcr", identifier=review_id, origin=origin,
+                        message=message, reason=terminal_reason,
                     )
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivery_attempts=_int_config(config, "max_delivery_attempts", 10),
+                        delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                    continue
+                try:
+                    ok, error = deliverer(config, origin, message)
+                except Exception as exc:  # noqa: BLE001 -- sender plugins must not stop the tick
+                    ok, error = False, f"{exc.__class__.__name__}: {exc}"
+                if ok:
+                    update_review(
+                        Path(operations_db), review_id,
+                        delivered=1,
+                        delivery_attempts=attempts,
+                        delivery_error="",
+                        last_delivery_at=utc_now(),
+                    )
+                    if mirror is None:
+                        mirror_tvcr_message(config, origin, message)
+                    else:
+                        mirror(origin, message)
+                    summary["delivered"] += 1
+                elif attempts >= _int_config(config, "max_delivery_attempts", 10):
                     terminal_error = _record_retry_exhaustion(
                         config,
                         kind="tvcr",
                         identifier=review_id,
                         origin=origin,
-                        message=missing_message,
-                        error=missing_target,
+                        message=message,
+                        error=error,
                     )
                     update_review(
                         Path(operations_db), review_id,
@@ -1241,73 +1318,14 @@ def process_once(
                     update_review(
                         Path(operations_db), review_id,
                         delivery_attempts=attempts,
-                        delivery_error=missing_target,
+                        delivery_error=error,
                         last_delivery_at=utc_now(),
                     )
-                    summary["waiting_target"] += 1
-                continue
-            message = format_review_message(
-                Path(operations_db), review_id,
-                limit=_positive_limit(
-                    (config.get("tvcr_delivery_chars_by_platform") or {}).get(origin["platform"]),
-                    _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
-                ),
-            )
-            terminal_reason = _terminal_reason(config, origin)
-            if terminal_reason:
-                fallback = record_terminal_delivery(
-                    config, kind="tvcr", identifier=review_id, origin=origin,
-                    message=message, reason=terminal_reason,
-                )
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=_int_config(config, "max_delivery_attempts", 10),
-                    delivery_error=f"terminal: {terminal_reason}; fallback={fallback}",
-                    last_delivery_at=utc_now(),
-                )
-                summary["terminal"] += 1
-                continue
-            try:
-                ok, error = deliverer(config, origin, message)
-            except Exception as exc:  # noqa: BLE001 -- sender plugins must not stop the tick
-                ok, error = False, f"{exc.__class__.__name__}: {exc}"
-            if ok:
-                update_review(
-                    Path(operations_db), review_id,
-                    delivered=1,
-                    delivery_attempts=attempts,
-                    delivery_error="",
-                    last_delivery_at=utc_now(),
-                )
-                if mirror is None:
-                    mirror_tvcr_message(config, origin, message)
-                else:
-                    mirror(origin, message)
-                summary["delivered"] += 1
-            elif attempts >= _int_config(config, "max_delivery_attempts", 10):
-                terminal_error = _record_retry_exhaustion(
-                    config,
-                    kind="tvcr",
-                    identifier=review_id,
-                    origin=origin,
-                    message=message,
-                    error=error,
-                )
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=attempts,
-                    delivery_error=terminal_error,
-                    last_delivery_at=utc_now(),
-                )
-                summary["terminal"] += 1
-            else:
-                update_review(
-                    Path(operations_db), review_id,
-                    delivery_attempts=attempts,
-                    delivery_error=error,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                    summary["failed"] += 1
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # A locked/unavailable operations DB must not abort the whole
+            # one-minute delivery tick; skip this cycle and retry next time.
+            LOGGER.warning("tvcr review delivery skipped: %s", exc, exc_info=True)
     return summary
 
 

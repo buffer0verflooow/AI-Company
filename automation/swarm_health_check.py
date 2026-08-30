@@ -34,7 +34,23 @@ def _ok(name: str, detail: str = "") -> None:
 
 
 def main() -> int:
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # A health check must report its own broken configuration cleanly
+        # instead of dying with an unhandled traceback.
+        _fail("配置", f"无法读取 {CONFIG_PATH}: {exc}")
+        failed = [c for c in CHECKS if not c["ok"]]
+        if "--json" in sys.argv:
+            print(json.dumps({
+                "healthy": False,
+                "checks": CHECKS,
+                "failed_count": len(failed),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, ensure_ascii=False, indent=1))
+        else:
+            print(f"❌ 配置: {failed[0]['detail']}")
+        return 1
     swarm_repo = Path(config["swarm_repo"])
 
     # 1. 路径有效性
@@ -60,7 +76,11 @@ def main() -> int:
         db = None
     else:
         _ok("swarm DB 存在", str(db_path))
-        db = sqlite3.connect(str(db_path))
+        try:
+            db = sqlite3.connect(str(db_path))
+        except sqlite3.Error as exc:
+            _fail("swarm DB 存在", f"无法打开: {exc}")
+            db = None
 
     # 2. 最近 run 健康: 长期 pending
     if db is not None:

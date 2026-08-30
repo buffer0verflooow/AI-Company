@@ -425,11 +425,6 @@ def _contains_any(text: str, terms: Iterable[str]) -> bool:
     return any(term.lower() in lowered for term in terms)
 
 
-def _score(text: str, terms: Iterable[str]) -> int:
-    lowered = text.lower()
-    return sum(1 for term in terms if term.lower() in lowered)
-
-
 def _has_external_action(text: str) -> bool:
     cleaned = NEGATED_EXTERNAL_ACTION_RE.sub("", text)
     return _contains_any(cleaned, EXTERNAL_ACTION_TERMS)
@@ -1931,6 +1926,21 @@ def handle_hook(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, st
         state.close()
 
 
+def _stored_decision_fallback(row: sqlite3.Row) -> RouteDecision:
+    """Build a no-dispatch decision for a row whose stored decision_json is corrupt.
+
+    Reusing the row's recorded action (with its run_id/status passed separately
+    to build_context) makes the hook tell the main agent the task already exists
+    instead of falling through to a fresh classification and duplicate dispatch.
+    """
+    return RouteDecision(
+        route=str(row["route"] or "unknown"),
+        confidence=0.0,
+        action=str(row["action"] or "main_agent"),
+        reason="stored decision unreadable; not re-dispatching",
+    )
+
+
 def _handle_hook(
     state: RouterState,
     payload: dict[str, Any],
@@ -1947,7 +1957,17 @@ def _handle_hook(
     if existing:
         decision = _stored_decision(existing["decision_json"])
         if decision is None:
-            LOGGER.warning("corrupt stored decision_json for session %s; re-classifying", session_id)
+            # A corrupt stored decision must NOT fall through to a fresh
+            # classification: RouterState.insert would reuse this event id and
+            # the dispatch below would overwrite its run_id/status and submit a
+            # duplicate run (token burn / duplicate external work).
+            LOGGER.warning("corrupt stored decision_json for session %s; not re-dispatching", session_id)
+            return {"context": build_context(
+                _stored_decision_fallback(existing),
+                existing_run_id=existing["run_id"],
+                existing_status=existing["status"],
+                status_updates=updates,
+            )}
         else:
             existing_updates = updates
             if (
@@ -1986,10 +2006,19 @@ def _handle_hook(
         if recent:
             recent_decision = _stored_decision(recent["decision_json"])
             if recent_decision is None:
+                # Same guard as the existing-event branch: an unreadable stored
+                # decision must not disable the dedup window, or a repeated
+                # message would spawn a duplicate swarm run.
                 LOGGER.warning(
-                    "corrupt stored decision_json for route event %s; skipping swarm dedup",
+                    "corrupt stored decision_json for route event %s; deduping without re-dispatch",
                     recent["route_event_id"],
                 )
+                return {"context": build_context(
+                    _stored_decision_fallback(recent),
+                    existing_run_id=recent["run_id"],
+                    existing_status=recent["status"],
+                    status_updates=updates,
+                )}
             else:
                 state.update(
                     recent["route_event_id"],
@@ -2016,9 +2045,15 @@ def _handle_hook(
             recent_decision = _stored_decision(recent["decision_json"])
             if recent_decision is None:
                 LOGGER.warning(
-                    "corrupt stored decision_json for route event %s; skipping skill-review dedup",
+                    "corrupt stored decision_json for route event %s; deduping without re-dispatch",
                     recent["route_event_id"],
                 )
+                return {"context": build_context(
+                    _stored_decision_fallback(recent),
+                    existing_run_id=recent["run_id"],
+                    existing_status=recent["status"],
+                    status_updates=updates,
+                )}
             else:
                 state.update(
                     recent["route_event_id"],

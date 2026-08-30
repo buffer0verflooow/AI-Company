@@ -656,11 +656,28 @@ def run_radar(
         db.commit()
     finally:
         db.close()
-    atomic_write_text(run_dir / "request.json", json.dumps({
-        "run_id": run_id, "queries": queries, "endpoint": ANYSEARCH_ENDPOINT,
-        "upstream_commit": UPSTREAM_COMMIT, "upstream_zip_sha256": UPSTREAM_ZIP_SHA256,
-        "api_key_mode": "environment" if os.environ.get("ANYSEARCH_API_KEY") else "anonymous",
-    }, ensure_ascii=False, indent=2))
+    try:
+        atomic_write_text(run_dir / "request.json", json.dumps({
+            "run_id": run_id, "queries": queries, "endpoint": ANYSEARCH_ENDPOINT,
+            "upstream_commit": UPSTREAM_COMMIT, "upstream_zip_sha256": UPSTREAM_ZIP_SHA256,
+            "api_key_mode": "environment" if os.environ.get("ANYSEARCH_API_KEY") else "anonymous",
+        }, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        # The run row is already recorded as 'running'; an I/O failure writing
+        # the request manifest must mark the run failed instead of leaving the
+        # row stuck at 'running' and aborting the whole radar cron.
+        completed = utc_now()
+        db = connect(db_path)
+        try:
+            db.execute(
+                """UPDATE market_radar_runs SET status='failed',error=?,completed_at=?,updated_at=?
+                   WHERE run_id=?""",
+                (str(exc)[:2000], completed, completed, run_id),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return {"run_id": run_id, "status": "failed", "error": str(exc), "signals": 0, "pulses": 0}
 
     all_records: list[dict[str, Any]] = []
     raw_sections: list[str] = []

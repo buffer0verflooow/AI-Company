@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -19,6 +20,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from ._safe_io import file_lock, quote_identifier, read_text_limited, sqlite_uri
@@ -406,8 +409,12 @@ def _classify_security_findings(
                     fragments.append(row[0])
             finally:
                 conn.close()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            # Best-effort degrade: a swarm-DB read failure must not crash the
+            # outcome classification, but it must stay visible so DB problems
+            # are detectable instead of silently lowering every run to
+            # log-fragments-only.
+            LOGGER.warning("swarm db read failed for run %s: %s", run_id, exc, exc_info=True)
 
     combined = "\n".join(fragments)
 

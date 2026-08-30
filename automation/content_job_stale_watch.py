@@ -63,6 +63,17 @@ def main():
         if not os.path.isdir(job_dir):
             continue
         state, mtime = job_state(job_dir)
+        # job_state() falls back to status.json's raw status when lifecycle.json
+        # is absent (the executor writes status.json and never lifecycle.json).
+        # Map the executor's terminal statuses onto the lifecycle vocabulary so
+        # finished-but-unreviewed jobs are flagged by the REVIEW_STALE_HOURS
+        # alarm instead of silently skipped. Mirrors backfill_job_states.py and
+        # content_job_state._derive_initial_state.
+        state = {
+            "completed": "review",
+            "needs_approval": "review",
+            "failed": "terminated",
+        }.get(state, state)
         if state in TERMINAL_STATES:
             continue
         age_h = (now - mtime) / 3600.0

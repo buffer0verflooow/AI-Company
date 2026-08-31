@@ -229,6 +229,47 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual(row["delivery_error"], "network down")
             state.close()
 
+    def test_persistently_failing_status_query_advances_attempts(self):
+        # A run whose swarm status query keeps raising (e.g. the run was
+        # deleted from the swarm DB) must not be re-polled forever: each tick
+        # advances delivery_attempts so the row stops being returned as pending
+        # once max_delivery_attempts is reached.
+        with tempfile.TemporaryDirectory() as td:
+            db_path, event_id = self._setup_event(td)
+            config = self._config(td, db_path)
+            config["max_delivery_attempts"] = 2
+            with patch("automation.company_result_notifier.swarm_command", side_effect=RuntimeError("run not found")):
+                first = process_once(config)
+                second = process_once(config)
+                third = process_once(config)
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(first["failed"], 1)
+            self.assertEqual(second["failed"], 1)
+            # Attempts exhausted: the row is no longer returned as pending.
+            self.assertEqual(third["failed"], 0)
+            self.assertEqual(row["delivery_attempts"], 2)
+            self.assertIn("run status query failed", row["error"])
+            self.assertEqual(list(state.pending_notifications(2)), [])
+            state.close()
+
+    def test_unhandled_swarm_status_advances_attempts(self):
+        # A status outside the handled set must be recorded and counted toward
+        # max_delivery_attempts instead of being re-polled forever.
+        with tempfile.TemporaryDirectory() as td:
+            db_path, event_id = self._setup_event(td)
+            config = self._config(td, db_path)
+            config["max_delivery_attempts"] = 1
+            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "weird"}):
+                summary = process_once(config)
+            state = RouterState(db_path)
+            row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(row["delivery_attempts"], 1)
+            self.assertIn("unhandled swarm run status", row["error"])
+            self.assertEqual(list(state.pending_notifications(1)), [])
+            state.close()
+
     def test_stale_runner_without_heartbeat_is_marked_suspected_dead(self):
         with tempfile.TemporaryDirectory() as td:
             db_path, event_id = self._setup_event(td)

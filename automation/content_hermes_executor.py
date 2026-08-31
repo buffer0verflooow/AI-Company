@@ -328,7 +328,7 @@ def main() -> int:
     try:
         request = json.loads(read_text_limited(request_path, max_bytes=2 * 1024 * 1024))
         if not isinstance(request, dict):
-            raise ValueError("request root must be an object")
+            raise TypeError("request root must be an object")
         if request.get("route") not in {"company", "article", "video"}:
             raise ValueError(f"unsupported content route: {request.get('route')!r}")
     except Exception as exc:
@@ -404,7 +404,7 @@ def main() -> int:
         try:
             value = json.loads(read_text_limited(job_dir / "result.json", max_bytes=2 * 1024 * 1024))
             if not isinstance(value, dict):
-                raise ValueError("result.json must contain an object")
+                raise TypeError("result.json must contain an object")
             worker_result = value
             if str(value.get("status") or "") not in {"completed", "needs_approval", "failed"}:
                 raise ValueError("result.json status must be completed, needs_approval, or failed")

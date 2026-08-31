@@ -105,7 +105,7 @@ def _safe_float(value: Any) -> float:
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
-        raise ValueError("operations control config must be a JSON object")
+        raise TypeError("operations control config must be a JSON object")
     return value
 
 
@@ -459,7 +459,7 @@ def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: 
     try:
         proposal_payload = json.loads(read_text_limited(proposals_path, max_bytes=2_000_000))
         if not isinstance(proposal_payload, dict):
-            raise ValueError("proposals root must be an object")
+            raise TypeError("proposals root must be an object")
         validation_errors = validate_outputs(
             evidence,
             read_text_limited(report_path, max_bytes=2_000_000),
@@ -469,7 +469,7 @@ def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: 
         if validation_errors:
             raise ValueError("; ".join(validation_errors))
         ids = import_proposals(db_path, review_id, proposal_payload)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
         update_review(db_path, review_id, status="failed", error=f"invalid proposals: {exc}", report_path=str(report_path))
         return {"review_id": review_id, "status": "failed", "error": str(exc), "runs": len(runs), "sync": sync}
     update_review(db_path, review_id, report_path=str(report_path), error="")

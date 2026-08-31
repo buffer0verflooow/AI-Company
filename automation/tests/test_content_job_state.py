@@ -69,6 +69,19 @@ class TransitionFlowTests(unittest.TestCase):
             self.assertEqual(transition(job, "published", "pushed draft"), 0)
             self.assertEqual(read_lifecycle(job)["state"], "published")
 
+    def test_corrupt_history_does_not_crash_transition(self):
+        # A lifecycle.json with a valid state but a non-list history (corrupt
+        # write, hand edit) must not raise AttributeError on transition.
+        with tempfile.TemporaryDirectory() as td:
+            job = _make_job(Path(td), "completed")
+            (job / "lifecycle.json").write_text(
+                json.dumps({"state": "review", "history": None}), encoding="utf-8"
+            )
+            self.assertEqual(transition(job, "published", "pushed draft"), 0)
+            lc = read_lifecycle(job)
+            self.assertEqual(lc["state"], "published")
+            self.assertIsInstance(lc["history"], list)
+
     def test_completed_job_can_be_archived(self):
         with tempfile.TemporaryDirectory() as td:
             job = _make_job(Path(td), "completed")

@@ -17,6 +17,7 @@
 import json
 import math
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -208,10 +209,20 @@ def update_wiki(md_section: str) -> bool:
         if WIKI_PATH.exists():
             try:
                 existing = read_text_limited(WIKI_PATH, max_bytes=10 * 1024 * 1024)
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 # The exists() check is not atomic; a file removed between the
                 # check and the read is treated as absent and recreated below.
                 existing = ""
+            except (OSError, ValueError) as exc:
+                # An unreadable or oversized wiki must NEVER be treated as
+                # empty: replacing it with just the auto section would destroy
+                # all handwritten content.  Refuse to sync and surface the
+                # failure instead.
+                print(
+                    f"WARNING: skipping wiki sync, unreadable {WIKI_PATH}: {exc}",
+                    file=sys.stderr,
+                )
+                return False
             # Replace existing auto section
             if AUTO_MARKER in existing:
                 start = existing.index(AUTO_MARKER)

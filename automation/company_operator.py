@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import subprocess
@@ -23,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from ._safe_io import (
@@ -113,7 +116,7 @@ def _should_auto_retry(config: dict[str, Any], retry_count: int, failed: bool) -
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
-        raise ValueError("company operator config must be an object")
+        raise TypeError("company operator config must be an object")
     return payload
 
 
@@ -252,22 +255,39 @@ def _upsert_opportunity(db: sqlite3.Connection, item: dict[str, Any]) -> str:
         )
         return "refreshed"
     opportunity_id = _stable_id("AUTO-OPP", item["idempotency_key"])
-    db.execute(
-        """INSERT INTO autonomy_opportunities
-           (opportunity_id,idempotency_key,source_type,source_ref,mission_id,product_line,
-            title,description,action_kind,risk_level,requires_approval,approval_granted,
-            score,status,evidence_json,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?)""",
-        (
-            opportunity_id, item["idempotency_key"], item["source_type"],
-            item.get("source_ref", ""), item.get("mission_id", ""),
-            item.get("product_line", "company"), item["title"], item["description"],
-            item["action_kind"], item.get("risk_level", "low"),
-            int(bool(item.get("requires_approval"))), int(bool(item.get("approval_granted"))),
-            float(item["score"]), _json(item.get("evidence", {})), now, now,
-        ),
-    )
-    return "created"
+    try:
+        db.execute(
+            """INSERT INTO autonomy_opportunities
+               (opportunity_id,idempotency_key,source_type,source_ref,mission_id,product_line,
+                title,description,action_kind,risk_level,requires_approval,approval_granted,
+                score,status,evidence_json,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?)""",
+            (
+                opportunity_id, item["idempotency_key"], item["source_type"],
+                item.get("source_ref", ""), item.get("mission_id", ""),
+                item.get("product_line", "company"), item["title"], item["description"],
+                item["action_kind"], item.get("risk_level", "low"),
+                int(bool(item.get("requires_approval"))), int(bool(item.get("approval_granted"))),
+                float(item["score"]), _json(item.get("evidence", {})), now, now,
+            ),
+        )
+        return "created"
+    except sqlite3.IntegrityError:
+        # A concurrent cycle inserted the same idempotency key between our
+        # SELECT and INSERT; refresh that row instead of crashing discovery.
+        db.execute(
+            """UPDATE autonomy_opportunities
+               SET title=?,description=?,score=?,risk_level=?,requires_approval=?,
+                   approval_granted=?,evidence_json=?,updated_at=?
+               WHERE idempotency_key=?""",
+            (
+                item["title"], item["description"], float(item["score"]),
+                item.get("risk_level", "low"), int(bool(item.get("requires_approval"))),
+                int(bool(item.get("approval_granted"))), _json(item.get("evidence", {})),
+                now, item["idempotency_key"],
+            ),
+        )
+        return "refreshed"
 
 
 def _priority_score(priority: str) -> int:
@@ -415,10 +435,11 @@ def discover_opportunities(
                            WHERE status='new' AND score>=? ORDER BY score DESC,created_at ASC""",
                         (minimum_market_score,),
                     ).fetchall()
-                except sqlite3.Error:
+                except (sqlite3.Error, IndexError):
                     # A failed read must not be interpreted as "every pulse vanished":
                     # leave the status map unknown so stale open opportunities are not
-                    # mass-dismissed by the comparison below.
+                    # mass-dismissed by the comparison below.  IndexError covers a
+                    # market_pulses schema drift (missing column) the same way.
                     pulse_statuses = None
                     pulses = []
                 finally:
@@ -500,11 +521,13 @@ def discover_opportunities(
                         market_write.commit()
                     finally:
                         market_write.close()
-                except sqlite3.Error:
+                except (sqlite3.Error, IndexError) as exc:
                     # The UPDATE is idempotent (AND status='new') and the cooldown
                     # is advisory; a transient write error must not abort the whole
-                    # discovery/cycle like the guarded read path above.
-                    pass
+                    # discovery/cycle like the guarded read path above — but the
+                    # failure should stay visible (pulses will otherwise keep
+                    # re-appearing as opportunities).
+                    LOGGER.warning("market pulse cooldown update failed: %s", exc, exc_info=True)
 
         for mission in config.get("standing_missions", []):
             if not isinstance(mission, dict) or not mission.get("enabled", True):
@@ -768,8 +791,8 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
         # would otherwise be followed (leaking file content into the summary).
         payload = json.loads(read_text_limited_nofollow(result_path, max_bytes=2 * 1024 * 1024))
         if not isinstance(payload, dict):
-            raise ValueError("result root must be an object")
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise TypeError("result root must be an object")
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
         return {"status": "failed", "error": f"invalid result.json: {exc}", "summary": "", "next_action": "", "metrics": {}}
     status = str(payload.get("status") or "failed")
     if status not in {"completed", "needs_approval", "failed"}:
@@ -813,7 +836,13 @@ def worker_usage(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
 def _regular_artifacts(run_dir: Path) -> list[Path]:
     root = run_dir.resolve()
     artifacts: list[Path] = []
-    for path in sorted(run_dir.iterdir()):
+    try:
+        entries = list(run_dir.iterdir())
+    except OSError:
+        # The untrusted worker may delete its own run dir; a vanished directory
+        # means "no artifacts", not a crash of the whole cycle.
+        return []
+    for path in entries:
         if path.is_symlink() or not path.is_file():
             continue
         try:
@@ -1106,35 +1135,62 @@ def run_cycle(
     finally:
         db.close()
 
-    discovery = discover_opportunities(db_path, config, now=now)
-    selected = select_executable(db_path, config, now=now) if execute and config.get("enabled", True) else []
-    executions: list[dict[str, Any]] = []
-    parallelism = min(len(selected), max(1, _int_config(config, "max_parallel_workers", 1)))
-    if parallelism <= 1:
-        for opportunity in selected:
-            result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
-            executions.append({"title": opportunity["title"], "opportunity_id": opportunity["opportunity_id"], **result})
-    else:
-        ordered: list[dict[str, Any] | None] = [None] * len(selected)
-        with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="company-operator") as pool:
-            futures = {
-                pool.submit(execute_opportunity, db_path, run_root, cycle_id, opportunity, config, worker=worker): index
-                for index, opportunity in enumerate(selected)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                opportunity = selected[index]
+    try:
+        discovery = discover_opportunities(db_path, config, now=now)
+        selected = select_executable(db_path, config, now=now) if execute and config.get("enabled", True) else []
+        executions: list[dict[str, Any]] = []
+        parallelism = min(len(selected), max(1, _int_config(config, "max_parallel_workers", 1)))
+        if parallelism <= 1:
+            for opportunity in selected:
                 try:
-                    result = future.result()
+                    result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
                 except Exception as exc:
+                    # One crashing opportunity (e.g. its run dir vanished) must
+                    # not abort the rest of the serial cycle.
                     result = {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
-                ordered[index] = {
-                    "title": opportunity["title"],
-                    "opportunity_id": opportunity["opportunity_id"],
-                    **result,
+                executions.append({"title": opportunity["title"], "opportunity_id": opportunity["opportunity_id"], **result})
+        else:
+            ordered: list[dict[str, Any] | None] = [None] * len(selected)
+            with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="company-operator") as pool:
+                futures = {
+                    pool.submit(execute_opportunity, db_path, run_root, cycle_id, opportunity, config, worker=worker): index
+                    for index, opportunity in enumerate(selected)
                 }
-        executions = [item for item in ordered if item is not None]
-    approvals = pending_approval_items(db_path, _int_config(config, "approval_digest_items", 3))
+                for future in as_completed(futures):
+                    index = futures[future]
+                    opportunity = selected[index]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
+                    ordered[index] = {
+                        "title": opportunity["title"],
+                        "opportunity_id": opportunity["opportunity_id"],
+                        **result,
+                    }
+            executions = [item for item in ordered if item is not None]
+        approvals = pending_approval_items(db_path, _int_config(config, "approval_digest_items", 3))
+    except Exception as exc:
+        # A mid-cycle crash after the cycle row was inserted (DB error, worker
+        # IO, unexpected shape) must not leave autonomy_cycles pinned to
+        # 'running' forever; terminalize the cycle, then re-raise so the
+        # operator sees the failure.
+        failed_at = utc_now()
+        db = connect(db_path)
+        try:
+            db.execute(
+                """UPDATE autonomy_cycles
+                   SET status='failed',summary_json=?,delivery_error=?,completed_at=?,updated_at=?
+                   WHERE cycle_id=? AND status='running'""",
+                (
+                    _json({"error": f"{exc.__class__.__name__}: {exc}"}),
+                    f"cycle aborted: {exc}", failed_at, failed_at, cycle_id,
+                ),
+            )
+            db.commit()
+        finally:
+            db.close()
+        raise
     summary = {
         "cycle_id": cycle_id,
         "discovered_created": discovery["created"],

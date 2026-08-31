@@ -98,7 +98,7 @@ def _safe_query_int(value: Any, default: int) -> int:
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(payload, dict):
-        raise ValueError("market radar config must be an object")
+        raise TypeError("market radar config must be an object")
     endpoint = str(payload.get("endpoint") or ANYSEARCH_ENDPOINT)
     if endpoint != ANYSEARCH_ENDPOINT:
         raise ValueError(f"market radar endpoint must remain pinned to {ANYSEARCH_ENDPOINT}")
@@ -110,7 +110,7 @@ def validate_queries(queries: Iterable[dict[str, Any]]) -> None:
     seen: set[str] = set()
     for item in queries:
         if not isinstance(item, dict):
-            raise ValueError("each market query must be an object")
+            raise TypeError("each market query must be an object")
         query_id = str(item.get("id") or "").strip()
         query = str(item.get("query") or "").strip()
         theme = str(item.get("theme") or "").strip()
@@ -123,7 +123,7 @@ def validate_queries(queries: Iterable[dict[str, Any]]) -> None:
             raise ValueError(f"market query theme missing: {query_id}")
         params = item.get("sub_domain_params") or {}
         if not isinstance(params, dict):
-            raise ValueError(f"sub_domain_params must be an object: {query_id}")
+            raise TypeError(f"sub_domain_params must be an object: {query_id}")
         search_type = str(params.get("type") or "")
         if search_type in FORBIDDEN_SEARCH_TYPES:
             raise ValueError(f"privacy-sensitive search type is forbidden: {search_type}")
@@ -283,13 +283,13 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"AnySearch returned invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError("AnySearch response root must be an object")
+        raise TypeError("AnySearch response root must be an object")
     if parsed.get("error"):
         message = parsed["error"].get("message") if isinstance(parsed["error"], dict) else parsed["error"]
         raise RuntimeError(f"AnySearch API error: {message}")
     result = parsed.get("result") or {}
     if not isinstance(result, dict):
-        raise RuntimeError("AnySearch result must be an object")
+        raise TypeError("AnySearch result must be an object")
     for item in result.get("content") or []:
         if isinstance(item, dict) and item.get("type") == "text":
             return str(item.get("text") or "")

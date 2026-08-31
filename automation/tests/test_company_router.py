@@ -712,6 +712,39 @@ class SwarmIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(select_company_result(result), "校正后的证据结论")
 
+    def test_diff_preview_ending_later_still_loses_to_evidence_conclusion(self):
+        # A diff preview that finishes AFTER the evidence-backed conclusion
+        # must not outrank it: diff previews are lower priority regardless of
+        # finish order.
+        result = {
+            "result": "reporter fallback",
+            "task_results": [
+                {
+                    "status": "completed",
+                    "ended_at": "2026-07-15 03:50:00",
+                    "result_summary": {"content": "┊ review diff\nclaimed file output"},
+                },
+                {
+                    "status": "completed",
+                    "ended_at": "2026-07-15 03:40:48",
+                    "result_summary": {"content": "校正后的证据结论"},
+                },
+            ],
+        }
+        self.assertEqual(select_company_result(result), "校正后的证据结论")
+
+    def test_select_company_result_tolerates_corrupt_task_results(self):
+        # A corrupt/older swarmctl payload must degrade to the top-level result
+        # instead of crashing the delivery tick / hook message.
+        self.assertEqual(
+            select_company_result({"task_results": {"status": "completed"}, "result": "top"}),
+            "top",
+        )
+        self.assertEqual(
+            select_company_result({"task_results": ["not-a-dict"], "summary": "sum"}),
+            "sum",
+        )
+
 
 class LowConfidenceFallbackTests(unittest.TestCase):
     def _ambiguous(self):

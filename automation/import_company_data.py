@@ -174,6 +174,11 @@ def _parse_xls(path: Path) -> dict[str, Any]:
     book = xlrd.open_workbook(path)
     sheet = book.sheet_by_index(0)
     rows = [[cell.value for cell in row] for row in sheet.get_rows()]
+    # An empty sheet or a single-column sheet would crash the header access
+    # below; one corrupt export inside the evidence zip must not abort the
+    # whole import run.
+    if not rows or len(rows[0]) < 2:
+        raise ValueError(f"unexpected .xls layout (no title row): {path}")
     title = str(rows[0][1]).strip()
     metrics: dict[str, Any] = {}
     trend: list[dict[str, Any]] = []

@@ -145,6 +145,36 @@ class KnowledgePromotionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 promote(gate, candidate["candidate_id"], wiki)
 
+    def test_promote_sanitizes_crafted_candidate_id_in_filename(self):
+        # A candidate_id containing path separators must never escape wiki_dir
+        # via the promoted filename.
+        import hashlib
+
+        content = "# Reviewed lesson\nsafe content."
+        with tempfile.TemporaryDirectory() as td:
+            gate = Path(td) / "gate.db"
+            wiki = Path(td) / "wiki"
+            db = connect_gate(gate)
+            db.execute(
+                """INSERT INTO promotion_candidates
+                   (candidate_id,knowledge_id,title,sanitized_preview,validation_status,
+                    sensitivity_status,disclosure_status,human_approval_status,status,
+                    reviewed_content,content_sha256,approved_by,approved_at,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "../../evil", "k-traversal", "Lesson", "preview", "reviewed",
+                    "reviewed_passed", "public", "approved", "approved",
+                    content, hashlib.sha256(content.encode()).hexdigest(),
+                    "reviewer", "2026-07-15", "2026-07-15", "2026-07-15",
+                ),
+            )
+            db.commit()
+            db.close()
+            output = promote(gate, "../../evil", wiki)
+            self.assertEqual(output.parent, wiki)
+            self.assertEqual(output.name, "knowledge-evil.md")
+            self.assertTrue(output.exists())
+
     def test_malformed_trust_and_tags_do_not_crash_or_grant_disclosure(self):
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "swarm.db"

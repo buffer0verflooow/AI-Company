@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import automation.capture_from_obsidian as capture
+import automation.swarm_kb_to_obsidian as bridge
 from automation.swarm_kb_to_obsidian import (
     _safe_level,
     fetch_top_entries,
@@ -147,6 +148,28 @@ class SwarmBridgeTests(unittest.TestCase):
         self.assertEqual(markdown.count("<!-- /swarm-kb-auto -->"), 1)
         self.assertIn("&lt;script&gt;", markdown)
         self.assertNotIn("\n## injected", markdown)
+
+    def test_update_wiki_refuses_to_overwrite_unreadable_wiki(self):
+        # An unreadable/oversized wiki must never be replaced by just the auto
+        # section (that would destroy handwritten content).
+        with tempfile.TemporaryDirectory() as td:
+            wiki = Path(td) / "panel.md"
+            wiki.write_text("# 手写内容\n保留此行。\n", encoding="utf-8")
+            with patch.object(bridge, "read_text_limited", side_effect=OSError("simulated read failure")), \
+                 patch.object(bridge, "WIKI_PATH", wiki):
+                self.assertFalse(bridge.update_wiki("# 自动段\n"))
+            self.assertEqual(wiki.read_text(encoding="utf-8"), "# 手写内容\n保留此行。\n")
+
+    def test_update_wiki_treats_vanished_wiki_as_absent(self):
+        # A file removed between the exists() check and the read degrades to
+        # "absent" and is recreated, not treated as an error.
+        with tempfile.TemporaryDirectory() as td:
+            wiki = Path(td) / "panel.md"
+            wiki.write_text("old", encoding="utf-8")
+            with patch.object(bridge, "read_text_limited", side_effect=FileNotFoundError("gone")), \
+                 patch.object(bridge, "WIKI_PATH", wiki):
+                self.assertTrue(bridge.update_wiki("# 自动段\n"))
+            self.assertIn("# 自动段", wiki.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -24,9 +24,21 @@ from zoneinfo import ZoneInfo
 LOGGER = logging.getLogger(__name__)
 
 try:
-    from ._safe_io import file_lock, quote_identifier, read_text_limited, sqlite_uri
+    from ._safe_io import (
+        file_lock,
+        quote_identifier,
+        read_text_limited,
+        read_text_limited_nofollow,
+        sqlite_uri,
+    )
 except ImportError:  # direct ``python automation/operations_control.py`` invocation
-    from _safe_io import file_lock, quote_identifier, read_text_limited, sqlite_uri
+    from _safe_io import (
+        file_lock,
+        quote_identifier,
+        read_text_limited,
+        read_text_limited_nofollow,
+        sqlite_uri,
+    )
 
 try:
     from . import pricing
@@ -223,7 +235,11 @@ def _json(value: Any) -> str:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(read_text_limited(path, max_bytes=2 * 1024 * 1024))
+        # The sync cron reads worker-written request.json/status.json from
+        # untrusted content-job dirs; O_NOFOLLOW rejects a symlink atomically so
+        # a swap between any prior check and the open cannot exfiltrate an
+        # arbitrary file's content into the ledger.
+        value = json.loads(read_text_limited_nofollow(path, max_bytes=2 * 1024 * 1024))
     except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -614,7 +630,10 @@ def sync_operational_runs(
     except OSError:
         job_entries = []
     for path in job_entries:
-        if path.is_dir() and (path / "request.json").is_file():
+        # A symlinked job dir (or a request.json that is a symlink) is refused:
+        # the dir is worker-writable and the sync would otherwise follow it
+        # into arbitrary paths on the host.
+        if path.is_dir() and not path.is_symlink() and (path / "request.json").is_file():
             job_dirs[path.name] = path
 
     all_run_ids = set(router_rows) | set(job_dirs)
@@ -912,7 +931,10 @@ def _load_article_reach(article_perf_db: Path) -> dict[str, dict[str, Any]]:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "article_metrics" in tables:
             cols = {row[1] for row in db.execute("PRAGMA table_info(article_metrics)")}
-            if {"title", "reads"}.issubset(cols):
+            # Validate every column the SELECT below reads, not just the first
+            # two: a partial export missing e.g. platform would otherwise raise
+            # mid-scan and discard everything collected so far.
+            if {"title", "reads", "article_id", "published_at", "platform"}.issubset(cols):
                 for row in db.execute("SELECT article_id,title,reads,published_at,platform FROM article_metrics"):
                     key = _normalize_title(row["title"])
                     if key and key not in out:
@@ -925,7 +947,7 @@ def _load_article_reach(article_perf_db: Path) -> dict[str, dict[str, Any]]:
                         }
         if "article_source_metrics" in tables:
             cols = {row[1] for row in db.execute("PRAGMA table_info(article_source_metrics)")}
-            if {"title", "reads", "channel"}.issubset(cols):
+            if {"title", "reads", "channel", "published_at"}.issubset(cols):
                 totals: dict[str, dict[str, Any]] = {}
                 for row in db.execute("SELECT title,channel,reads,published_at FROM article_source_metrics"):
                     key = _normalize_title(row["title"])
@@ -951,8 +973,11 @@ def _load_article_reach(article_perf_db: Path) -> dict[str, dict[str, Any]]:
                             "platform": "",
                             "source": "article_source_metrics",
                         }
-    except sqlite3.Error:
-        return {}
+    except sqlite3.Error as exc:
+        # Keep whatever was already collected: a failure in one table must not
+        # silently discard the other table's reach data.
+        LOGGER.warning("article reach load failed for %s: %s", article_perf_db, exc, exc_info=True)
+        return out
     finally:
         db.close()
     return out
@@ -1172,7 +1197,7 @@ def update_review(db_path: Path, review_id: str, **fields: Any) -> None:
 def import_proposals(db_path: Path, review_id: str, payload: dict[str, Any]) -> list[str]:
     proposals = payload.get("proposals")
     if not isinstance(proposals, list):
-        raise ValueError("proposals.json must contain a proposals array")
+        raise TypeError("proposals.json must contain a proposals array")
     db = connect(db_path)
     ids: list[str] = []
     try:
@@ -1183,7 +1208,7 @@ def import_proposals(db_path: Path, review_id: str, payload: dict[str, Any]) -> 
         now = utc_now()
         for index, item in enumerate(proposals, 1):
             if not isinstance(item, dict):
-                raise ValueError(f"proposal {index} must be an object")
+                raise TypeError(f"proposal {index} must be an object")
             required = ["title", "problem_statement", "recommended_action"]
             if any(not str(item.get(key) or "").strip() for key in required):
                 raise ValueError(f"proposal {index} is missing required business fields")

@@ -45,6 +45,9 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 FETCH_TIMEOUT = 20
+# Upper bound on any single fetched body (bytes).  curl aborts with a nonzero
+# exit once the response exceeds this, keeping memory use bounded.
+FETCH_MAX_BYTES = 20 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # source registry: (id, kind, url, title, max_items)
@@ -213,6 +216,9 @@ def fetch(url: str, insecure: bool = False) -> str:
         cmd = [
             "curl", "-s", "-L", "-m", str(FETCH_TIMEOUT), "--noproxy", "*",
             "-A", USER_AGENT,
+            # Bound the response body so a broken/hostile feed cannot OOM the
+            # daily cron by streaming an unbounded body into memory.
+            "--max-filesize", str(FETCH_MAX_BYTES),
         ]
         if insecure:
             cmd.append("-k")

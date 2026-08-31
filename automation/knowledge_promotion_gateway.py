@@ -366,7 +366,11 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
         if leaks:
             raise ValueError("reviewed content contains must-redact leaks: " + ", ".join(leaks))
         wiki_dir.mkdir(parents=True, exist_ok=True)
-        path = wiki_dir / f"knowledge-{candidate_id[:8]}.md"
+        # candidate_id is a DB/CLI string, not a filesystem token: strip path
+        # separators/dots before using it in the filename so a crafted id
+        # cannot escape wiki_dir.
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "", candidate_id)[:8] or "unknown"
+        path = wiki_dir / f"knowledge-{safe_id}.md"
         body = (
             "---\n"
             "tags: [knowledge-promotion, reviewed]\n"

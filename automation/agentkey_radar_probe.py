@@ -69,7 +69,7 @@ def _float_config(config: dict[str, Any], key: str, default: float) -> float:
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     value = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(value, dict):
-        raise ValueError("agentkey radar config must be an object")
+        raise TypeError("agentkey radar config must be an object")
     return value
 
 
@@ -355,7 +355,7 @@ def extract_themes(config: dict) -> dict:
     topics: dict = {}
     for q in config.get("queries", []):
         if not isinstance(q, dict):
-            raise ValueError("each agentkey radar query must be an object")
+            raise TypeError("each agentkey radar query must be an object")
         theme = str(q.get("theme") or "").strip()
         if not theme or not q.get("enabled", True):
             continue

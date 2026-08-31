@@ -388,7 +388,7 @@ def _stored_decision(json_text: Any) -> RouteDecision | None:
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     data = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
     if not isinstance(data, dict):
-        raise ValueError("router config must be an object")
+        raise TypeError("router config must be an object")
     data["config_path"] = str(path)
     return data
 
@@ -1504,7 +1504,14 @@ def select_company_result(result: dict[str, Any]) -> str:
     lower priority than a direct evidence-backed conclusion.
     """
     candidates = []
-    for task in result.get("task_results") or []:
+    task_results = result.get("task_results")
+    # A corrupt/older swarmctl payload may carry task_results as a dict or a
+    # list of non-dicts; degrade to no candidates instead of crashing the hook.
+    if not isinstance(task_results, list):
+        task_results = []
+    for task in task_results:
+        if not isinstance(task, dict):
+            continue
         if task.get("status") != "completed":
             continue
         summary = task.get("result_summary") or {}
@@ -1517,9 +1524,11 @@ def select_company_result(result: dict[str, Any]) -> str:
         if not content:
             continue
         is_diff_preview = content.lstrip().startswith("┊ review diff")
-        candidates.append((str(task.get("ended_at") or ""), not is_diff_preview, content))
+        candidates.append((not is_diff_preview, str(task.get("ended_at") or ""), content))
 
     if candidates:
+        # Evidence-backed conclusions outrank diff previews regardless of
+        # finish order; among same-class results the newest wins.
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return candidates[0][2]
     return str(result.get("result") or result.get("summary") or "")
@@ -1588,15 +1597,16 @@ def refresh_session_content_jobs(config: dict[str, Any], state: RouterState, ses
                 # be followed (leaking file content into the LLM context).
                 payload = json.loads(read_text_limited_nofollow(status_path, max_bytes=2 * 1024 * 1024))
                 if not isinstance(payload, dict):
-                    raise ValueError("status root must be an object")
-            except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+                    raise TypeError("status root must be an object")
+            except (OSError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 updates.append(f"- {label}任务 {row['run_id'][:8]} 状态读取失败：{exc}")
                 continue
             status = str(payload.get("status") or "unknown")
             state.update(row["route_event_id"], status=status)
             if status == "completed" and not row["result_delivered"]:
                 result = str(payload.get("result") or "任务已完成。")
-                artifacts = payload.get("artifacts") or []
+                raw_artifacts = payload.get("artifacts")
+                artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
                 artifact_text = "、".join(str(item) for item in artifacts)
                 suffix = f"\n产物：{artifact_text}" if artifact_text else ""
                 updates.append(f"- {label}任务 {row['run_id'][:8]} 已完成：\n{result[:4000]}{suffix}")
@@ -2203,7 +2213,7 @@ def parse_hook_stdin() -> dict[str, Any]:
         return {}
     value = json.loads(raw)
     if not isinstance(value, dict):
-        raise ValueError("hook payload must be a JSON object")
+        raise TypeError("hook payload must be a JSON object")
     return value
 
 

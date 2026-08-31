@@ -31,9 +31,19 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ._safe_io import atomic_write_text, locked_append_text, read_text_limited
+    from ._safe_io import (
+        atomic_write_text,
+        file_lock,
+        locked_append_text,
+        read_text_limited,
+    )
 except ImportError:  # direct script execution
-    from _safe_io import atomic_write_text, locked_append_text, read_text_limited
+    from _safe_io import (
+        atomic_write_text,
+        file_lock,
+        locked_append_text,
+        read_text_limited,
+    )
 
 VALID_STATES = ("pending", "running", "qa", "review", "published", "archived",
                 "retrying", "terminated")
@@ -105,6 +115,10 @@ def read_lifecycle(job_dir: Path) -> dict[str, Any]:
     try:
         data = json.loads(read_text_limited(path, max_bytes=1024 * 1024))
         if isinstance(data, dict) and data.get("state") in VALID_STATES:
+            # A corrupt file with a valid state but a non-list history would
+            # crash the transition append; coerce instead of trusting it.
+            if not isinstance(data.get("history"), list):
+                data["history"] = []
             return data
     except (OSError, ValueError):
         pass
@@ -132,21 +146,25 @@ def log_event(job_dir: Path, state: str, event: str, detail: str) -> None:
 
 
 def transition(job_dir: Path, target: str, detail: str = "") -> int:
-    lc = read_lifecycle(job_dir)
-    current = lc["state"]
-    allowed = TRANSITIONS.get(current, set())
-    if target not in allowed:
-        print(f"ERROR: {current} → {target} not allowed (allowed: {sorted(allowed) or 'none'})")
-        return 1
+    # Serialize the read-modify-write of lifecycle.json: two concurrent
+    # transitions (cron + operator) would otherwise both pass the transition
+    # check and the last writer silently wins while events.jsonl records both.
+    with file_lock(job_dir / "lifecycle.json"):
+        lc = read_lifecycle(job_dir)
+        current = lc["state"]
+        allowed = TRANSITIONS.get(current, set())
+        if target not in allowed:
+            print(f"ERROR: {current} → {target} not allowed (allowed: {sorted(allowed) or 'none'})")
+            return 1
 
-    lc["state"] = target
-    lc.setdefault("history", []).append({
-        "state": target,
-        "ts": utc_now(),
-        "event": STATE_EVENT.get(target, target),
-        "detail": detail or "",
-    })
-    write_lifecycle(job_dir, lc)
+        lc["state"] = target
+        lc.setdefault("history", []).append({
+            "state": target,
+            "ts": utc_now(),
+            "event": STATE_EVENT.get(target, target),
+            "detail": detail or "",
+        })
+        write_lifecycle(job_dir, lc)
     log_event(job_dir, target, STATE_EVENT.get(target, target), detail)
     print(f"OK: {current} → {target}" + (f" ({detail})" if detail else ""))
     return 0

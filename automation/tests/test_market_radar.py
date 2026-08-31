@@ -143,7 +143,7 @@ class MarketRadarTests(unittest.TestCase):
         self.assertEqual(canonical_url("http://10.1.2.3/admin"), "")
 
     def test_non_object_query_is_rejected_before_enabled_filter(self):
-        with self.assertRaisesRegex(ValueError, "must be an object"):
+        with self.assertRaisesRegex(TypeError, "must be an object"):
             run_radar({"enabled": True, "queries": ["not-an-object"]})
 
     def test_run_builds_only_multi_source_qualified_pulse(self):

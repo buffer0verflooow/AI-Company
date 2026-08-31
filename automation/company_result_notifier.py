@@ -20,7 +20,12 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 try:
-    from ._safe_io import locked_append_text, read_text_limited, sqlite_uri
+    from ._safe_io import (
+        locked_append_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        sqlite_uri,
+    )
     from .company_router import (
         DEFAULT_CONFIG,
         RouteDecision,
@@ -56,7 +61,12 @@ try:
         record_failure as record_outbox_failure,
     )
 except ImportError:  # Direct execution from automation/.
-    from _safe_io import locked_append_text, read_text_limited, sqlite_uri
+    from _safe_io import (
+        locked_append_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        sqlite_uri,
+    )
     from company_router import (
         DEFAULT_CONFIG,
         RouteDecision,
@@ -415,7 +425,10 @@ def _format_content_message(row: Any, payload: dict[str, Any]) -> str:
     }.get(row["action"], "公司任务")
     run_id = str(row["run_id"])
     status = str(payload.get("status") or row["status"] or "unknown")
-    artifacts = payload.get("artifacts") or []
+    # A worker-written status.json may carry a non-list "artifacts" (corrupt or
+    # legacy payload); coerce to [] so one bad row cannot kill the whole tick.
+    raw_artifacts = payload.get("artifacts")
+    artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
     artifact_text = "\n".join(f"- {item}" for item in artifacts)
     if status == "completed":
         result = str(payload.get("result") or "任务已完成。")[-1200:]
@@ -724,9 +737,14 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
     try:
         _, _, update_review = _operations_api()
         update_review(db_path, review_id, **fields)
-    except (OSError, sqlite3.Error, ValueError):
+    except (OSError, sqlite3.Error, ValueError) as exc:
         # The durable outbox remains the source of truth and the next recovery
-        # scan will retry this projection without resending a delivered row.
+        # scan will retry this projection without resending a delivered row —
+        # but a persistent projection failure must stay visible to operators.
+        LOGGER.warning(
+            "tvcr outbox projection failed for review %s: %s",
+            review_id, exc, exc_info=True,
+        )
         return
 
 
@@ -928,7 +946,15 @@ def process_once(
             try:
                 result = swarm_command(config, "task", "result", "--run-id", run_id, timeout=20)
             except Exception as exc:
-                state.update(event_id, error=f"run status query failed: {exc}")
+                # A persistently failing status query (e.g. the run was removed
+                # from the swarm DB) must not re-poll forever: advance the
+                # attempt counter so the row eventually dead-letters.
+                state.update(
+                    event_id,
+                    error=f"run status query failed: {exc}",
+                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
+                    last_delivery_at=utc_now(),
+                )
                 summary["failed"] += 1
                 continue
 
@@ -945,7 +971,7 @@ def process_once(
                     try:
                         raw_decision = json.loads(row["decision_json"])
                         if not isinstance(raw_decision, dict):
-                            raise ValueError("decision_json root must be an object")
+                            raise TypeError("decision_json root must be an object")
                         decision = RouteDecision(**raw_decision)
                         pid = launch_runner(config, run_id, decision.intent)
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
@@ -961,6 +987,16 @@ def process_once(
                 continue
 
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
+                # Unknown/unhandled status (corrupt payload, deleted run) must
+                # not be re-polled forever; record it and advance attempts so
+                # the row can dead-letter after max_delivery_attempts.
+                state.update(
+                    event_id,
+                    error=f"unhandled swarm run status: {status}",
+                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
+                    last_delivery_at=utc_now(),
+                )
+                summary["failed"] += 1
                 continue
             if not _delivery_retry_ready(config, row):
                 continue
@@ -1075,14 +1111,26 @@ def process_once(
             payload: dict[str, Any] = {}
             if status_path.exists():
                 try:
-                    if status_path.is_symlink():
-                        raise ValueError("content status file may not be a symlink")
-                    value = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+                    # O_NOFOLLOW makes the symlink rejection atomic: the
+                    # content-jobs directory is written by an untrusted worker,
+                    # and a swap between an is_symlink() check and a following
+                    # open would leak file content into a delivered message.
+                    value = json.loads(
+                        read_text_limited_nofollow(status_path, max_bytes=2 * 1024 * 1024)
+                    )
                     if not isinstance(value, dict):
-                        raise ValueError("content status root must be an object")
+                        raise TypeError("content status root must be an object")
                     payload = value
-                except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-                    state.update(event_id, error=f"content status query failed: {exc}")
+                except (OSError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    # A persistently unreadable/corrupt status.json must not be
+                    # re-polled forever; advance the attempt counter so the row
+                    # can dead-letter after max_delivery_attempts.
+                    state.update(
+                        event_id,
+                        error=f"content status query failed: {exc}",
+                        delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
+                        last_delivery_at=utc_now(),
+                    )
                     summary["failed"] += 1
                     continue
             status = str(payload.get("status") or row["status"] or "running")
@@ -1109,6 +1157,16 @@ def process_once(
                     summary["suspected_dead"] += 1
                 continue
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
+                # Unhandled statuses (e.g. review/qa from the job state machine)
+                # must not be re-polled forever; record and advance attempts so
+                # the row can dead-letter after max_delivery_attempts.
+                state.update(
+                    event_id,
+                    error=f"unhandled content job status: {status}",
+                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
+                    last_delivery_at=utc_now(),
+                )
+                summary["failed"] += 1
                 continue
             if not _delivery_retry_ready(config, row):
                 continue

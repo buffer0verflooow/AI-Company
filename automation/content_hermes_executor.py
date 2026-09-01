@@ -331,7 +331,7 @@ def main() -> int:
             raise TypeError("request root must be an object")
         if request.get("route") not in {"company", "article", "video"}:
             raise ValueError(f"unsupported content route: {request.get('route')!r}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- invalid request -> failed status, exit cleanly
         write_status(job_dir, {"status": "failed", "error": f"invalid request: {exc}", "artifacts": []})
         write_progress(job_dir, "failed", percent=100, detail="invalid request")
         append_event(job_dir, "terminated", state="terminated",
@@ -361,7 +361,7 @@ def main() -> int:
             timeout=1800,
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- worker crash -> failed status, never crash the executor
         write_status(job_dir, {
             "status": "failed",
             "route": request["route"],
@@ -408,7 +408,7 @@ def main() -> int:
             worker_result = value
             if str(value.get("status") or "") not in {"completed", "needs_approval", "failed"}:
                 raise ValueError("result.json status must be completed, needs_approval, or failed")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- missing/invalid result.json -> reported, not raised
             missing.append(f"valid result.json ({exc})")
     if proc.returncode != 0 or missing:
         reasons = []

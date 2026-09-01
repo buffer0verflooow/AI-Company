@@ -79,7 +79,7 @@ def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
             timeout=1800,
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- worker crash -> clean JSON failure
         return {"success": False, "error": str(exc), "capture": False}
 
     if proc.returncode != 0:
@@ -126,7 +126,7 @@ def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps({"success": False, "error": f"invalid executor input: {exc}", "capture": False}))
         return 0
 
@@ -163,7 +163,7 @@ def main() -> int:
             timeout=1800,
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- worker crash -> clean JSON failure
         print(json.dumps({"success": False, "error": str(exc), "capture": False}, ensure_ascii=False))
         return 0
 

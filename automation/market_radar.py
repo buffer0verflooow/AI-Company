@@ -688,7 +688,7 @@ def run_radar(
             response = fetcher("batch_search", {"queries": [_api_query(item) for item in batch]}, config)
             raw_sections.append(f"<!-- batch {batch_no} -->\n{response}")
             all_records.extend(parse_batch_markdown(response, batch))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- one failed batch must not abort the radar run
         error = str(exc)
 
     raw_path = run_dir / "raw-response.md"
@@ -728,7 +728,7 @@ def run_radar(
             db.commit()
         finally:
             db.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- persist failure status even if the happy path raised
         completed = utc_now()
         try:
             db = connect(db_path)

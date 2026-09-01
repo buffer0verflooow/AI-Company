@@ -32,7 +32,7 @@ if __name__ == "__main__":
             print(f"agentkey-probe: {json.dumps(result, ensure_ascii=False)}", flush=True)
         else:
             print("agentkey-probe: disabled (agentkey_probe_enabled=false or radar disabled)", flush=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- agentkey probe failure is non-fatal
         print(f"agentkey-probe: failed (non-fatal) — {exc}", flush=True)
 
     # Exit code from the primary radar

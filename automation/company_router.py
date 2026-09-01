@@ -1028,7 +1028,7 @@ def classify_with_fallback(
     classifier = fallback or _llm_fallback_classify
     try:
         result = classifier(message, config)
-    except Exception as exc:  # a broken injected classifier must not crash the hook
+    except Exception as exc:  # noqa: BLE001 -- a broken injected classifier must not crash the hook
         LOGGER.debug("fallback classifier raised: %s", exc)
         return decision
     if not isinstance(result, dict):
@@ -1540,7 +1540,7 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
         run_id = row["run_id"]
         try:
             result = swarm_command(config, "task", "result", "--run-id", run_id, timeout=15)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- a failing status query must not abort the session refresh
             updates.append(f"- 蜂群 {run_id[:8]} 状态查询失败：{exc}")
             continue
         status = result.get("status", "unknown")
@@ -1694,7 +1694,7 @@ def handle_tvcr_decision(message: str, config: dict[str, Any], actor: str) -> st
         except ImportError:
             from operations_control import apply_user_decision
         result = apply_user_decision(Path(operations_db), message, actor=actor)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- approval handling failure must be reported, not raised
         return f"[TVCR 审批上下文]\n审批处理失败：{exc}。不要实施任何修改，请向用户报告失败。"
     if result is None:
         return None
@@ -2172,7 +2172,7 @@ def _handle_hook(
                     fields["runner_pid"] = launch_runner(config, fields["run_id"], decision.intent)
                     fields["status"] = "running"
                 state.update(event_id, **fields)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
                 state.update(event_id, status="failed", error=str(exc))
                 updates.append(f"- 自动提交失败：{exc}")
     elif decision.action in {"dispatch_article", "dispatch_video", "dispatch_company"}:
@@ -2200,7 +2200,7 @@ def _handle_hook(
                     )
                     run = {"run_id": run_id, "status": "running"}
                     state.update(event_id, run_id=run_id, runner_pid=pid, status="running", last_heartbeat=utc_now())
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
                     state.update(event_id, status="failed", error=str(exc))
                     updates.append(f"- 内容产线自动提交失败：{exc}")
 

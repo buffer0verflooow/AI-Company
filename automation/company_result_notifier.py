@@ -196,7 +196,7 @@ def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str
             message,
             thread_id=origin.get("thread_id") or None,
         ))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- a broken sender plugin must not stop the tick
         return False, f"{exc.__class__.__name__}: {exc}"
 
     if isinstance(result, dict):
@@ -851,7 +851,7 @@ def process_outbox(
             continue
         try:
             ok, error = deliverer(config, origin, message)
-        except Exception as exc:  # sender plugins must not stop the batch
+        except Exception as exc:  # noqa: BLE001 -- a broken sender plugin must not stop the batch
             ok, error = False, f"{exc.__class__.__name__}: {exc}"
         if ok:
             mark_outbox_delivered(db_path, notification_id)
@@ -945,7 +945,7 @@ def process_once(
             run_id = str(row["run_id"])
             try:
                 result = swarm_command(config, "task", "result", "--run-id", run_id, timeout=20)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- a failing status query must not re-poll forever
                 # A persistently failing status query (e.g. the run was removed
                 # from the swarm DB) must not re-poll forever: advance the
                 # attempt counter so the row eventually dead-letters.
@@ -976,7 +976,7 @@ def process_once(
                         pid = launch_runner(config, run_id, decision.intent)
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 -- runner recovery failure must not abort the sweep
                         state.update(event_id, error=f"runner recovery failed: {exc}")
                         summary["failed"] += 1
                 elif _mark_suspected_dead_if_stale(
@@ -1147,7 +1147,7 @@ def process_once(
                         pid = launch_content_job(config, run_id)
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 -- runner recovery failure must not abort the sweep
                         state.update(event_id, error=f"content runner recovery failed: {exc}")
                         summary["failed"] += 1
                 elif _mark_suspected_dead_if_stale(

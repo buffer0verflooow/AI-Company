@@ -433,7 +433,7 @@ def collect_source(src: dict[str, Any], now: datetime) -> tuple[str, list[dict[s
     """Fetch + parse one source.  Returns (status, items)."""
     try:
         body = fetch(src["url"], insecure=src["id"] in TLS_INSECURE)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- an unreachable source must not abort the report
         return f"ERROR {type(e).__name__}", []
     if src["kind"] == "html":
         parser = HTML_PARSERS.get(src["id"])

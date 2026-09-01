@@ -420,7 +420,7 @@ def run_probe(config: dict) -> dict:
                 print(f"[{index}/{len(searches)}] query={search['query'][:60]}...", flush=True)
                 try:
                     items = future.result()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- one failed query must not abort the probe batch
                     items = [{"error": f"agentkey query failed: {exc}"}]
                 parsed = 0
                 for item_raw in items:
@@ -472,7 +472,7 @@ def run_probe(config: dict) -> dict:
             db.commit()
         finally:
             db.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- persist failure status even if the happy path raised
         completed = utc_now()
         try:
             db = connect(db_path)

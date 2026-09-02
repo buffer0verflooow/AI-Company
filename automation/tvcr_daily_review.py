@@ -443,7 +443,7 @@ def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: 
             timeout=1800,
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- worker crash -> review marked failed, never crash the sync
         update_review(db_path, review_id, status="failed", error=str(exc), report_path=str(report_path))
         return {"review_id": review_id, "status": "failed", "error": str(exc), "runs": len(runs), "sync": sync}
 

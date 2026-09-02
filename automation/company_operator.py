@@ -763,7 +763,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
             timeout=_int_config(config, "operator_timeout_seconds", 1200),
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- a crashing worker must not abort the operator cycle
         return {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
     # Enforce the write boundary by detection: a worker that mutated read-only
     # company code/config/ledgers has escaped its sandbox — fail the run loudly.
@@ -962,7 +962,7 @@ def execute_opportunity(
 
     try:
         result = worker(opportunity, run_dir, config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- a crashing worker must not abort the operator cycle
         result = {"status": "failed", "summary": "", "next_action": "", "metrics": {}, "error": str(exc)}
     usage = worker_usage(run_dir, config)
     completed = utc_now()
@@ -1144,7 +1144,7 @@ def run_cycle(
             for opportunity in selected:
                 try:
                     result = execute_opportunity(db_path, run_root, cycle_id, opportunity, config, worker=worker)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- one crashing opportunity must not abort the serial cycle
                     # One crashing opportunity (e.g. its run dir vanished) must
                     # not abort the rest of the serial cycle.
                     result = {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
@@ -1161,7 +1161,7 @@ def run_cycle(
                     opportunity = selected[index]
                     try:
                         result = future.result()
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 -- one crashing opportunity must not abort the parallel cycle
                         result = {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
                     ordered[index] = {
                         "title": opportunity["title"],

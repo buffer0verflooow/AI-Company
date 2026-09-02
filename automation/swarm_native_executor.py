@@ -33,6 +33,7 @@ import shlex
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,7 @@ def _tools_prompt_block() -> str:
         from src.swarm.mcp_client import registry_tool_prompt
         block = registry_tool_prompt(["apk"])
         return block or ""
-    except Exception:
+    except Exception:  # noqa: BLE001 -- optional tool registry must not break the executor
         return ""
 
 
@@ -145,15 +146,23 @@ def _resolve_llm_config(profile: dict[str, Any]) -> tuple[str, str, str]:
     providers: dict[str, dict[str, Any]] = {}
     config_path = Path.home() / ".hermes" / "config.yaml"
     try:
-        import yaml
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f) or {}
+        import yaml  # optional dependency; may be absent in minimal envs
+    except ImportError:
+        yaml = None
+    cfg: dict[str, Any] = {}
+    if yaml is not None:
+        try:
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            # Optional config: a missing/corrupt file must not break the
+            # executor — fall back to env-based defaults.
+            print(f"swarm_native_executor: ignore unreadable optional config {config_path}: {exc}", file=sys.stderr)
+    if isinstance(cfg, dict):
         for p in cfg.get("custom_providers", []) or []:
             name = str(p.get("name") or "").strip().lower()
             if name:
                 providers[name] = p
-    except Exception:
-        pass
 
     def _pick_provider(prov: str) -> dict[str, Any]:
         # 精确/包含匹配 (config 里名字可能是 "Zenmux.ai"/"deepseek-official" 等)
@@ -209,8 +218,14 @@ def _chat_once(base_url: str, api_key: str, model: str,
     if "deepseek" in model.lower():
         body["thinking"] = {"type": "disabled"}
 
+    url = f"{base_url}/chat/completions"
+    # Restrict to http/https before touching the network: a misconfigured
+    # base_url (e.g. file:// or a custom scheme) must never be opened by
+    # urllib, which would read local files / trigger unexpected handlers.
+    if urllib.parse.urlparse(url).scheme.lower() not in ("http", "https"):
+        return None, f"unsupported LLM URL scheme: {urllib.parse.urlparse(url).scheme or '(none)'!r}"
     req = urllib.request.Request(
-        f"{base_url}/chat/completions",
+        url,
         data=json.dumps(body, ensure_ascii=False).encode(),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -218,11 +233,11 @@ def _chat_once(base_url: str, api_key: str, model: str,
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=600) as resp:  # nosec B310 -- scheme restricted to http/https above
             return json.loads(resp.read()), ""
     except urllib.error.HTTPError as exc:
         return None, f"LLM HTTP {exc.code}: {exc.read()[:300]!r}"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- LLM network failure -> error string, never crash the loop
         return None, f"LLM call failed: {exc}"
 
 
@@ -330,20 +345,19 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
 
     tool_errors = 0
     trace_path = os.environ.get("SWARM_EXECUTOR_TRACE", "")
-    trace_fh = open(trace_path, "a", encoding="utf-8") if trace_path else None
 
     def _trace(round_no: int, content: str, parsed_type: str, detail: str = "") -> None:
-        if trace_fh is None:
+        # Open per write with a context manager so the handle can never leak,
+        # even when an early return skips the explicit close paths.
+        if not trace_path:
             return
-        trace_fh.write(f"[r{round_no}] type={parsed_type} len={len(content)} {detail}\n")
-        trace_fh.write(f"  content: {content[:400]!r}\n")
-        trace_fh.flush()
+        with open(trace_path, "a", encoding="utf-8") as trace_fh:
+            trace_fh.write(f"[r{round_no}] type={parsed_type} len={len(content)} {detail}\n")
+            trace_fh.write(f"  content: {content[:400]!r}\n")
 
     for _round in range(MAX_TOOL_ROUNDS):
         content, err = _llm_round()
         if err:
-            if trace_fh:
-                trace_fh.close()
             return _payload_error(err)
         if not content.strip():
             _trace(_round, content, "empty")
@@ -369,8 +383,6 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
         if "answer" in parsed:
             answer = str(parsed["answer"] or "")
             _trace(_round, content, "answer", f"answer_len={len(answer)}")
-            if trace_fh:
-                trace_fh.close()
             role = str(task.get("required_role") or task.get("task_type") or "custom")
             return {
                 "success": True,
@@ -415,15 +427,11 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                 })
                 content, err = _llm_round()
                 if err:
-                    if trace_fh:
-                        trace_fh.close()
                     return _payload_error(err)
                 parsed2 = _extract_json_object(content)
                 if isinstance(parsed2, dict) and "answer" in parsed2:
                     answer = str(parsed2["answer"] or "")
                     _trace(_round, content, "forced-answer-ok", f"len={len(answer)}")
-                    if trace_fh:
-                        trace_fh.close()
                     role = str(task.get("required_role") or task.get("task_type") or "custom")
                     return {
                         "success": True,
@@ -449,8 +457,6 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                             "forced_answer": True,
                         },
                     }
-                if trace_fh:
-                    trace_fh.close()
                 return _payload_error("forced answer round produced no valid answer JSON")
 
             tc = parsed["tool_call"]
@@ -479,8 +485,6 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
             else:
                 messages.append({"role": "user", "content": f"工具结果: {result_text}"})
             if tool_errors >= 3:
-                if trace_fh:
-                    trace_fh.close()
                 return _payload_error(f"tool loop failed: 连续 3 次工具执行异常, 最后结果: {result_text[:300]}")
             continue
 
@@ -490,8 +494,6 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
             "content": "[executor] JSON 必须含 \"answer\" 或 \"tool_call\" 字段。",
         })
 
-    if trace_fh:
-        trace_fh.close()
     return _payload_error(f"tool loop exhausted after {MAX_TOOL_ROUNDS} rounds (no answer)")
 
 
@@ -576,7 +578,7 @@ def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[
             env=env,
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- command backend error -> clean JSON failure (stdin/stdout contract)
         return _payload_error(str(exc))
     if proc.returncode != 0:
         return _payload_error(proc.stderr.strip() or f"agent command exited {proc.returncode}")
@@ -586,7 +588,7 @@ def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps(_payload_error(f"invalid executor input: {exc}"), ensure_ascii=False))
         return 0
 

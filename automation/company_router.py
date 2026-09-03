@@ -801,20 +801,6 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
             confidence=0.45,
         )
 
-    # Management questions that happen not to contain a question mark remain
-    # with the main agent unless they also contain a clear execution directive.
-    if (
-        not explicit
-        and route == "company"
-        and _contains_any(text, COMPANY_TERMS)
-        and _contains_any(text, MANAGEMENT_TERMS)
-        and not _is_company_execution_request(text)
-    ):
-        return _main_agent_decision(
-            "公司状态/流程管理问题，交由公司主 Agent 处理。",
-            external_action=external_action,
-        )
-
     if route != "security":
         action = {
             "article": "dispatch_article",
@@ -1001,8 +987,6 @@ def classify_with_fallback(
 
     # Common fast paths for both modes: empty/synthetic (0.0) and external action
     if decision.confidence <= 0.0 or decision.external_action:
-        return decision
-    if not " ".join((message or "").split()):
         return decision
 
     # 确定性判定已锁定业务线（article/video/security/company 均为强模式匹配
@@ -1402,6 +1386,13 @@ def build_runner_cmd(config: dict[str, Any], run_id: str, intent: str) -> list:
 
 
 def launch_runner(config: dict[str, Any], run_id: str, intent: str) -> int:
+    # The run id is interpolated into the runner log path below; reject ids
+    # that could carry a path separator / ".." / symlink component (mirrors
+    # the content_job_path guard) so a corrupt row or backend payload cannot
+    # make the log write escape log_dir.
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid swarm run id: {value!r}")
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-{run_id}.log"

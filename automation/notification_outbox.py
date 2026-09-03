@@ -43,18 +43,6 @@ def _safe_counter(value: Any) -> int:
         return 0
 
 
-def _parse_dt(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open the operations DB and create the outbox schema idempotently."""
 

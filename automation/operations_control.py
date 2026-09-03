@@ -395,11 +395,16 @@ def _classify_security_findings(
     # ── 1. Collect all available output text ──────────────────────────
     fragments: list[str] = []
 
-    # Runner log
-    log_file = log_dir / f"swarm-{run_id}.log"
-    if log_file.is_file():
-        with suppress(OSError, ValueError):
-            fragments.append(read_text_limited(log_file, max_bytes=10 * 1024 * 1024, errors="replace"))
+    # Runner log.  run_id is interpolated into the filename below, so only a
+    # well-formed id may be treated as a log name — a crafted value containing
+    # separators / ".." could redirect the read outside log_dir.  A malformed
+    # id is treated like a missing log file.
+    run_id_text = str(run_id or "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id_text):
+        log_file = log_dir / f"swarm-{run_id_text}.log"
+        if log_file.is_file():
+            with suppress(OSError, ValueError):
+                fragments.append(read_text_limited(log_file, max_bytes=10 * 1024 * 1024, errors="replace"))
 
     # Swarm DB — agent_tasks result_summary
     if swarm_db.is_file():
@@ -508,7 +513,10 @@ def _quality_status(route: str, job_dir: Path) -> str:
     if not qa.is_file():
         return "missing_qa"
     try:
-        text = read_text_limited(qa, max_bytes=2 * 1024 * 1024)
+        # qa-report.md is written by the worker into a worker-writable job dir;
+        # open with O_NOFOLLOW so a symlink swapped in after is_file() cannot
+        # pull an arbitrary host file into the ledger sync.
+        text = read_text_limited_nofollow(qa, max_bytes=2 * 1024 * 1024)
     except (OSError, UnicodeDecodeError, ValueError):
         return "qa_unreadable"
     if all(gate in text for gate in ("Gate 1", "Gate 2", "Gate 3")) and "通过" in text:
@@ -632,8 +640,14 @@ def sync_operational_runs(
     for path in job_entries:
         # A symlinked job dir (or a request.json that is a symlink) is refused:
         # the dir is worker-writable and the sync would otherwise follow it
-        # into arbitrary paths on the host.
-        if path.is_dir() and not path.is_symlink() and (path / "request.json").is_file():
+        # into arbitrary paths on the host.  is_file() follows symlinks, so the
+        # request.json symlink check must be explicit.
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and (path / "request.json").is_file()
+            and not (path / "request.json").is_symlink()
+        ):
             job_dirs[path.name] = path
 
     all_run_ids = set(router_rows) | set(job_dirs)
@@ -903,12 +917,6 @@ def _run_article_titles(run: dict[str, Any]) -> list[str]:
         if h1:
             _add(h1)
     return titles
-
-
-def _run_article_title(run: dict[str, Any]) -> str:
-    """Best-effort single published title of a content run (first candidate)."""
-    titles = _run_article_titles(run)
-    return titles[0] if titles else ""
 
 
 def _load_article_reach(article_perf_db: Path) -> dict[str, dict[str, Any]]:

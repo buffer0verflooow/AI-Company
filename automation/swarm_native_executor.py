@@ -61,6 +61,8 @@ _OPCODE_FREE_MODEL_MAP = {
 
 SWARM_REPO = os.environ.get("SWARM_REPO", "/home/pwn/workspace/research/swarm-knowledge")
 MAX_TOOL_ROUNDS = 14
+# Per-result cap for MCP tool evidence stored in the LLM conversation.
+MAX_TOOL_RESULT_CHARS = 200_000
 
 _AGENT_SYSTEM_PROMPT = """你是蜂群分析 agent。你有只读工具可通过 mcp_tool.py 调用, 用于真实执行分析 (APK 逆向等), 输出必须以证据为准, 禁止编造文件内容、命令输出或漏洞。
 
@@ -116,7 +118,14 @@ def _run_mcp_tool(server: str, tool: str, args: dict, timeout: int = 400) -> str
         return f"[工具错误] {payload.get('error') or payload}"
     contents = payload.get("content") or []
     texts = [c.get("text", "") for c in contents if isinstance(c, dict)]
-    return "\n".join(texts).strip() or f"[工具 {server}.{tool} 无输出]"
+    result = "\n".join(texts).strip()
+    # Tool evidence is appended verbatim into the LLM conversation and re-sent
+    # on every later round; bound each result so a huge decompile/grep output
+    # cannot grow memory or per-request payload without limit.  The tail is
+    # kept (latest evidence wins) and the truncation is marked explicitly.
+    if len(result) > MAX_TOOL_RESULT_CHARS:
+        result = result[-MAX_TOOL_RESULT_CHARS:] + f"\n...[工具输出超过 {MAX_TOOL_RESULT_CHARS} 字符, 已截断]"
+    return result or f"[工具 {server}.{tool} 无输出]"
 
 
 def _payload_error(message: str) -> dict[str, Any]:
@@ -486,15 +495,10 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
             except Exception as exc:  # noqa: BLE001
                 result_text = f"[工具调用异常] {type(exc).__name__}: {exc}"
                 tool_errors += 1
-            # 临近轮次上限: 强制收敛, 避免 LLM 无限挖掘 (实测加固 APK 会陷分析泥潭)
-            if _round >= MAX_TOOL_ROUNDS - 2:
-                messages.append({
-                    "role": "user",
-                    "content": f"工具结果: {result_text}\n\n[executor] 已接近轮次上限 ({MAX_TOOL_ROUNDS})。"
-                               "下一步必须直接输出 {\"answer\": ...} 汇总当前已获得的全部证据与结论, 不得再调用工具。",
-                })
-            else:
-                messages.append({"role": "user", "content": f"工具结果: {result_text}"})
+            # Rounds >= MAX_TOOL_ROUNDS-2 are already handled by the forced
+            # convergence block above, which returns before this point; append
+            # the plain tool result otherwise.
+            messages.append({"role": "user", "content": f"工具结果: {result_text}"})
             if tool_errors >= 3:
                 return _payload_error(f"tool loop failed: 连续 3 次工具执行异常, 最后结果: {result_text[:300]}")
             continue

@@ -563,7 +563,11 @@ def _find_cron_output(config: dict[str, Any], job_id: str, last_run_at: str) -> 
 def _extract_cron_response(path: Path) -> str:
     """Extract the report portion from Hermes' saved cron transcript."""
     try:
-        text = read_text_limited(path, max_bytes=MAX_CRON_OUTPUT_BYTES, errors="replace")
+        # _find_cron_output validated the candidate (is_symlink/containment),
+        # but that check and this read are separate calls; re-open with
+        # O_NOFOLLOW so a swap between them cannot leak an arbitrary file's
+        # content into a delivered message.
+        text = read_text_limited_nofollow(path, max_bytes=MAX_CRON_OUTPUT_BYTES, errors="replace")
     except (OSError, ValueError):
         return ""
     # Agent-driven jobs save the prompt and final answer under this marker.

@@ -115,8 +115,6 @@ def append_event(
 #   archived       — closed out, kept for reference
 #   retrying       — transient failure, scheduled for re-run
 #   terminated     — unrecoverable failure, no re-run planned
-JOB_STATES = ("pending", "running", "qa", "review", "published", "archived",
-              "retrying", "terminated")
 
 # Human-in-the-loop transitions handled by automation/content_job_state.py
 # (invoked by main agent / push scripts), not by the worker executor:

@@ -54,7 +54,6 @@ DEFAULT_CONFIG = COMPANY_ROOT / "automation/company_operator_config.json"
 DEFAULT_OPERATIONS_DB = COMPANY_ROOT / "operations/runtime/operations_control.db"
 DEFAULT_ROUTER_DB = COMPANY_ROOT / "operations/runtime/company_router.db"
 DEFAULT_RUN_ROOT = COMPANY_ROOT / "operations/runtime/autonomy-runs"
-DEFAULT_MARKET_DB = COMPANY_ROOT / "marketing/market_signals.db"
 INTERNAL_PREFIX = "[COMPANY_OPERATOR_INTERNAL]"
 
 WorkerFn = Callable[[dict[str, Any], Path, dict[str, Any]], dict[str, Any]]

@@ -251,7 +251,6 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
     # endpoint; a transient network blip or a 5xx/429 gateway response must not
     # fail the whole run.  Retry bounded times with small backoff, mirroring the
     # retry discipline already used by ``security_intel.fetch``.
-    last_error: Exception | None = None
     for attempt in range(3):
         try:
             with opener.open(request, timeout=timeout) as response:
@@ -266,16 +265,11 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
             transient = exc.code in {429, 500, 502, 503, 504}
             if not transient or attempt >= 2:
                 raise error from exc
-            last_error = error
         except (urllib.error.URLError, TimeoutError) as exc:
             error = RuntimeError(f"AnySearch request failed: {exc}")
             if attempt >= 2:
                 raise error from exc
-            last_error = error
         time.sleep(1 + attempt)
-    else:
-        # Only reachable when every attempt failed; keep the last error visible.
-        raise last_error if last_error is not None else RuntimeError("AnySearch request failed")
     if len(body) > max_bytes:
         raise RuntimeError(f"AnySearch response exceeds {max_bytes} bytes")
     try:

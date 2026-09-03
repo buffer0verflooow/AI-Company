@@ -26,7 +26,8 @@ updated: 2026-07-26
 | [[projects/ai-edu-series/TRACKING\\|AI工程从零开始]] | 10/20（4 篇已发布） | 🟢 发布中 | 发布 #05 | 2026-07-17 |
 | [[projects/article-curation/TRACKING\\|文章精选阅读]] | 11 已发布 / 2 不发布 / 1 待发布 | 🟢 运营中 | 发布 #14、复盘表现 | 2026-07-15 |
 | [[projects/wechat-publisher/README\\|微信公众号发布工具]] | ✅ | 🟢 可用 | 数据分析 API 待认证 | 2026-07-09 |
-| [[projects/security-exploration/README\\|安全探索产品线]] | 自动路由+知识门禁+财务分账 | 🟢 运营中 | 补录真实付款凭证与模型价格 | 2026-07-15 |
+| [[projects/ai-security-eval/PROJECT\|AI 安全评测工具]] | MVP 1-3 全过（checklist/judge/蜂群 worker） | 🟢 实验品成立 | 评测样张报告 + 产品说明页 | 2026-08-19 |
+| [[projects/security-exploration/README\|安全探索产品线]] | 自动路由+知识门禁+财务分账 | 🟢 运营中 | 补录真实付款凭证与模型价格 | 2026-07-15 |
 | [[projects/Pixelle-Video/README\\|Pixelle-Video]] | 预生产适配器已验收 | 🟡 渲染待激活 | 安装 uv、配置模型/TTS 后跑首个 MP4 | 2026-07-15 |
 
 ## 关键指标

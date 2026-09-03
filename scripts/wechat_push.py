@@ -5,6 +5,19 @@ import json, urllib.request, markdown, os
 APP_ID = os.environ.get("WEIXIN_APP_ID", "")
 APP_SECRET = os.environ.get("WEIXIN_APP_SECRET", "")
 
+COVER_CANDIDATES = ["cover.jpg", "cover.png", "codex-cover.jpg", "codex-cover.png"]
+
+def _find_cover(article_path, cover_path=None):
+    """Resolve cover image: explicit arg wins, else auto-discover next to article."""
+    if cover_path and os.path.exists(cover_path):
+        return cover_path
+    d = os.path.dirname(os.path.abspath(article_path))
+    for name in COVER_CANDIDATES:
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
 def push_to_wechat(article_path, cover_path=None):
     if not APP_ID or not APP_SECRET:
         raise SystemExit("Set WEIXIN_APP_ID and WEIXIN_APP_SECRET environment variables.")
@@ -14,19 +27,29 @@ def push_to_wechat(article_path, cover_path=None):
         headers={"Content-Type":"application/json"})
     token = json.loads(urllib.request.urlopen(req).read())["access_token"]
     
+    # Resolve cover: explicit arg wins; else auto-discover next to the article.
+    # WeChat draft/add REQUIRES a valid thumb_media_id — empty string fails with
+    # 40007 invalid media_id. Fail fast with a clear message instead of pushing
+    # a broken draft (2026-08-18: stale default /tmp/cover-08.jpg caused this).
+    resolved_cover = _find_cover(article_path, cover_path)
+    if not resolved_cover:
+        raise SystemExit(
+            "ERROR: no cover image found. WeChat drafts require a thumb_media_id.\n"
+            "Pass a cover file explicitly or place cover.jpg / codex-cover.jpg next to the article."
+        )
+    
     # Upload cover
-    if cover_path and os.path.exists(cover_path):
-        boundary = "----WXBoundaryPush"
-        with open(cover_path, "rb") as f:
-            img = f.read()
-        b = f"--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"cover.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode() + img + f"\r\n--{boundary}--\r\n".encode()
-        req = urllib.request.Request(f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={token}&type=image",
-            data=b, headers={"Content-Type":f"multipart/form-data; boundary={boundary}"})
-        thumb_id = json.loads(urllib.request.urlopen(req).read())["media_id"]
-        print(f"Cover: {thumb_id}")
-    else:
-        thumb_id = ""
-        print("No cover, using default")
+    boundary = "----WXBoundaryPush"
+    with open(resolved_cover, "rb") as f:
+        img = f.read()
+    b = f"--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"cover.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode() + img + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={token}&type=image",
+        data=b, headers={"Content-Type":f"multipart/form-data; boundary={boundary}"})
+    resp = json.loads(urllib.request.urlopen(req).read())
+    if "media_id" not in resp:
+        raise SystemExit(f"Cover upload failed: {resp}")
+    thumb_id = resp["media_id"]
+    print(f"Cover: {thumb_id} ({resolved_cover})")
     
     # Read article - preserve full body including <style> CSS
     with open(article_path) as f:
@@ -159,8 +182,10 @@ def push_to_wechat(article_path, cover_path=None):
     for item in json.loads(urllib.request.urlopen(list_req).read()).get("item", []):
         for n in item.get("content", {}).get("news_item", []):
             draft_title = n.get("title", "")
-            # Delete if it matches our article's topic
-            if draft_title == title or ("深度学习的骨架" in draft_title):
+            # Delete only if it matches our article's title exactly.
+            # (Historical hardcoded "深度学习的骨架" clause removed 2026-08-18:
+            # it deleted unrelated drafts whenever ANY article was pushed.)
+            if draft_title == title:
                 del_req = urllib.request.Request(f"https://api.weixin.qq.com/cgi-bin/draft/delete?access_token={token}",
                     data=json.dumps({"media_id":item["media_id"]}).encode(),
                     headers={"Content-Type":"application/json"})
@@ -188,5 +213,5 @@ def push_to_wechat(article_path, cover_path=None):
 if __name__ == "__main__":
     import sys
     article = sys.argv[1] if len(sys.argv) > 1 else "/tmp/codex-article-08.md"
-    cover = sys.argv[2] if len(sys.argv) > 2 else "/tmp/cover-08.jpg"
+    cover = sys.argv[2] if len(sys.argv) > 2 else None
     push_to_wechat(article, cover)

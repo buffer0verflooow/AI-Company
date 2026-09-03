@@ -28,6 +28,7 @@ updated: 2026-08-09
 | A9 | Fable 5 模型降级攻击：加一个 forbidden topic，模型降回 Opus 4.8 再被利用 | 翻译（C10） | @wunderwuzzi23 08-09（embracethered.com 博客） | 拉新（一手稀缺） | 2 周内 | 待定 |
 | A10 | USB 自动安装→Windows 11 完整 SYSTEM 接管 | 翻译/复现 | FreeBuf 08-11（security-intel 采集） | 拉新 | 随时 | 待定 |
 | A11 | RAG 嵌入对撞投毒：当"自主检索"变成攻击跳板（端到端实战深度解读） | 原创解读 | FreeBuf 08-13 + Prompt Security 一手 + PoisonedRAG arXiv | 拉新+产品联动（记忆面） | 3 天内 | ✅ 草稿箱待发（08-18 推送，author=nooooop） |
+| A12 | MmMapIoSpace 返回 NULL：社区传了十几年的"缓存别名"解释，被 WinDbg 拆穿了 | 翻译（C10） | sibouzitoun.tech（Youssef Charfeddine, 07月底, r/redteamsec 在传） | 拉新+留存（内核逆向稀缺） | 中文无翻译窗口内 | ✅ 草稿箱 08-27 推送（blue 封面，待发布） |
 
 ## 赛道 B：EDR 对抗与端点攻防（留存担当 · 基本盘）
 
@@ -40,6 +41,8 @@ updated: 2026-08-09
 | B5 | AgentHopper：一个 AI 病毒（PoC） | 翻译 | @wunderwuzzi23（embracethered.com） | 留存+拉新 | 随时 | 待定 |
 | B6 | Devin AI 端口暴露：prompt injection 到互联网暴露的 kill chain | 翻译 | @wunderwuzzi23（embracethered.com） | 留存+拉新 | 随时 | 待定 |
 | B7 | BYO EDR：带一份 SentinelOne 安装器进场，PPL 保护当场失效 | 翻译 | Akamai Security Research 08-07（DEF CON 34） | 留存+拉新 | 随时 | 待推送（✅ 草稿完成 08-12） |
+| B8 | Windows 埋了 2600+ 个没人用的 ETW 遥测源，标准工具一个都看不见 | 原创 | BH Asia 2026（Asuka Nakajima, Elastic）+ EtwExplorer/TLGMapper | 留存（检测工程） | 2 周内 | ✅ 草稿+QA 完成 08-25 |
+| B9 | 我已在你的日志里：欺骗分析师，致盲 EDR | 翻译 | medium.com/falconforce（Olaf Hartong, Black Hat USA 2025） | 留存+拉新（EDR 对抗） | 随时 | ✅ 草稿+QA+推送 08-26（violet 封面） |
 
 ## 赛道 C：AI Agent 安全治理（埋伏蓝海 · 预算持有者）
 

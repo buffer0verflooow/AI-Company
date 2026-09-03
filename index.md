@@ -57,6 +57,7 @@ updated: 2026-07-19
 |------|------|
 | [[wiki/README|通用 Wiki]] — 公司级通用知识页面
 | [[wiki/llm-wiki-methodology|LLM Wiki 方法论]] | Karpathy 的持久化知识库方法论 |
+| [[wiki/malikhettige-research-notes|安全研究笔记外部收录]] | MalikHettige/Research-notes 蒸馏：ATO vs 访问控制、业务逻辑竞态、CVE-2026-3854 分析链、Nmap 基础（2026-08-24 摄入） |
 | [[DASHBOARD|📊 公司仪表盘]] | 项目进度全景 |
 | [[log|操作日志]] | 知识库变更记录 |
 | [[DEPLOYMENT|本机部署记录]] | 部署来源、运行资产、数据边界和后续事项 |

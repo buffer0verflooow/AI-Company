@@ -71,3 +71,4 @@ source: strategy/article-knowledge-productization.md (§4 落地方案 B) + stra
 ## 状态
 
 - 2026-08-12: 收敛决策定稿。实验品开发待启动(用户确认方向后执行)。
+- 2026-08-19: **收敛决策更新** — 首选实验品变更为「AI 安全评测工具」(projects/ai-security-eval/PROJECT.md)。依据: DeepTeam 基座实测 + 开源生态调研(agentic 空白=差异化窗口)。模型降级监控并入评测工具的"记忆安全/降级维度"，不再单独开发。MVP-1(checklist 提取)可直接启动。

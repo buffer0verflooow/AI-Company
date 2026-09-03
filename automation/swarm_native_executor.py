@@ -429,9 +429,18 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                 if err:
                     return _payload_error(err)
                 parsed2 = _extract_json_object(content)
+                # 强制轮 LLM 常输出纯文本报告而不包 {"answer": ...} —
+                # 此时把整段内容直接当作最终 answer (比失败丢报告好)。
                 if isinstance(parsed2, dict) and "answer" in parsed2:
                     answer = str(parsed2["answer"] or "")
-                    _trace(_round, content, "forced-answer-ok", f"len={len(answer)}")
+                    forced_text = False
+                elif content.strip():
+                    answer = content
+                    forced_text = True
+                else:
+                    return _payload_error("forced answer round produced empty output")
+                if forced_text or isinstance(parsed2, dict):
+                    _trace(_round, content, "forced-answer-ok", f"len={len(answer)} text={forced_text}")
                     role = str(task.get("required_role") or task.get("task_type") or "custom")
                     return {
                         "success": True,
@@ -448,6 +457,7 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                             "fallback": fallback,
                             "tool_rounds": _round + 1,
                             "forced_answer": True,
+                            "forced_text": forced_text,
                         },
                         "metadata": {
                             "executor": "swarm_native_executor",
@@ -455,6 +465,7 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                             "model": used_model,
                             "fallback": fallback,
                             "forced_answer": True,
+                            "forced_text": forced_text,
                         },
                     }
                 return _payload_error("forced answer round produced no valid answer JSON")

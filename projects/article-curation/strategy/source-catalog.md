@@ -60,6 +60,9 @@
 | Simon Willison's Blog | https://simonwillison.net/ | LLM 工具、SQLite | ⭐⭐⭐ | 待评估 |
 | The Pragmatic Engineer | https://blog.pragmaticengineer.com/ | 软件工程文化 | ⭐⭐⭐ | 待评估 |
 | Chip Huyen's Blog | https://huyenchip.com/blog/ | ML工程、系统设计 | ⭐⭐⭐ | 待评估 |
+| sibouzitoun.tech (Youssef Charfeddine) | https://sibouzitoun.tech/articles/ | Windows 内核逆向、漏洞利用（MmMapIoSpace 追踪系列） | ⭐⭐⭐ | ✅ 已用（#18）|
+
+> **抓取备注（2026-08-27 实测）**: sibouzitoun.tech 域名 DNS 被本地代理 fake-ip 污染（返回 198.18.10.5），`web_extract`/`--noproxy` 直连均失败（SSL UNEXPECTED_EOF / private-network error）。可靠路径：**不带 `--noproxy` 的普通 `curl -s -L` 走系统代理（127.0.0.1:7890）**，一次成功（84KB HTML）。正文提取用 `<article>` + `<p>`/`<li>`/`<pre>` 正则（列表项需 `<li>` 单独抓，纯 `<p>` 会丢「魔法值生命周期」「三个架构原因」等列表内容）。
 
 ## 中文圈精选
 

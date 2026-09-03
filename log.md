@@ -8,6 +8,19 @@ updated: 2026-07-19
 
 AI 自动追加。记录每次操作的时间线。
 
+## [2026-08-24] 知识摄入 | 外部安全研究笔记库 Research-notes
+
+- **来源**：https://github.com/MalikHettige/Research-notes（外部笔记库，蒸馏式组织）
+- **原始文件**：克隆至 `source-material/Research-notes/`（已在 .gitignore 排除，不进版本库）
+- **Wiki 页面**：新建 `wiki/malikhettige-research-notes.md` —— 收录四块知识：
+  - ATO vs 访问控制区分（IDOR 报告定性核心，Bugcrowd）
+  - 业务逻辑竞态方法论（Stripe 无限折扣 $5000，Turbo Intruder 并行测试）
+  - CVE-2026-3854 GitHub RCE 分析链（TRACE→PARSER→OVERRIDE→TRUST→CHAIN→BLAST RADIUS，可复用为蜂群 web worker 模板）
+  - Nmap 基础（四类扫描、端口表、误扫网关教训）
+- **索引更新**：`index.md` Wiki 页面表 + `wiki/README.md` 已有页面表 + `operations/business-lines/security-exploration.md` 关联链接
+- **知识捕获**：Swarm KB 入库 1 条（dcfe2a04），tags: bug-bounty/methodology/idor/business-logic/race-condition/rce/trust-boundary
+- **摘要**：外部安全笔记的方法论价值已蒸馏入库，原始内容保留在 source-material 供增量 merge。
+
 ## [2026-07-21] 市场接入 | 市场雷达桥接到内容项目
 
 - **桥接文档**：新建 `marketing/market-to-content-bridge.md`，将 4 个市场主题映射到 ai-edu-series 和 article-curation 的具体选题、排期建议和优先级

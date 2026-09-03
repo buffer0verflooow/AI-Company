@@ -90,5 +90,6 @@ status: active
 - [[../../projects/security-exploration/h1-graphql-api-reference|H1 GraphQL API 参考]]
 - [[../README|运营部]]
 - [[../../strategy/market-demand-analysis|AI+安全市场需求分析]]
+- [[../../wiki/malikhettige-research-notes|安全研究笔记外部收录（MalikHettige/Research-notes）]]
 - [[article-production|文章产线]]
 - [[video-production|视频产线]]

@@ -302,6 +302,22 @@ def build_prompt(review_id: str, evidence_path: Path, report_path: Path, proposa
 """
 
 
+def _negated_zero_match(combined: str, pattern: re.Pattern[str], window: int = 24) -> bool:
+    """True iff ``pattern`` matches AND the matched phrase is not negated.
+
+    The zero-assertion guards exist to catch reports that *state* unknown
+    value/cost as zero ("价值为0"). Correct phrasing says the opposite
+    ("不能推断价值为零", "不得按零成本计算") and must NOT trip the guard.
+    """
+    for match in pattern.finditer(combined):
+        context = combined[max(0, match.start() - window): match.start()]
+        if not any(hint in context for hint in ("不能", "不得", "不应", "不可", "无法",
+                                                "不要", "切勿", "不代表", "不等于",
+                                                "并不是", "并不能", "不能简单", "不是")):
+            return True
+    return False
+
+
 def validate_outputs(
     evidence: dict[str, Any],
     report_text: str,
@@ -319,15 +335,15 @@ def validate_outputs(
     if not isinstance(proposals, list):
         return ["proposals must be an array"]
     combined = report_text + "\n" + json.dumps(payload, ensure_ascii=False)
-    if all(str(run.get("outcome_status") or "unmeasured") == "unmeasured" for run in evidence.get("runs") or []) and re.search(
-        r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", combined, re.IGNORECASE
+    if all(str(run.get("outcome_status") or "unmeasured") == "unmeasured" for run in evidence.get("runs") or []) and _negated_zero_match(
+        combined, re.compile(r"(?:实际)?价值(?:就是|为|=)\s*(?:\$?0|零)", re.IGNORECASE)
     ):
         errors.append("unmeasured business value was incorrectly stated as zero")
     if evidence.get("runs") and all(
         str(run.get("cost_status") or "unknown").lower()
         not in {"actual", "confirmed", "provider_reported", "billed"}
         for run in evidence.get("runs") or []
-    ) and re.search(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", combined, re.IGNORECASE):
+    ) and _negated_zero_match(combined, re.compile(r"实际(?:模型)?成本\s*(?:为|是|=)\s*\$?0", re.IGNORECASE)):
         errors.append("unknown model cost was incorrectly stated as zero")
     if any(_safe_counter(run.get("result_delivered")) == 1 for run in evidence.get("runs") or []) and any(
         phrase in combined for phrase in ("没有一件到达用户", "没有任何产出到达用户", "全部没有到达用户")

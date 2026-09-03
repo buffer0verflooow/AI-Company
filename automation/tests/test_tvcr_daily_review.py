@@ -73,6 +73,24 @@ class TVCRDailyReviewTests(unittest.TestCase):
         errors = validate_outputs(evidence, "产出的实际价值为0，而且没有一件到达用户。", payload)
         self.assertEqual(len(errors), 2)
 
+    def test_validator_allows_negated_zero_phrasing(self):
+        # Regression: "不能推断价值为零" is the CORRECT phrasing for unknown
+        # value; a naive regex treated it as stating value = 0 and rejected the
+        # (fully valid) 2026-09-02 review as failed.
+        evidence = {
+            "runs": [{"run_id": "r1", "outcome_status": "unmeasured", "result_delivered": 1}],
+        }
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": ["business"], "evidence_run_ids": ["r1"],
+        }]}
+        errors = validate_outputs(
+            evidence,
+            "交付成功不等于被采用，也不能推断价值为零。归集成本 0 仅因 priced_runs=0，未知价格不得按零计算。",
+            payload,
+        )
+        self.assertEqual(errors, [])
+
     def test_validator_rejects_technology_only_proposal(self):
         evidence = {"runs": [{"run_id": "r1", "outcome_status": "measured", "result_delivered": 0}]}
         payload = {"proposals": [{

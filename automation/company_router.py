@@ -2172,28 +2172,50 @@ def _handle_hook(
             "dispatch_video": "auto_run_video",
             "dispatch_company": "auto_run_company",
         }[decision.action]
-        if config.get(enabled_key, True):
-            active = state.active_for_session(session_id, action=decision.action)
-            running = [row for row in active if row["status"] in {"submitted", "running"}]
-            if len(running) >= _int_config(config, "max_active_content_jobs_per_session", 2):
-                state.update(event_id, status="deferred", error="active content job limit reached")
-                updates.append("- 已达到本会话内容产线并发上限，新任务暂未提交。")
-            else:
-                try:
-                    run_id = str(uuid.uuid4())
-                    pid = launch_content_job(
-                        config,
-                        run_id,
-                        route=decision.route,
-                        message=message,
-                        session_id=session_id,
-                        platform=platform,
-                    )
-                    run = {"run_id": run_id, "status": "running"}
-                    state.update(event_id, run_id=run_id, runner_pid=pid, status="running", last_heartbeat=utc_now())
-                except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
-                    state.update(event_id, status="failed", error=str(exc))
-                    updates.append(f"- 内容产线自动提交失败：{exc}")
+        if not config.get(enabled_key, True):
+            # Mirrors the dispatch_swarm disabled branch: the product line is
+            # switched off, not failing — defer and hand back to the main agent
+            # instead of letting the run_id-less context below report a routing
+            # failure.
+            state.update(event_id, status="deferred", error="content product line dispatch disabled")
+            return {"context": build_context(
+                RouteDecision(**{
+                    **asdict(decision), "action": "main_agent",
+                    "reason": "content product line dispatch disabled",
+                }),
+                status_updates=updates + [
+                    f"- {decision.route} 自动分发已禁用 ({enabled_key}=false)，已交由主 Agent。"
+                ],
+            )}
+        active = state.active_for_session(session_id, action=decision.action)
+        running = [row for row in active if row["status"] in {"submitted", "running"}]
+        if len(running) >= _int_config(config, "max_active_content_jobs_per_session", 2):
+            # Mirrors the dispatch_swarm cap branch: return the deferred
+            # decision now, so the context explains the cap instead of also
+            # appending a contradictory "unable to dispatch" failure line.
+            state.update(event_id, status="deferred", error="active content job limit reached")
+            return {"context": build_context(
+                RouteDecision(**{
+                    **asdict(decision), "action": "main_agent",
+                    "reason": "active content job limit reached",
+                }),
+                status_updates=updates + ["- 已达到本会话内容产线并发上限，新任务暂未提交。"],
+            )}
+        try:
+            run_id = str(uuid.uuid4())
+            pid = launch_content_job(
+                config,
+                run_id,
+                route=decision.route,
+                message=message,
+                session_id=session_id,
+                platform=platform,
+            )
+            run = {"run_id": run_id, "status": "running"}
+            state.update(event_id, run_id=run_id, runner_pid=pid, status="running", last_heartbeat=utc_now())
+        except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
+            state.update(event_id, status="failed", error=str(exc))
+            updates.append(f"- 内容产线自动提交失败：{exc}")
 
     return {"context": build_context(decision, run=run, status_updates=updates)}
 

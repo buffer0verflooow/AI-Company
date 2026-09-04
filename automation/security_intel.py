@@ -345,7 +345,11 @@ def parse_cisa_kev(body: str, src: dict[str, Any], now: datetime) -> list[dict[s
         return []
     vulns = data.get("vulnerabilities", [])
     items = []
-    for v in vulns:
+    # CISA's KEV catalog is ordered ascending by dateAdded (newest appended at
+    # the end), so walk it backwards and keep the NEWEST ``src["max"]`` records.
+    # Truncating the head would keep only the oldest entries and, after the
+    # first persist, deduplicate every later fetch into a no-op.
+    for v in reversed(vulns):
         cve = str(v.get("cveID", ""))
         vendor = str(v.get("vendorProject", ""))
         product = str(v.get("product", ""))
@@ -359,7 +363,9 @@ def parse_cisa_kev(body: str, src: dict[str, Any], now: datetime) -> list[dict[s
             "authors": rv,
             "summary": desc,
         })
-    return items[: src["max"]]
+        if len(items) >= src["max"]:
+            break
+    return items
 
 
 def parse_kanxue(body: str, src: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
@@ -517,16 +523,15 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
         f"> 采集时间: {utc_now()} ｜ 新增条目: {new_count}",
         "",
     ]
-    # classify every item into a strategy track
+    # classify every OK source's item into a strategy track and collect it
+    # for the report in a single pass.
+    all_items: list[dict[str, Any]] = []
     for status, items in results:
         if status != "ok" and not status.endswith(": ok"):
             continue
         for it in items:
             it["track"] = classify_track(it)
-
-    all_items = [it for status, items in results
-                 if status == "ok" or status.endswith(": ok")
-                 for it in items]
+            all_items.append(it)
 
     by_track: dict[str, list[dict[str, Any]]] = {}
     for it in all_items:

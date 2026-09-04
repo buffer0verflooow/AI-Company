@@ -304,6 +304,11 @@ def _mark_suspected_dead_if_stale(
     """
     if alive or restarts < max_restarts:
         return False
+    if str(row["status"]) == "suspected_dead":
+        # Already flagged on an earlier tick: the sweep still polls the row so
+        # a later real completion/terminalization is picked up, but it must not
+        # re-write, re-mark or re-count the same dead run on every minute tick.
+        return False
     reference = str(row["last_heartbeat"] or row["created_at"] or "")
     timeout = _float_config(config, "heartbeat_timeout_minutes", 15)
     if _age_minutes(reference) < timeout:
@@ -963,7 +968,13 @@ def process_once(
                 continue
 
             status = str(result.get("status") or "unknown")
-            state.update(event_id, status=status)
+            # A row already flagged suspected_dead keeps that status while the
+            # upstream run still reports running/submitted; rewriting it to
+            # running and re-marking it would churn two DB writes + a summary
+            # counter per minute per dead run.  Real terminal/completed statuses
+            # are still written below so recovery and delivery are unaffected.
+            if str(row["status"]) != "suspected_dead" or status not in {"submitted", "running"}:
+                state.update(event_id, status=status)
             if status in {"submitted", "running"}:
                 summary["running"] += 1
                 alive = runner_is_alive(row["runner_pid"], run_id)
@@ -981,7 +992,15 @@ def process_once(
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
                     except Exception as exc:  # noqa: BLE001 -- runner recovery failure must not abort the sweep
-                        state.update(event_id, error=f"runner recovery failed: {exc}")
+                        # A failing relaunch (bad run id, deleted job, broken
+                        # runner path) must also consume the restart budget —
+                        # otherwise the same broken relaunch is retried on every
+                        # tick forever and never escalates to suspected_dead.
+                        state.update(
+                            event_id,
+                            error=f"runner recovery failed: {exc}",
+                            runner_restarts=restarts + 1,
+                        )
                         summary["failed"] += 1
                 elif _mark_suspected_dead_if_stale(
                     state, config, row, event_id,
@@ -1138,7 +1157,11 @@ def process_once(
                     summary["failed"] += 1
                     continue
             status = str(payload.get("status") or row["status"] or "running")
-            state.update(event_id, status=status)
+            # Same suspected_dead stability as the swarm path: keep the flag
+            # while the job still reports submitted/running and only rewrite on
+            # a real terminal/completed status.
+            if str(row["status"]) != "suspected_dead" or status not in {"submitted", "running"}:
+                state.update(event_id, status=status)
             if status in {"submitted", "running"}:
                 summary["running"] += 1
                 alive = content_runner_is_alive(row["runner_pid"], run_id)
@@ -1152,7 +1175,14 @@ def process_once(
                         state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
                         summary["restarted"] += 1
                     except Exception as exc:  # noqa: BLE001 -- runner recovery failure must not abort the sweep
-                        state.update(event_id, error=f"content runner recovery failed: {exc}")
+                        # Consume the restart budget on failure too so a broken
+                        # relaunch escalates to suspected_dead instead of being
+                        # retried on every tick forever.
+                        state.update(
+                            event_id,
+                            error=f"content runner recovery failed: {exc}",
+                            runner_restarts=restarts + 1,
+                        )
                         summary["failed"] += 1
                 elif _mark_suspected_dead_if_stale(
                     state, config, row, event_id,

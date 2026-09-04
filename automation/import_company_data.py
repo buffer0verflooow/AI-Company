@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
 import uuid
 import zipfile
@@ -256,11 +257,18 @@ def _parse_tendency_xls(path: Path) -> list[dict[str, Any]]:
         raise RuntimeError("xlrd 2.x is required to import .xls exports") from exc
     sheet = xlrd.open_workbook(path).sheet_by_index(0)
     rows: list[dict[str, Any]] = []
-    for index in range(2, sheet.nrows):
+    # The export puts its header row ("传播渠道|发表日期|内容标题|阅读人数…") at
+    # row index 2 and the first real record at index 3.  Starting at index 2
+    # would import the column labels themselves as a fabricated article
+    # ("内容标题", reads 0).
+    for index in range(3, sheet.nrows):
         channel = str(sheet.cell_value(index, 11)).strip()
         raw_date = str(sheet.cell_value(index, 12)).strip()
         title = str(sheet.cell_value(index, 13)).strip()
         if not channel or not title or not raw_date:
+            continue
+        if title == "内容标题" and channel == "传播渠道":
+            # Header-labels guard: never treat a shifted header row as an article.
             continue
         published_at = raw_date
         if re.fullmatch(r"\d{8}", raw_date):
@@ -346,10 +354,18 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
         rows: list[dict[str, Any]] = []
         source_rows: list[dict[str, Any]] = []
         for path in exports:
-            if path.name.startswith("tendency_"):
-                source_rows.extend(_parse_tendency_xls(path))
+            try:
+                if path.name.startswith("tendency_"):
+                    source_rows.extend(_parse_tendency_xls(path))
+                    continue
+                item = _parse_xls(path)
+            except ValueError as exc:
+                # A single corrupt/oddly-laid-out export inside the evidence zip
+                # must not abort the whole import run (mirrors the guard that
+                # _parse_xls documents for its own layout check).  Skip it and
+                # keep going with the well-formed exports.
+                print(f"WARNING: skipping unparsable export {path.name}: {exc}", file=sys.stderr)
                 continue
-            item = _parse_xls(path)
             item["source_path"] = source_path
             item["source_sha256"] = source_hash
             rows.append(item)
@@ -505,7 +521,19 @@ def import_prices(collected_at: str = "2026-07-15") -> None:
         db.close()
 
 
-def write_article_report(rows: list[dict[str, Any]], source_rows: list[dict[str, Any]]) -> Path:
+def write_article_report(
+    rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+    zip_path: Path,
+    source_hash: str,
+) -> Path:
+    """Write the evidence report for the *actually imported* archive.
+
+    ``zip_path``/``source_hash`` describe the archive that was imported (which
+    may differ from the canonical default when ``--article-zip`` points at a
+    different export), so the report's 数据边界 section never contradicts the
+    ``source_sha256`` stored on the DB rows.
+    """
     report = ROOT / "marketing/article-performance-2026-07-15.md"
     lines = [
         "---", "tags: [marketing, article-performance, evidence]", "created: 2026-07-15", "updated: 2026-07-15", "---", "",
@@ -526,9 +554,13 @@ def write_article_report(rows: list[dict[str, Any]], source_rows: list[dict[str,
         item["title"] for item in source_rows
         if str(item.get("published_at") or "").startswith("2026-07")
     }
+    try:
+        evidence_display = str(zip_path.resolve().relative_to(ROOT / "marketing"))
+    except ValueError:
+        evidence_display = str(zip_path.resolve())
     lines += [
-        "", "## 数据边界", "", f"- 导入明细：{len(rows)} 篇。", "- 原始证据：`evidence/article-stats-2026-07-15/数据统计.zip`。",
-        f"- SHA-256：`{sha256(ARTICLE_EVIDENCE)}`。", "- 公众号后台的趋势总表还包含其他历史文章，但本次压缩包没有对应的逐篇明细文件；其发布状态继续以项目追踪表和人工确认结果为准。", "",
+        "", "## 数据边界", "", f"- 导入明细：{len(rows)} 篇。", f"- 原始证据：`{evidence_display}`。",
+        f"- SHA-256：`{source_hash}`。", "- 公众号后台的趋势总表还包含其他历史文章，但本次压缩包没有对应的逐篇明细文件；其发布状态继续以项目追踪表和人工确认结果为准。", "",
         f"- 趋势总表中识别到 2026 年 7 月发布内容 {len(current_titles)} 篇（包括没有逐篇明细导出的文章）。", "",
         "## 结构化存储", "", "- SQLite：`marketing/article_performance.db`。", "- `article_metrics`：逐篇摘要指标、趋势明细和人群分布 JSON。", "- `article_source_metrics`：趋势总表中的文章、发布日期、传播渠道和阅读人数。",
     ]
@@ -544,10 +576,11 @@ def main() -> int:
     args = parser.parse_args()
     rows: list[dict[str, Any]] = []
     if not args.skip_articles:
-        rows, source_rows = import_articles(Path(args.article_zip))
+        zip_path = Path(args.article_zip)
+        rows, source_rows = import_articles(zip_path)
         print(f"imported article metrics: {len(rows)}")
         print(f"imported article source rows: {len(source_rows)}")
-        print(f"article report: {write_article_report(rows, source_rows)}")
+        print(f"article report: {write_article_report(rows, source_rows, zip_path, sha256(zip_path))}")
     if not args.skip_prices:
         import_prices()
         print(f"imported model prices: {len(MODEL_PRICES)}")

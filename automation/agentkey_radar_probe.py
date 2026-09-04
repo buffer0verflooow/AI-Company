@@ -12,7 +12,6 @@ import hashlib
 import html
 import ipaddress
 import json
-import math
 import os
 import re
 import sqlite3
@@ -57,13 +56,19 @@ def _int_config(config: dict[str, Any], key: str, default: int) -> int:
         return default
 
 
-def _float_config(config: dict[str, Any], key: str, default: float) -> float:
-    """Coerce a config value to float, falling back on malformed values."""
-    try:
-        value = float(config.get(key, default))
-    except (TypeError, ValueError, OverflowError):
-        return default
-    return value if math.isfinite(value) else default
+# Mirrors market_radar.PROMPT_INJECTION_PATTERNS / _content_risk: probe results
+# are untrusted web text and must be gated the same way before they can become
+# eligible pulses.  Keep in sync with market_radar.py if the list changes.
+PROMPT_INJECTION_PATTERNS = (
+    "ignore previous instructions", "ignore all previous", "system prompt",
+    "developer message", "reveal your prompt", "忽略之前", "忽略以上",
+    "系统提示词", "执行以下命令", "调用工具", "读取密钥",
+)
+
+
+def _content_risk(*values: str) -> str:
+    lowered = " ".join(values).lower()
+    return "prompt_injection" if any(pattern in lowered for pattern in PROMPT_INJECTION_PATTERNS) else "clean"
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -289,6 +294,11 @@ def persist_results(db: sqlite3.Connection, run_id: str,
         }, ensure_ascii=False)
 
         now = utc_now()
+        # AgentKey results are untrusted web text copied verbatim into
+        # title/snippet; run the same prompt-injection scan the market_radar
+        # path applies so an injected signal can never become an eligible pulse.
+        risk = _content_risk(item.get("title", ""), item.get("snippet", ""))
+        eligible = 1 if risk == "clean" else 0
         try:
             cursor = db.execute(
                 """INSERT OR IGNORE INTO market_signals
@@ -298,7 +308,7 @@ def persist_results(db: sqlite3.Connection, run_id: str,
                     total_score,eligible_for_pulse,content_risk,latest_run_id,
                     evidence_json,created_at,updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,
-                    ?,?,?,?,?,1,'clean',?,?,?,?)""",
+                    ?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     sig_id, item["canonical_url"], item["theme"], item["theme_title"],
                     item.get("product_line", "company"),
@@ -308,7 +318,7 @@ def persist_results(db: sqlite3.Connection, run_id: str,
                     now, now,
                     scores["relevance"], scores["commercial"], scores["freshness"],
                     scores["source"], scores["total"],
-                    run_id, evidence, now, now,
+                    eligible, risk, run_id, evidence, now, now,
                 ),
             )
             if cursor.rowcount > 0:

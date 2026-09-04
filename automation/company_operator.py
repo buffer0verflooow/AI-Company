@@ -927,6 +927,28 @@ def _record_operational_run(
     )
 
 
+def _record_postprocess_error(db_path: Path, run_id: str, detail: str) -> None:
+    """Record a downstream (experiment/market) update failure on the run row.
+
+    The worker has already finished; a concurrent stop/failure of the
+    downstream update must not crash the whole cycle or misreport the
+    completed run.  A failure to record the note is itself non-fatal (the
+    caller still surfaces ``postprocess_error`` in the cycle summary).
+    """
+    try:
+        post_db = connect(db_path)
+        try:
+            post_db.execute(
+                "UPDATE autonomy_runs SET error=?,updated_at=? WHERE run_id=?",
+                (detail, utc_now(), run_id),
+            )
+            post_db.commit()
+        finally:
+            post_db.close()
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def execute_opportunity(
     db_path: Path,
     run_root: Path,
@@ -1022,18 +1044,7 @@ def execute_opportunity(
             # misreport the completed run — record it like the market path below.
             detail = f"experiment kickoff update failed: {exc}"
             result["postprocess_error"] = detail
-            try:
-                post_db = connect(db_path)
-                try:
-                    post_db.execute(
-                        "UPDATE autonomy_runs SET error=?,updated_at=? WHERE run_id=?",
-                        (detail, utc_now(), run_id),
-                    )
-                    post_db.commit()
-                finally:
-                    post_db.close()
-            except (OSError, sqlite3.Error):
-                pass
+            _record_postprocess_error(db_path, run_id, detail)
     if postprocess_ok and opportunity["source_type"] == "market_pulse":
         try:
             try:
@@ -1052,18 +1063,7 @@ def execute_opportunity(
         except (OSError, sqlite3.Error, ValueError) as exc:
             detail = f"market pulse update failed: {exc}"
             result["postprocess_error"] = detail
-            try:
-                post_db = connect(db_path)
-                try:
-                    post_db.execute(
-                        "UPDATE autonomy_runs SET error=?,updated_at=? WHERE run_id=?",
-                        (detail, utc_now(), run_id),
-                    )
-                    post_db.commit()
-                finally:
-                    post_db.close()
-            except (OSError, sqlite3.Error):
-                pass
+            _record_postprocess_error(db_path, run_id, detail)
     return {
         "run_id": run_id, "run_dir": str(run_dir),
         "auto_retry": retrying, "retry_count": retry_count + (1 if retrying else 0),
@@ -1244,8 +1244,34 @@ def run_cycle(
                 delivered = False
                 delivery_error = "queued in notification outbox"
             except (OSError, sqlite3.Error, ValueError) as exc:
+                # enqueue() commits before returning, so an exception means no
+                # outbox row was persisted.  Management notifications must not
+                # vanish silently: land the message in the dead-letter file
+                # (mirroring the non-allowlisted-platform branch above) so a
+                # human/operator can recover or re-route it.
                 delivered = False
-                delivery_error = f"notification outbox enqueue failed: {exc}"
+                try:
+                    try:
+                        from .company_result_notifier import record_terminal_delivery
+                    except ImportError:
+                        from company_result_notifier import record_terminal_delivery
+                    fallback = record_terminal_delivery(
+                        config,
+                        kind="autonomy-cycle",
+                        identifier=cycle_id,
+                        origin=origin,
+                        message=message,
+                        reason=f"notification outbox enqueue failed: {exc}",
+                    )
+                    delivery_error = (
+                        f"terminal: notification outbox enqueue failed: {exc}; "
+                        f"fallback={fallback}"
+                    )
+                except OSError as write_exc:
+                    delivery_error = (
+                        f"notification outbox enqueue failed: {exc}; "
+                        f"terminal fallback write failed: {write_exc}"
+                    )
         else:
             delivered, delivery_error = chosen_deliverer(config, origin, message)
     elif config.get("proactive_delivery", True):

@@ -379,7 +379,7 @@ def main() -> int:
         artifacts = [
             str(path) for path in sorted(job_dir.iterdir())
             if not path.is_symlink() and path.is_file()
-            and path.name not in {"request.json", "status.json", "executor.log", "progress.json"}
+            and path.name not in {"request.json", "status.json", "executor.log", "progress.json", "events.jsonl"}
             # atomic_write_text stages writes as ".<name>.<random>.tmp"; a
             # leftover temp file from an interrupted write must not be listed
             # as a job artifact in status.json or the delivery report.

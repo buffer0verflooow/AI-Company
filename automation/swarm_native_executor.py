@@ -448,36 +448,34 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                     forced_text = True
                 else:
                     return _payload_error("forced answer round produced empty output")
-                if forced_text or isinstance(parsed2, dict):
-                    _trace(_round, content, "forced-answer-ok", f"len={len(answer)} text={forced_text}")
-                    role = str(task.get("required_role") or task.get("task_type") or "custom")
-                    return {
-                        "success": True,
+                _trace(_round, content, "forced-answer-ok", f"len={len(answer)} text={forced_text}")
+                role = str(task.get("required_role") or task.get("task_type") or "custom")
+                return {
+                    "success": True,
+                    "content": answer,
+                    "capture": bool(answer),
+                    "token_cost": total_tokens,  # nosec B105
+                    "result_summary": {
                         "content": answer,
-                        "capture": bool(answer),
-                        "token_cost": total_tokens,  # nosec B105
-                        "result_summary": {
-                            "content": answer,
-                            "worker_agent": f"native-{role}",
-                            "worker_role": role,
-                            "model_profile": profile or {},
-                            "backend": "llm",
-                            "model": used_model,
-                            "fallback": fallback,
-                            "tool_rounds": _round + 1,
-                            "forced_answer": True,
-                            "forced_text": forced_text,
-                        },
-                        "metadata": {
-                            "executor": "swarm_native_executor",
-                            "backend": "llm",
-                            "model": used_model,
-                            "fallback": fallback,
-                            "forced_answer": True,
-                            "forced_text": forced_text,
-                        },
-                    }
-                return _payload_error("forced answer round produced no valid answer JSON")
+                        "worker_agent": f"native-{role}",
+                        "worker_role": role,
+                        "model_profile": profile or {},
+                        "backend": "llm",
+                        "model": used_model,
+                        "fallback": fallback,
+                        "tool_rounds": _round + 1,
+                        "forced_answer": True,
+                        "forced_text": forced_text,
+                    },
+                    "metadata": {
+                        "executor": "swarm_native_executor",
+                        "backend": "llm",
+                        "model": used_model,
+                        "fallback": fallback,
+                        "forced_answer": True,
+                        "forced_text": forced_text,
+                    },
+                }
 
             tc = parsed["tool_call"]
             server = str(tc.get("server") or "apk")
@@ -512,7 +510,7 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
     return _payload_error(f"tool loop exhausted after {MAX_TOOL_ROUNDS} rounds (no answer)")
 
 
-def _normalize_backend_output(raw: str, task: dict[str, Any]) -> dict[str, Any]:
+def _normalize_backend_output(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if not text:
         return {
@@ -597,7 +595,7 @@ def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[
         return _payload_error(str(exc))
     if proc.returncode != 0:
         return _payload_error(proc.stderr.strip() or f"agent command exited {proc.returncode}")
-    return _normalize_backend_output(proc.stdout, task)
+    return _normalize_backend_output(proc.stdout)
 
 
 def main() -> int:

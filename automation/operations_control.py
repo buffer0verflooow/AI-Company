@@ -57,7 +57,6 @@ DEFAULT_CONTENT_JOBS = COMPANY_ROOT / "operations/runtime/content-jobs"
 DEFAULT_HERMES_DB = Path("/home/pwn/.hermes/state.db")
 DEFAULT_FINANCE_DB = COMPANY_ROOT / "finance/finance_ledger.db"
 DEFAULT_ARTICLE_PERF_DB = COMPANY_ROOT / "marketing/article_performance.db"
-DEFAULT_REVIEW_ROOT = COMPANY_ROOT / "operations/runtime/tvcr-reviews"
 DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db")
 DEFAULT_LOG_DIR = COMPANY_ROOT / "operations/runtime/logs"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -478,15 +477,7 @@ def _classify_security_findings(
             return "empty_output"
         return "no_business_value"
 
-    # ── 5. Finding regex matched but only as noise? Check again ───────
-    #       If we got here, every finding_re match was inside a no-finding
-    #       pattern.  Treat same as a no-finding-pattern hit.
-    if finding_matches:
-        if len(combined) < min_finding_tokens:
-            return "empty_output"
-        return "no_business_value"
-
-    # ── 6. Default: if the runner log shows completed tasks with no
+    # ── 5. Default: if the runner log shows completed tasks with no
     #       finding signal, count as no_business_value.
     #       One non-JSON line (partial trailing log write, pretty-printed
     #       summary) must not abort the whole scan, so each line is parsed
@@ -1273,16 +1264,6 @@ def pending_review_deliveries(db_path: Path, max_attempts: int = 10) -> list[dic
             (max_attempts,),
         ).fetchall()
         return [dict(row) for row in rows]
-    finally:
-        db.close()
-
-
-def proposals_for_review(db_path: Path, review_id: str) -> list[dict[str, Any]]:
-    db = connect(db_path)
-    try:
-        return [dict(row) for row in db.execute(
-            "SELECT * FROM improvement_proposals WHERE review_id=? ORDER BY item_no", (review_id,)
-        )]
     finally:
         db.close()
 

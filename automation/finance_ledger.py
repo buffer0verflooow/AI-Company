@@ -217,6 +217,13 @@ def sync_forecast(db_path: Path, submissions: Path) -> bool:
         return False
     minimum = float(match.group(1).replace(",", ""))
     maximum = float(match.group(2).replace(",", ""))
+    try:
+        submissions_hash = sha256_file(submissions)
+    except OSError:
+        # Same degrade contract as the read above: the file may vanish or
+        # become unreadable between the read and this hash; an uncaught error
+        # here would abort the whole --sync cron after content already parsed.
+        return False
     db = connect(db_path)
     try:
         db.execute(
@@ -229,7 +236,7 @@ def sync_forecast(db_path: Path, submissions: Path) -> bool:
                 evidence_sha256=excluded.evidence_sha256,updated_at=excluded.updated_at""",
             (
                 str(uuid.uuid4()), "security-exploration", "HackerOne findings estimated bounty",
-                minimum, maximum, "USD", str(submissions.resolve()), sha256_file(submissions),
+                minimum, maximum, "USD", str(submissions.resolve()), submissions_hash,
                 "forecast", utc_now(),
             ),
         )
@@ -445,6 +452,8 @@ def main() -> int:
             "snapshot_id": sync_snapshot(db_path, DEFAULT_ROUTER_DB, DEFAULT_HERMES_DB),
         }, ensure_ascii=False))
         return 0
+    if not args.report:
+        parser.error("specify an action: --add-actual, --sync, or --report")
     print(json.dumps(report(db_path), ensure_ascii=False, indent=2))
     return 0
 

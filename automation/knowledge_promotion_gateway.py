@@ -368,8 +368,11 @@ def promote(gate_db: Path, candidate_id: str, wiki_dir: Path) -> Path:
         wiki_dir.mkdir(parents=True, exist_ok=True)
         # candidate_id is a DB/CLI string, not a filesystem token: strip path
         # separators/dots before using it in the filename so a crafted id
-        # cannot escape wiki_dir.
-        safe_id = re.sub(r"[^A-Za-z0-9_-]", "", candidate_id)[:8] or "unknown"
+        # cannot escape wiki_dir.  The full sanitized id is kept (no prefix
+        # truncation): candidate ids are uuid4 hex/hyphens, and shortening
+        # them would let distinct candidates collide on the same wiki file and
+        # silently overwrite a previously human-reviewed promotion.
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "", candidate_id) or "unknown"
         path = wiki_dir / f"knowledge-{safe_id}.md"
         body = (
             "---\n"

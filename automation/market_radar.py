@@ -251,6 +251,10 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
     # endpoint; a transient network blip or a 5xx/429 gateway response must not
     # fail the whole run.  Retry bounded times with small backoff, mirroring the
     # retry discipline already used by ``security_intel.fetch``.
+    # ``body`` is bound on the success path below; initialize it so a future
+    # non-raising loop exit can never reach the size/JSON checks with an
+    # unbound name (every current failure path raises inside the loop).
+    body = b""
     for attempt in range(3):
         try:
             with opener.open(request, timeout=timeout) as response:

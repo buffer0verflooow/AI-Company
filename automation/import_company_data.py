@@ -250,12 +250,39 @@ def _parse_xls(path: Path) -> dict[str, Any]:
     }
 
 
+def _tendency_measured_at(title: str) -> str:
+    """Extract the export window's end date from a tendency title row.
+
+    The export stamps its window into a merged title cell, e.g.
+    "数据趋势概况(2026.08.05-2026.09.03)".  The window end is the day the
+    metrics were measured; hardcoding one pack's date mislabels every future
+    import (and measured_at is part of the upsert key, so a wrong value
+    silently duplicates rows instead of updating them).
+    """
+    m = re.search(
+        r"(\d{4})\.(\d{2})\.(\d{2})\s*-\s*(\d{4})\.(\d{2})\.(\d{2})", title
+    )
+    if m:
+        return f"{m.group(4)}-{m.group(5)}-{m.group(6)}"
+    return ""
+
+
 def _parse_tendency_xls(path: Path) -> list[dict[str, Any]]:
     try:
         import xlrd  # type: ignore
     except ImportError as exc:  # pragma: no cover - environment guard
         raise RuntimeError("xlrd 2.x is required to import .xls exports") from exc
     sheet = xlrd.open_workbook(path).sheet_by_index(0)
+    # measured_at comes from the export's own window label (row 1); falling
+    # back to the latest 发表日期 keeps the import working on odd exports.
+    measured_at = ""
+    for probe_row in range(0, min(3, sheet.nrows)):
+        for col in range(min(16, sheet.ncols)):
+            measured_at = _tendency_measured_at(str(sheet.cell_value(probe_row, col)))
+            if measured_at:
+                break
+        if measured_at:
+            break
     rows: list[dict[str, Any]] = []
     # The export puts its header row ("传播渠道|发表日期|内容标题|阅读人数…") at
     # row index 2 and the first real record at index 3.  Starting at index 2
@@ -279,7 +306,7 @@ def _parse_tendency_xls(path: Path) -> list[dict[str, Any]]:
             "channel": channel,
             "reads": _integer(sheet.cell_value(index, 14)) or 0,
             "read_share": _number(sheet.cell_value(index, 15)),
-            "measured_at": "2026-07-15",
+            "measured_at": measured_at or published_at,
         })
     return rows
 
@@ -534,10 +561,19 @@ def write_article_report(
     different export), so the report's 数据边界 section never contradicts the
     ``source_sha256`` stored on the DB rows.
     """
-    report = ROOT / "marketing/article-performance-2026-07-15.md"
+    # Derive the report filename from the imported data's measured_at so a new
+    # export window writes its own report instead of clobbering the previous
+    # one (the path/title were hardcoded to the 2026-07-15 pack).
+    measured_dates = sorted({
+        str(item.get("measured_at") or "")
+        for item in [*rows, *source_rows]
+        if item.get("measured_at")
+    })
+    report_date = measured_dates[-1] if measured_dates else "2026-07-15"
+    report = ROOT / f"marketing/article-performance-{report_date}.md"
     lines = [
-        "---", "tags: [marketing, article-performance, evidence]", "created: 2026-07-15", "updated: 2026-07-15", "---", "",
-        "# 文章发布表现（2026-07-15 导出）", "",
+        "---", "tags: [marketing, article-performance, evidence]", f"created: {report_date}", f"updated: {report_date}", "---", "",
+        f"# 文章发布表现（{report_date} 导出）", "",
         "> 来源：微信公众号后台导出的 `数据统计.zip`。这里只记录实际存在的明细导出，不把没有明细文件的文章推断为未发布。", "",
         "## 已导入明细", "",
         "| 文章 | 发布日期（趋势首日） | 阅读 | 完读率 | 平均停留(s) | 新关注 | 分享 | 在看 | 点赞 | 收藏 | 评论 | 赞赏 |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",

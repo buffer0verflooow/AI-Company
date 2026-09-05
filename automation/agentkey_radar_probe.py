@@ -24,6 +24,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
     from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
@@ -115,7 +116,6 @@ def _sanitize_text(value: str, limit: int = 2400) -> str:
 
 def _canonical_url(value: str) -> str:
     try:
-        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         parsed = urlsplit(value.strip())
         hostname = parsed.hostname
     except (ValueError, AttributeError):
@@ -257,7 +257,6 @@ def _parse_agentkey_result(raw: dict, theme: str, theme_title: str,
     canon = _canonical_url(url)
     if not canon:
         return None
-    from urllib.parse import urlsplit
     domain = urlsplit(canon).hostname or ""
     return {
         "canonical_url": canon,

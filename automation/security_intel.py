@@ -27,6 +27,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -231,7 +232,6 @@ def fetch(url: str, insecure: bool = False) -> str:
         except subprocess.TimeoutExpired as e:
             last_err = e
         if attempt < 2:
-            import time
             time.sleep(1.5 * (attempt + 1))
     raise last_err if last_err else RuntimeError("fetch failed")
 

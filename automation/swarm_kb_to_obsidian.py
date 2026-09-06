@@ -14,6 +14,7 @@
   - 只追加不覆盖，避免你丢失手写内容
 """
 
+import argparse
 import json
 import math
 import sqlite3
@@ -224,11 +225,19 @@ def update_wiki(md_section: str) -> bool:
                 )
                 return False
             # Replace existing auto section
-            if AUTO_MARKER in existing:
-                start = existing.index(AUTO_MARKER)
-                end_marker = "<!-- /swarm-kb-auto -->"
-                end = existing.index(end_marker) + len(end_marker) if end_marker in existing else len(existing)
-                new_content = existing[:start].rstrip() + md_section + existing[end:].rstrip() + "\n"
+            start_marker = AUTO_MARKER
+            end_marker = "<!-- /swarm-kb-auto -->"
+            if start_marker in existing and end_marker in existing:
+                # The header written on first sync also mentions the start
+                # marker in prose; anchor on the auto section's own markers
+                # (always the last occurrences) so a second sync does not
+                # truncate the intro paragraph at the header's copy.
+                start = existing.rindex(start_marker)
+                end = existing.rindex(end_marker) + len(end_marker)
+                if start < end:
+                    new_content = existing[:start].rstrip() + md_section + existing[end:].rstrip() + "\n"
+                else:
+                    new_content = existing.rstrip() + "\n" + md_section
             else:
                 new_content = existing.rstrip() + "\n" + md_section
         else:
@@ -244,7 +253,6 @@ def update_wiki(md_section: str) -> bool:
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Sync Swarm KB wisdom to Obsidian strategy panel")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     args = parser.parse_args()
@@ -272,9 +280,15 @@ def main():
         print(md_section[:2000])
         return
 
-    update_wiki(md_section)
+    if not update_wiki(md_section):
+        print(
+            f"Sync failed: refused to overwrite unreadable/oversized {WIKI_PATH}",
+            file=sys.stderr,
+        )
+        return 1
     print(f"✅ Synced {len(entries)} entries to {WIKI_PATH}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

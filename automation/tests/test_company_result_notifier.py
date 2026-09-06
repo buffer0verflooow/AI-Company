@@ -232,8 +232,9 @@ class NotifierTests(unittest.TestCase):
     def test_persistently_failing_status_query_advances_attempts(self):
         # A run whose swarm status query keeps raising (e.g. the run was
         # deleted from the swarm DB) must not be re-polled forever: each tick
-        # advances delivery_attempts so the row stops being returned as pending
-        # once max_delivery_attempts is reached.
+        # advances delivery_attempts and the row is terminalized (dead-letter
+        # record) once max_delivery_attempts is reached instead of silently
+        # disappearing from the pending query.
         with tempfile.TemporaryDirectory() as td:
             db_path, event_id = self._setup_event(td)
             config = self._config(td, db_path)
@@ -245,17 +246,21 @@ class NotifierTests(unittest.TestCase):
             state = RouterState(db_path)
             row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
             self.assertEqual(first["failed"], 1)
-            self.assertEqual(second["failed"], 1)
-            # Attempts exhausted: the row is no longer returned as pending.
+            # Attempts exhausted on the second tick: the row terminalizes and
+            # becomes recoverable through the dead-letter fallback.
+            self.assertEqual(second["terminal"], 1)
             self.assertEqual(third["failed"], 0)
             self.assertEqual(row["delivery_attempts"], 2)
             self.assertIn("run status query failed", row["error"])
+            self.assertIn("terminal: retry exhausted", row["delivery_error"])
             self.assertEqual(list(state.pending_notifications(2)), [])
+            self.assertEqual(len(list_terminal_deliveries(config, 10)), 1)
             state.close()
 
     def test_unhandled_swarm_status_advances_attempts(self):
         # A status outside the handled set must be recorded and counted toward
-        # max_delivery_attempts instead of being re-polled forever.
+        # max_delivery_attempts instead of being re-polled forever; once the
+        # cap is reached the row terminalizes into the dead-letter fallback.
         with tempfile.TemporaryDirectory() as td:
             db_path, event_id = self._setup_event(td)
             config = self._config(td, db_path)
@@ -264,9 +269,10 @@ class NotifierTests(unittest.TestCase):
                 summary = process_once(config)
             state = RouterState(db_path)
             row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
-            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(summary["terminal"], 1)
             self.assertEqual(row["delivery_attempts"], 1)
             self.assertIn("unhandled swarm run status", row["error"])
+            self.assertIn("terminal: retry exhausted", row["delivery_error"])
             self.assertEqual(list(state.pending_notifications(1)), [])
             state.close()
 

@@ -26,6 +26,8 @@ Frontmatter 约定：
   - 低侵入：加 frontmatter 即可，不改变你在 Obsidian 的写作习惯
 """
 
+import argparse
+import hashlib
 import json
 import os
 import re
@@ -139,7 +141,6 @@ def find_candidate_notes(vault: Path) -> list[Path]:
 
 
 def compute_content_hash(content: str) -> str:
-    import hashlib
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -249,7 +250,6 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Capture Obsidian notes to Swarm KB")
     parser.add_argument("--dry-run", action="store_true", help="Preview only, no capture")
     parser.add_argument("--verbose", action="store_true", help="Detailed output")

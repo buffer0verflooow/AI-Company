@@ -276,7 +276,9 @@ def _parse_tendency_xls(path: Path) -> list[dict[str, Any]]:
     # measured_at comes from the export's own window label (row 1); falling
     # back to the latest 发表日期 keeps the import working on odd exports.
     measured_at = ""
-    for probe_row in range(0, min(3, sheet.nrows)):
+    # Only the first few rows can hold the merged title cell that carries the
+    # export window label; scanning more rows adds nothing but work.
+    for probe_row in range(min(3, sheet.nrows)):
         for col in range(min(16, sheet.ncols)):
             measured_at = _tendency_measured_at(str(sheet.cell_value(probe_row, col)))
             if measured_at:
@@ -380,19 +382,36 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
             exports = _extract_xls_exports(archive, tmp_path)
         rows: list[dict[str, Any]] = []
         source_rows: list[dict[str, Any]] = []
+        # All exports of one archive belong to the same export window: derive
+        # measured_at from the tendency label once and stamp the per-article
+        # detail rows with that same date.  measured_at is part of the upsert
+        # key, so re-hardcoding one pack's date would mislabel every future
+        # import (and silently duplicate rows instead of updating them).
+        pack_measured_at = ""
         for path in exports:
+            if not path.name.startswith("tendency_"):
+                continue
             try:
-                if path.name.startswith("tendency_"):
-                    source_rows.extend(_parse_tendency_xls(path))
-                    continue
+                for row in _parse_tendency_xls(path):
+                    if row["measured_at"] and not pack_measured_at:
+                        pack_measured_at = row["measured_at"]
+                    source_rows.append(row)
+            except Exception as exc:  # noqa: BLE001 -- a corrupt export must not abort the whole import
+                print(f"WARNING: skipping unparsable export {path.name}: {exc}", file=sys.stderr)
+        for path in exports:
+            if path.name.startswith("tendency_"):
+                continue
+            try:
                 item = _parse_xls(path)
-            except ValueError as exc:
+            except Exception as exc:  # noqa: BLE001 -- a corrupt export must not abort the whole import
                 # A single corrupt/oddly-laid-out export inside the evidence zip
                 # must not abort the whole import run (mirrors the guard that
                 # _parse_xls documents for its own layout check).  Skip it and
                 # keep going with the well-formed exports.
                 print(f"WARNING: skipping unparsable export {path.name}: {exc}", file=sys.stderr)
                 continue
+            if pack_measured_at:
+                item["measured_at"] = pack_measured_at
             item["source_path"] = source_path
             item["source_sha256"] = source_hash
             rows.append(item)
@@ -563,11 +582,14 @@ def write_article_report(
     """
     # Derive the report filename from the imported data's measured_at so a new
     # export window writes its own report instead of clobbering the previous
-    # one (the path/title were hardcoded to the 2026-07-15 pack).
+    # one (the path/title were hardcoded to the 2026-07-15 pack).  measured_at
+    # can fall back to raw spreadsheet date cells, so only a well-formed
+    # YYYY-MM-DD value may become the report filename segment — anything else
+    # would let an odd/crafted export write the report outside marketing/.
     measured_dates = sorted({
         str(item.get("measured_at") or "")
         for item in [*rows, *source_rows]
-        if item.get("measured_at")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(item.get("measured_at") or ""))
     })
     report_date = measured_dates[-1] if measured_dates else "2026-07-15"
     report = ROOT / f"marketing/article-performance-{report_date}.md"

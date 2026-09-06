@@ -957,14 +957,35 @@ def process_once(
             except Exception as exc:  # noqa: BLE001 -- a failing status query must not re-poll forever
                 # A persistently failing status query (e.g. the run was removed
                 # from the swarm DB) must not re-poll forever: advance the
-                # attempt counter so the row eventually dead-letters.
-                state.update(
-                    event_id,
-                    error=f"run status query failed: {exc}",
-                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                # attempt counter so the row eventually dead-letters instead of
+                # silently disappearing once pending_notifications stops
+                # returning it.
+                attempts = _safe_counter(row["delivery_attempts"]) + 1
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="swarm",
+                        identifier=run_id,
+                        origin={},
+                        message=f"Research Run {run_id} 状态持续不可读，无法自动回传结果。",
+                        error=f"run status query failed: {exc}",
+                    )
+                    state.update(
+                        event_id,
+                        error=f"run status query failed: {exc}",
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        error=f"run status query failed: {exc}",
+                        delivery_attempts=attempts,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
                 continue
 
             status = str(result.get("status") or "unknown")
@@ -1012,14 +1033,34 @@ def process_once(
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
                 # Unknown/unhandled status (corrupt payload, deleted run) must
                 # not be re-polled forever; record it and advance attempts so
-                # the row can dead-letter after max_delivery_attempts.
-                state.update(
-                    event_id,
-                    error=f"unhandled swarm run status: {status}",
-                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                # the row dead-letters after max_delivery_attempts instead of
+                # silently disappearing from the pending query.
+                attempts = _safe_counter(row["delivery_attempts"]) + 1
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="swarm",
+                        identifier=run_id,
+                        origin={},
+                        message=f"Research Run {run_id} 状态异常（{status}），无法自动回传结果。",
+                        error=f"unhandled swarm run status: {status}",
+                    )
+                    state.update(
+                        event_id,
+                        error=f"unhandled swarm run status: {status}",
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        error=f"unhandled swarm run status: {status}",
+                        delivery_attempts=attempts,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
                 continue
             if not _delivery_retry_ready(config, row):
                 continue
@@ -1147,14 +1188,34 @@ def process_once(
                 except (OSError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
                     # A persistently unreadable/corrupt status.json must not be
                     # re-polled forever; advance the attempt counter so the row
-                    # can dead-letter after max_delivery_attempts.
-                    state.update(
-                        event_id,
-                        error=f"content status query failed: {exc}",
-                        delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
-                        last_delivery_at=utc_now(),
-                    )
-                    summary["failed"] += 1
+                    # dead-letters after max_delivery_attempts instead of
+                    # silently disappearing from the pending query.
+                    attempts = _safe_counter(row["delivery_attempts"]) + 1
+                    if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                        terminal_error = _record_retry_exhaustion(
+                            config,
+                            kind="content",
+                            identifier=run_id,
+                            origin={},
+                            message=f"公司 Run {run_id} 状态持续不可读，无法自动回传结果。",
+                            error=f"content status query failed: {exc}",
+                        )
+                        state.update(
+                            event_id,
+                            error=f"content status query failed: {exc}",
+                            delivery_attempts=attempts,
+                            delivery_error=terminal_error,
+                            last_delivery_at=utc_now(),
+                        )
+                        summary["terminal"] += 1
+                    else:
+                        state.update(
+                            event_id,
+                            error=f"content status query failed: {exc}",
+                            delivery_attempts=attempts,
+                            last_delivery_at=utc_now(),
+                        )
+                        summary["failed"] += 1
                     continue
             status = str(payload.get("status") or row["status"] or "running")
             # Same suspected_dead stability as the swarm path: keep the flag
@@ -1193,14 +1254,34 @@ def process_once(
             if status not in {"completed", "needs_approval", "failed", "cancelled"}:
                 # Unhandled statuses (e.g. review/qa from the job state machine)
                 # must not be re-polled forever; record and advance attempts so
-                # the row can dead-letter after max_delivery_attempts.
-                state.update(
-                    event_id,
-                    error=f"unhandled content job status: {status}",
-                    delivery_attempts=_safe_counter(row["delivery_attempts"]) + 1,
-                    last_delivery_at=utc_now(),
-                )
-                summary["failed"] += 1
+                # the row dead-letters after max_delivery_attempts instead of
+                # silently disappearing from the pending query.
+                attempts = _safe_counter(row["delivery_attempts"]) + 1
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="content",
+                        identifier=run_id,
+                        origin={},
+                        message=f"公司 Run {run_id} 状态异常（{status}），无法自动回传结果。",
+                        error=f"unhandled content job status: {status}",
+                    )
+                    state.update(
+                        event_id,
+                        error=f"unhandled content job status: {status}",
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        error=f"unhandled content job status: {status}",
+                        delivery_attempts=attempts,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
                 continue
             if not _delivery_retry_ready(config, row):
                 continue

@@ -1214,6 +1214,29 @@ class RouterState:
         origin: dict[str, str] | None = None,
         dedup_key: str = "",
     ) -> str:
+        event_id, _created = self.insert_or_existing(
+            session_id, platform, message_hash, message, decision,
+            origin=origin, dedup_key=dedup_key,
+        )
+        return event_id
+
+    def insert_or_existing(
+        self,
+        session_id: str,
+        platform: str,
+        message_hash: str,
+        message: str,
+        decision: RouteDecision,
+        origin: dict[str, str] | None = None,
+        dedup_key: str = "",
+    ) -> tuple[str, bool]:
+        """Insert a route event, returning ``(event_id, created)``.
+
+        ``created`` is False when a concurrent hook for the same
+        session+message won the race between the caller's ``existing()`` check
+        and this insert.  Callers must reuse that event id and must NOT
+        dispatch a second run for the same message.
+        """
         event_id = str(uuid.uuid4())
         now = utc_now()
         origin = origin or {}
@@ -1249,9 +1272,9 @@ class RouterState:
                 ).fetchone()
                 self.db.rollback()
                 if existing:
-                    return str(existing["route_event_id"])
+                    return str(existing["route_event_id"]), False
                 raise
-        return event_id
+        return event_id, True
 
     def update(self, event_id: str, **fields: Any) -> None:
         if not fields:
@@ -2068,7 +2091,7 @@ def _handle_hook(
                 )}
 
     origin = resolve_session_origin(str(config.get("gateway_sessions_index") or ""), session_id)
-    event_id = state.insert(
+    event_id, created = state.insert_or_existing(
         session_id,
         platform,
         message_hash,
@@ -2077,6 +2100,22 @@ def _handle_hook(
         origin=origin,
         dedup_key=dedup_key,
     )
+    if not created:
+        # A concurrent hook inserted the same session+message between the
+        # existing() check above and this insert.  Reuse that event exactly
+        # like the existing() branch: the winner owns the downstream dispatch,
+        # and dispatching again here would duplicate the run (token burn /
+        # duplicate external work) and orphan the losing run_id.
+        row = state.existing(session_id, message_hash)
+        stored = _stored_decision(row["decision_json"]) if row is not None else None
+        if stored is None:
+            stored = _stored_decision_fallback(row) if row is not None else decision
+        return {"context": build_context(
+            stored,
+            existing_run_id=str(row["run_id"] or "") if row is not None else "",
+            existing_status=str(row["status"] or "") if row is not None else "",
+            status_updates=updates,
+        )}
     run: dict[str, Any] | None = None
 
     # Pre-evaluation gate: check task value BEFORE dispatch
@@ -2136,10 +2175,20 @@ def _handle_hook(
             "dispatch_research" if decision.route == "research" else "dispatch_security", True
         )
         if not enabled:
+            # Mirrors the content disabled branch below: the product line is
+            # switched off, not failing — defer and hand back to the main agent
+            # instead of falling through to the run_id-less dispatch context,
+            # which would append a contradictory "report routing failure" line.
             state.update(event_id, status="deferred", error="product line dispatch disabled")
-            updates.append(
-                f"- {decision.route} 自动分发已禁用 (dispatch_{decision.route}=false)，已交由主 Agent。"
-            )
+            return {"context": build_context(
+                RouteDecision(**{
+                    **asdict(decision), "action": "main_agent",
+                    "reason": "product line dispatch disabled",
+                }),
+                status_updates=updates + [
+                    f"- {decision.route} 自动分发已禁用 (dispatch_{decision.route}=false)，已交由主 Agent。"
+                ],
+            )}
         else:
             active = [row for row in state.active_for_session(session_id) if row["status"] in {"submitted", "running"}]
             if len(active) >= _int_config(config, "max_active_runs_per_session", 2):

@@ -40,7 +40,8 @@ def job_state(job_dir: str):
         try:
             with open(lc, encoding='utf-8') as stream:
                 d = json.load(stream)
-            return d.get('state'), os.path.getmtime(lc)
+            if isinstance(d, dict):
+                return d.get('state'), os.path.getmtime(lc)
         except (OSError, ValueError, TypeError):
             pass
     st = os.path.join(job_dir, 'status.json')
@@ -48,7 +49,8 @@ def job_state(job_dir: str):
         try:
             with open(st, encoding='utf-8') as stream:
                 d = json.load(stream)
-            return d.get('status'), os.path.getmtime(st)
+            if isinstance(d, dict):
+                return d.get('status'), os.path.getmtime(st)
         except (OSError, ValueError, TypeError):
             pass
     return None, os.path.getmtime(job_dir)

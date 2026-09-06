@@ -22,6 +22,7 @@ Results are untrusted data; HTML is stripped before any processing.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -487,7 +488,6 @@ def init_db(db: sqlite3.Connection) -> None:
 
 
 def item_id(item: dict[str, Any]) -> str:
-    import hashlib
     key = f"{item['source']}|{item['url']}|{item['title']}".encode()
     return hashlib.sha256(key).hexdigest()[:16]
 

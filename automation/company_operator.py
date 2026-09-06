@@ -15,6 +15,8 @@ import hashlib
 import json
 import logging
 import math
+import os
+import signal
 import sqlite3
 import subprocess
 import time
@@ -752,18 +754,56 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
     ]
     if model:
         cmd += ["--model", model]
+    timeout_seconds = _int_config(config, "operator_timeout_seconds", 1200)
     try:
-        proc = subprocess.run(
+        # start_new_session puts the worker in its own process group so a
+        # timeout can kill the whole tree (hermes plus any tool/backend
+        # processes it spawned) instead of only the direct child.
+        proc = subprocess.Popen(
             cmd,
             cwd=str(run_dir),
             env=worker_env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=_int_config(config, "operator_timeout_seconds", 1200),
-            check=False,
+            start_new_session=True,
         )
     except Exception as exc:  # noqa: BLE001 -- a crashing worker must not abort the operator cycle
         return {"status": "failed", "error": str(exc), "summary": "", "next_action": "", "metrics": {}}
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # A stuck worker may have spawned children that would otherwise keep
+        # running (and writing to read-only company dirs) after this run is
+        # declared failed; kill the whole process group before reaping.  The
+        # captured output is irrelevant on this path, so close the pipes
+        # instead of draining them — a daemonized descendant holding a pipe
+        # write end would otherwise keep the reap blocked until it exits.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        # The timeout failure must still run the sandbox audit: the worker may
+        # have mutated read-only company files just before it stalled.
+        violations = audit_sandbox_writes(run_dir, sandbox_baseline)
+        if violations:
+            return {
+                "status": "failed",
+                "error": "worker timed out; sandbox violation: worker wrote read-only company files: "
+                + ", ".join(violations),
+                "summary": "", "next_action": "", "metrics": {}, "sandbox_violations": violations,
+            }
+        return {"status": "failed", "error": "worker timed out", "summary": "", "next_action": "", "metrics": {}}
     # Enforce the write boundary by detection: a worker that mutated read-only
     # company code/config/ledgers has escaped its sandbox — fail the run loudly.
     violations = audit_sandbox_writes(run_dir, sandbox_baseline)
@@ -774,7 +814,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
             "summary": "", "next_action": "", "metrics": {}, "sandbox_violations": violations,
         }
     if proc.returncode != 0:
-        error = proc.stderr.strip()[-4000:] or proc.stdout.strip()[-4000:] or f"Hermes exited {proc.returncode}"
+        error = stderr.strip()[-4000:] or stdout.strip()[-4000:] or f"Hermes exited {proc.returncode}"
         return {"status": "failed", "error": error, "summary": "", "next_action": "", "metrics": {}}
     result_path = run_dir / "result.json"
     report_path = run_dir / "action-report.md"
@@ -782,7 +822,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
         missing = [p.name for p in (report_path, result_path) if p.is_symlink() or not p.is_file()]
         return {
             "status": "failed", "error": f"worker missing required artifacts: {', '.join(missing)}",
-            "summary": proc.stdout.strip()[-2000:], "next_action": "", "metrics": {},
+            "summary": stdout.strip()[-2000:], "next_action": "", "metrics": {},
         }
     try:
         # O_NOFOLLOW makes the symlink rejection atomic: the worker is
@@ -799,7 +839,7 @@ def execute_worker(opportunity: dict[str, Any], run_dir: Path, config: dict[str,
     return {
         "status": status,
         "error": str(payload.get("error") or ""),
-        "summary": str(payload.get("summary") or proc.stdout.strip()[-2000:]),
+        "summary": str(payload.get("summary") or stdout.strip()[-2000:]),
         "next_action": str(payload.get("next_action") or ""),
         "metrics": payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {},
     }

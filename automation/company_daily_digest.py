@@ -88,9 +88,14 @@ def _operator_status(config: dict[str, Any]) -> str:
     for job in jobs:
         if not isinstance(job, dict) or job.get("name") != "company-daily-operator":
             continue
-        if job.get("enabled") is False or job.get("state") == "paused":
-            paused = str(job.get("paused_at") or "")
-            return f"已暂停（{paused or '手动'}）"
+        # The cron-jobs file is produced outside this module; identity with a
+        # real JSON ``false`` is brittle — ``0``/``"false"``/``null`` mean the
+        # same thing and must also read as paused.
+        enabled = job.get("enabled", True)
+        paused = enabled is False or enabled is None or str(enabled).strip().lower() in {"0", "false", "no"}
+        if paused or job.get("state") == "paused":
+            paused_at = str(job.get("paused_at") or "")
+            return f"已暂停（{paused_at or '手动'}）"
         return "运行中"
     return "未注册"
 

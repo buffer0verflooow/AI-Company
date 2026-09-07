@@ -287,7 +287,15 @@ def _hermes_cost_snapshot(
             return result
         token_cols = [column for column in _SESSION_TOKEN_COLUMNS if column in cols]
         has_model = "model" in cols
+        has_actual_cost = "actual_cost_usd" in cols
         select_cols = ["estimated_cost_usd", "cost_status", *token_cols]
+        if has_actual_cost:
+            # Sibling consumers (pricing.cost_rollup, the operational run sync)
+            # read a provider-confirmed session's money from ``actual_cost_usd``;
+            # this snapshot must read the same column for the same statuses or
+            # the finance "confirmed" figure silently disagrees with the cost
+            # rollup on the very same billed sessions.
+            select_cols.append("actual_cost_usd")
         if has_model:
             select_cols.append("model")
         native = result["estimated_cost_native"]
@@ -296,7 +304,12 @@ def _hermes_cost_snapshot(
         for row in db.execute(f"SELECT {','.join(select_cols)} FROM sessions"):  # nosec B608 -- fixed column whitelist
             if str(row["cost_status"] or "").lower() in ACTUAL_COST_STATUSES:
                 try:
-                    confirmed = float(row["estimated_cost_usd"])
+                    if has_actual_cost:
+                        confirmed = float(row["actual_cost_usd"])
+                    else:
+                        # Pre-actual_cost_usd schema: the recorded cost lives in
+                        # the estimated column.
+                        confirmed = float(row["estimated_cost_usd"])
                 except (TypeError, ValueError, OverflowError):
                     confirmed = float("nan")
                 if math.isfinite(confirmed) and confirmed >= 0:

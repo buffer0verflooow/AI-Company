@@ -63,6 +63,19 @@ SWARM_REPO = os.environ.get("SWARM_REPO", "/home/pwn/workspace/research/swarm-kn
 MAX_TOOL_ROUNDS = 14
 # Per-result cap for MCP tool evidence stored in the LLM conversation.
 MAX_TOOL_RESULT_CHARS = 200_000
+_TOOL_TRUNCATION_MARKER = f"\n...[工具输出超过 {MAX_TOOL_RESULT_CHARS} 字符, 已截断]"
+
+
+def _bounded_tool_output(text: str) -> str:
+    """Cap one tool-evidence string at MAX_TOOL_RESULT_CHARS, keeping the tail.
+
+    Tool evidence is appended verbatim into the LLM conversation and re-sent on
+    every later round; the tail is kept (latest evidence wins) and the
+    truncation is marked explicitly so the agent knows output was cut.
+    """
+    if len(text) <= MAX_TOOL_RESULT_CHARS:
+        return text
+    return text[-MAX_TOOL_RESULT_CHARS:] + _TOOL_TRUNCATION_MARKER
 
 _AGENT_SYSTEM_PROMPT = """你是蜂群分析 agent。你有只读工具可通过 mcp_tool.py 调用, 用于真实执行分析 (APK 逆向等), 输出必须以证据为准, 禁止编造文件内容、命令输出或漏洞。
 
@@ -109,13 +122,15 @@ def _run_mcp_tool(server: str, tool: str, args: dict, timeout: int = 400) -> str
         check=False,
     )
     if proc.returncode != 0:
-        return f"[工具执行失败 exit={proc.returncode}] {proc.stderr.strip() or proc.stdout.strip()}"
+        # The failure text is also fed back to the LLM as tool evidence on the
+        # next round, so it must respect the same size bound as success output.
+        return _bounded_tool_output(f"[工具执行失败 exit={proc.returncode}] {proc.stderr.strip() or proc.stdout.strip()}")
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return f"[工具输出非 JSON] {proc.stdout[:500]}"
+        return _bounded_tool_output(f"[工具输出非 JSON] {proc.stdout[:500]}")
     if not payload.get("success"):
-        return f"[工具错误] {payload.get('error') or payload}"
+        return _bounded_tool_output(f"[工具错误] {payload.get('error') or payload}")
     contents = payload.get("content") or []
     texts = [c.get("text", "") for c in contents if isinstance(c, dict)]
     result = "\n".join(texts).strip()
@@ -123,8 +138,7 @@ def _run_mcp_tool(server: str, tool: str, args: dict, timeout: int = 400) -> str
     # on every later round; bound each result so a huge decompile/grep output
     # cannot grow memory or per-request payload without limit.  The tail is
     # kept (latest evidence wins) and the truncation is marked explicitly.
-    if len(result) > MAX_TOOL_RESULT_CHARS:
-        result = result[-MAX_TOOL_RESULT_CHARS:] + f"\n...[工具输出超过 {MAX_TOOL_RESULT_CHARS} 字符, 已截断]"
+    result = _bounded_tool_output(result)
     return result or f"[工具 {server}.{tool} 无输出]"
 
 

@@ -228,7 +228,12 @@ def _parse_xls(path: Path) -> dict[str, Any]:
     return {
         "title": title,
         "published_at": first_date,
-        "measured_at": "2026-07-15",
+        # measured_at is the export window's end date, which only the tendency
+        # label (or the caller's pack-wide stamp in import_articles) can supply
+        # — a per-export hard-coded date mislabels future packs and, because
+        # measured_at is part of the upsert key, would silently overwrite an
+        # older window's rows instead of adding new ones.
+        "measured_at": "",
         "reads": _integer(metric("阅读(人)")),
         "avg_dwell_seconds": _number(metric("平均停留时长(秒)")),
         "completion_rate": _number(metric("完读率")),
@@ -442,7 +447,12 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
                     source_sha256=excluded.source_sha256, imported_at=excluded.imported_at
                 """,
                 (
-                    str(uuid.uuid5(uuid.NAMESPACE_URL, item["title"] + item["source_path"])),
+                    # PK input must span the same identity as the ON CONFLICT
+                    # key (title, measured_at, source_path): when a rerun of the
+                    # same archive derives a different measured_at (corrupt
+                    # tendency label tolerated above), omitting measured_at here
+                    # would collide on the primary key instead of upserting.
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item['title']}|{item['measured_at']}|{item['source_path']}")),
                     item["title"], item["published_at"], item["measured_at"], item["reads"],
                     item["avg_dwell_seconds"], item["completion_rate"], item["listen_count"],
                     item["new_followers"], item["shares"], item["wow_count"], item["likes"],
@@ -454,7 +464,7 @@ def import_articles(zip_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
                 ),
             )
         for item in source_rows:
-            source_key = f"{item['title']}:{item['published_at']}:{item['channel']}:{source_path}"
+            source_key = f"{item['title']}:{item['published_at']}:{item['channel']}:{item['measured_at']}:{source_path}"
             db.execute(
                 """
                 INSERT INTO article_source_metrics (
@@ -608,18 +618,24 @@ def write_article_report(
             f"{row.get('wow_count') or 0} | {row.get('likes') or 0} | {row.get('favorites') or 0} | "
             f"{row.get('comments') or 0} | {row.get('reward_points') or 0:g} |"
         )
+    # The report is written per export window (report_date = its measured_at),
+    # so the "tendency rows from the same window without per-article detail"
+    # count must use that window's month, not a hard-coded pack month — a stale
+    # literal would report 0 (or a fabricated count) for every future export.
+    month_prefix = report_date[:7]
     current_titles = {
         item["title"] for item in source_rows
-        if str(item.get("published_at") or "").startswith("2026-07")
+        if str(item.get("published_at") or "").startswith(month_prefix)
     }
     try:
         evidence_display = str(zip_path.resolve().relative_to(ROOT / "marketing"))
     except ValueError:
         evidence_display = str(zip_path.resolve())
+    window_prose = f"{report_date[:4]} 年 {int(report_date[5:7])} 月发布内容"
     lines += [
         "", "## 数据边界", "", f"- 导入明细：{len(rows)} 篇。", f"- 原始证据：`{evidence_display}`。",
         f"- SHA-256：`{source_hash}`。", "- 公众号后台的趋势总表还包含其他历史文章，但本次压缩包没有对应的逐篇明细文件；其发布状态继续以项目追踪表和人工确认结果为准。", "",
-        f"- 趋势总表中识别到 2026 年 7 月发布内容 {len(current_titles)} 篇（包括没有逐篇明细导出的文章）。", "",
+        f"- 趋势总表中识别到 {window_prose} {len(current_titles)} 篇（包括没有逐篇明细导出的文章）。", "",
         "## 结构化存储", "", "- SQLite：`marketing/article_performance.db`。", "- `article_metrics`：逐篇摘要指标、趋势明细和人群分布 JSON。", "- `article_source_metrics`：趋势总表中的文章、发布日期、传播渠道和阅读人数。",
     ]
     atomic_write_text(report, "\n".join(lines) + "\n")

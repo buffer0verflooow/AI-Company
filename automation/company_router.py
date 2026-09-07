@@ -1564,8 +1564,10 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
             content = select_company_result(result)[:limit]
             updates.append(f"- 蜂群 {run_id[:8]} 已完成。结果：\n{content}")
             state.update(row["route_event_id"], result_delivered=1)
-            # Classify output quality for security runs
-            if not row.get("quality_status"):
+            # Classify output quality for security runs.  ``row`` is a
+            # sqlite3.Row (RouterState.active_for_session returns raw rows), so
+            # it is indexed with ``[]`` — it has no ``.get()``.
+            if not row["quality_status"]:
                 try:
                     from .operations_control import _classify_security_findings
                 except ImportError:
@@ -2122,8 +2124,14 @@ def _handle_hook(
     pre_eval = _pre_evaluate_task(decision, message, session_id, config)
     if pre_eval == "skip":
         state.update(event_id, status="skipped", error="pre-evaluation: no meaningful work to perform")
+        # Mirrors the sibling skip/defer branches: hand the decision back to the
+        # main agent instead of returning the original dispatch action without a
+        # run_id, which would append a contradictory "report routing failure" line.
         return {"context": build_context(
-            decision,
+            RouteDecision(**{
+                **asdict(decision), "action": "main_agent",
+                "reason": "pre-evaluation: skip",
+            }),
             status_updates=updates + [
                 "- [预评估] 任务已跳过：当前会话无足够的对话历史可供分析。任务未派发，无 Token 消耗。"
             ],

@@ -61,10 +61,46 @@ DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_know
 DEFAULT_LOG_DIR = COMPANY_ROOT / "operations/runtime/logs"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
-APPROVE_RE = re.compile(r"(?<!不)(?:批准|同意|确认执行|采纳|通过)", re.IGNORECASE)
-REJECT_RE = re.compile(r"(?:拒绝|不批准|不采纳|驳回|暂不执行)", re.IGNORECASE)
+# Approve verbs are matched without a negation lookbehind: inversion is judged
+# in _decision_verdict from the immediately preceding text, so multi-character
+# negators ("不要/请勿/暂不/不同意") are honoured, not just single "不".
+APPROVE_RE = re.compile(r"(?:批准|同意|确认执行|采纳|通过)", re.IGNORECASE)
+REJECT_RE = re.compile(r"(?:拒绝|不批准|不采纳|驳回|暂不执行|暂缓)", re.IGNORECASE)
 PROPOSAL_ID_RE = re.compile(r"TVCR-P-\d{8}-\d{2}", re.IGNORECASE)
 ITEM_NO_RE = re.compile(r"第?\s*(\d{1,2})\s*(?:项|条)")
+# Words/characters immediately before an approve verb that invert it into a
+# rejection ("不要批准第1项", "先别同意", "未批准前…").
+_APPROVE_NEGATORS = ("不要", "先别", "请勿", "暂不", "尚未", "没有", "不会", "暂缓")
+
+
+def _decision_verdict(message: str) -> str:
+    """Return ``approved``/``rejected``/``""`` for one user decision message.
+
+    A decision verb is looked up on the whole message, but the target proposal
+    is resolved independently (first id/number hit anywhere).  A message that
+    mixes an approval and a rejection — e.g. the natural reply to a multi-item
+    digest, "批准第1项，拒绝第2项" — must not silently resolve to one fate for
+    whichever proposal is picked first; apply_user_decision rejects it as
+    ambiguous.  Multi-character negators ("不要/请勿/暂不/不同意…") are
+    honoured, so "不要批准 X" and "不同意 X" are rejections rather than
+    approvals.
+    """
+    approved = False
+    rejected = False
+    for match in APPROVE_RE.finditer(message):
+        start = match.start()
+        window = message[max(0, start - 4):start]
+        if window.endswith("不") or window.endswith("别") or window.endswith("未"):
+            rejected = True
+        elif any(window.endswith(negator) for negator in _APPROVE_NEGATORS):
+            rejected = True
+        else:
+            approved = True
+    if REJECT_RE.search(message):
+        rejected = True
+    if approved and rejected:
+        return "ambiguous"
+    return "approved" if approved else ("rejected" if rejected else "")
 
 
 def utc_now() -> str:
@@ -883,15 +919,18 @@ def _run_article_titles(run: dict[str, Any]) -> list[str]:
     for name in _TITLE_ARTIFACT_NAMES:
         path = by_name.get(name)
         candidate = Path(path) if path else None
-        if candidate is None or candidate.is_symlink() or not candidate.is_file():
+        if candidate is None:
             continue
         try:
-            lines: list[str] = []
-            with candidate.open("r", encoding="utf-8", errors="replace") as stream:
-                for _, line in zip(range(60), stream, strict=False):
-                    lines.append(line.rstrip("\r\n"))
-        except OSError:
+            # The draft files live in worker-writable content-job dirs, so the
+            # read must be atomic against symlink swaps and bounded in size (the
+            # same discipline read_text_limited_nofollow gives every other read
+            # of these dirs).  A pre-check + followable open() would leave a
+            # TOCTOU window and unbounded single-line reads.
+            content = read_text_limited_nofollow(candidate, max_bytes=2 * 1024 * 1024, errors="replace")
+        except (OSError, UnicodeDecodeError, ValueError):
             continue
+        lines = [line.rstrip("\r\n") for line in content.splitlines()[:60]]
         in_frontmatter = False
         h1 = ""
         fence_seen = 0
@@ -1617,7 +1656,9 @@ def apply_user_decision(
     actor: str,
     note: str = "",
 ) -> dict[str, Any] | None:
-    decision = "rejected" if REJECT_RE.search(message) else "approved" if APPROVE_RE.search(message) else ""
+    decision = _decision_verdict(message)
+    if decision == "ambiguous":
+        return {"ok": False, "message": "消息同时包含批准与拒绝措辞，无法确定针对哪个提案；请一条消息只对一个提案明确给出批准或拒绝。"}
     if not decision or not (PROPOSAL_ID_RE.search(message) or ITEM_NO_RE.search(message) or "提案" in message):
         return None
     db = connect(db_path)

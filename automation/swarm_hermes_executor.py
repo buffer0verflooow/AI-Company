@@ -31,9 +31,15 @@ def _safe_counter(value: Any) -> int:
 
 
 def build_prompt(payload: dict[str, Any]) -> str:
-    task = payload.get("task") or {}
+    # The stdin payload is external input; parseable-but-non-object task /
+    # model_profile fields must degrade to empty dicts (mirroring the type
+    # guards in swarm_native_executor) instead of raising AttributeError and
+    # breaking the clean-JSON stdout contract.
+    raw_task = payload.get("task")
+    task = raw_task if isinstance(raw_task, dict) else {}
     context = str(payload.get("context") or "")
-    profile = payload.get("model_profile") or {}
+    raw_profile = payload.get("model_profile")
+    profile = raw_profile if isinstance(raw_profile, dict) else {}
     reason = str(task.get("reason") or task.get("task_type") or "")
     return f"""{INTERNAL_WORKER_PREFIX}
 你是公司安全探索产品线的蜂群 Worker。
@@ -129,6 +135,11 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps({"success": False, "error": f"invalid executor input: {exc}", "capture": False}))
         return 0
+    if not isinstance(payload, dict):
+        # A parseable non-object payload (e.g. a JSON array) must still produce
+        # the documented clean-JSON failure instead of a raw AttributeError.
+        print(json.dumps({"success": False, "error": "invalid executor input: payload must be an object", "capture": False}))
+        return 0
 
     prompt = build_prompt(payload)
     env, _dropped = scrub_environment()
@@ -140,7 +151,8 @@ def main() -> int:
     # 防止任意本机进程伪造 agent 身份强制入库
     env["SWARM_AGENT_EXEC"] = "1"
 
-    profile = payload.get("model_profile") or {}
+    raw_profile = payload.get("model_profile")
+    profile = raw_profile if isinstance(raw_profile, dict) else {}
     # 模型对照表分流 (migration 020): tier='free' → opencode 免费池,
     # 其余 → hermes chat (付费, 现状)。
     if (profile.get("tier") == "free") or (profile.get("engine") == "opencode"):

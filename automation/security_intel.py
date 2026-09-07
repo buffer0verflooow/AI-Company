@@ -218,6 +218,11 @@ def fetch(url: str, insecure: bool = False) -> str:
         cmd = [
             "curl", "-s", "-L", "-m", str(FETCH_TIMEOUT), "--noproxy", "*",
             "-A", USER_AGENT,
+            # --fail: without it curl exits 0 on HTTP 4xx/5xx, so a source that
+            # is down (404/403/503/WAF challenge) would be treated as a
+            # successful fetch — no retry, no ERROR entry, and the error page
+            # silently parsed as an empty feed for the day.
+            "--fail",
             # Bound the response body so a broken/hostile feed cannot OOM the
             # daily cron by streaming an unbounded body into memory.
             "--max-filesize", str(FETCH_MAX_BYTES),

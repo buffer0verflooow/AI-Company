@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import math
@@ -269,7 +270,11 @@ def anysearch_call(tool_name: str, arguments: dict[str, Any], config: dict[str, 
             transient = exc.code in {429, 500, 502, 503, 504}
             if not transient or attempt >= 2:
                 raise error from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            # Socket-level failures raised while reading the body
+            # (ConnectionResetError, RemoteDisconnected, IncompleteRead) are
+            # transient network blips too; retry them like URLError instead of
+            # letting one reset connection fail the whole radar run.
             error = RuntimeError(f"AnySearch request failed: {exc}")
             if attempt >= 2:
                 raise error from exc
@@ -343,7 +348,10 @@ def _published_at(text: str) -> str:
     if match:
         try:
             return parsedate_to_datetime(match.group(1).strip()).astimezone(timezone.utc).isoformat(timespec="seconds")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # parsedate_to_datetime can raise OverflowError for absurd
+            # out-of-range years in an untrusted "Posted:" line; a hostile date
+            # must not abort the whole radar batch.
             pass
     match = re.search(r"\b(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})", text)
     if match:
@@ -476,7 +484,17 @@ def persist_signals(
 ) -> list[dict[str, Any]]:
     timestamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     saved: list[dict[str, Any]] = []
+    # The DB upsert keys on UNIQUE(theme, canonical_url), but several queries in
+    # one run can return the same theme+URL (overlapping theme keywords).  Skip
+    # such in-run duplicates up front so the returned list, the pulse math and
+    # the report all match the ledger row (one sighting, occurrences+1), instead
+    # of double-counting the URL in average/signal_count/source_urls.
+    seen_keys: set[tuple[str, str]] = set()
     for record in records:
+        key = (record["theme"], record["canonical_url"])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         query = queries_by_id[record["query_id"]]
         scores = score_signal(record, query, config, now=now)
         eligible = signal_eligible(record, query, scores, config)
@@ -679,22 +697,36 @@ def run_radar(
 
     all_records: list[dict[str, Any]] = []
     raw_sections: list[str] = []
-    error = ""
+    batch_errors: list[str] = []
     try:
         batch_size = min(5, max(1, _int_config(config, "batch_size", 5)))
         for batch_no, batch in enumerate(_chunks(queries, batch_size), 1):
-            response = fetcher("batch_search", {"queries": [_api_query(item) for item in batch]}, config)
+            # One failed batch must not abort the radar run: keep the batches
+            # that succeeded and surface the failure instead of discarding
+            # already-parsed signals.
+            try:
+                response = fetcher("batch_search", {"queries": [_api_query(item) for item in batch]}, config)
+            except Exception as exc:  # noqa: BLE001 -- per-batch isolation, the loop continues
+                batch_errors.append(f"batch {batch_no} 请求失败: {exc}")
+                continue
             raw_sections.append(f"<!-- batch {batch_no} -->\n{response}")
-            all_records.extend(parse_batch_markdown(response, batch))
-    except Exception as exc:  # noqa: BLE001 -- one failed batch must not abort the radar run
-        error = str(exc)
+            try:
+                all_records.extend(parse_batch_markdown(response, batch))
+            except Exception as exc:  # noqa: BLE001 -- one corrupt batch payload must not abort the run
+                batch_errors.append(f"batch {batch_no} 解析失败: {exc}")
+    except Exception as exc:  # noqa: BLE001 -- iterator/config failure still fails the run cleanly
+        batch_errors.append(str(exc))
 
     raw_path = run_dir / "raw-response.md"
+    raw_write_error = ""
     try:
         atomic_write_text(raw_path, "\n\n".join(raw_sections))
     except OSError as exc:
-        error = error or f"failed to write raw response: {exc}"
-    if error:
+        raw_write_error = f"failed to write raw response: {exc}"
+    if raw_write_error or (batch_errors and not all_records):
+        # Total failure (or the evidence manifest itself could not be written):
+        # keep the existing failed-run semantics — nothing was collected.
+        error = raw_write_error or "；".join(batch_errors)
         completed = utc_now()
         db = connect(db_path)
         try:
@@ -718,10 +750,15 @@ def run_radar(
             _write_report(report_path, run_id, signals, pulses)
             atomic_write_text(run_dir / "market-pulses.json", json.dumps(pulses, ensure_ascii=False, indent=2))
             completed = utc_now()
+            # A partial run (some batches failed, some parsed) is still a
+            # completed run with whatever evidence was actually collected; the
+            # failure detail is preserved on the row instead of being dropped.
+            partial_error = "；".join(batch_errors) if batch_errors else ""
             db.execute(
                 """UPDATE market_radar_runs SET status='completed',result_count=?,signal_count=?,pulse_count=?,
-                   raw_path=?,report_path=?,error='',completed_at=?,updated_at=? WHERE run_id=?""",
-                (len(all_records), len(signals), len(pulses), str(raw_path), str(report_path), completed, completed, run_id),
+                   raw_path=?,report_path=?,error=?,completed_at=?,updated_at=? WHERE run_id=?""",
+                (len(all_records), len(signals), len(pulses), str(raw_path), str(report_path),
+                 partial_error[:2000], completed, completed, run_id),
             )
             db.commit()
         finally:

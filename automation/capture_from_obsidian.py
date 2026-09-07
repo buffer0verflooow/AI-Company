@@ -245,7 +245,15 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
     if proc.returncode != 0:
         return f"error:{proc.stderr.strip() or output[:200]}"
 
-    entry_id = output.split("CAPTURED:")[-1].strip() if "CAPTURED:" in output else ""
+    # ``CAPTURED:<entry_id>`` is the only success signal the child prints.  A
+    # zero exit without it means capture.py failed while still exiting 0; the
+    # tracking file is the sole dedup/retry guard (the child always runs with
+    # --force-capture), so recording this as success would lose the note
+    # permanently.  Surface it as an error instead.
+    if "CAPTURED:" not in output:
+        return f"error:capture exited 0 without CAPTURED marker: {output[:200]}"
+
+    entry_id = output.split("CAPTURED:")[-1].strip()
     return entry_id or "captured"
 
 

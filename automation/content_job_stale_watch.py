@@ -12,8 +12,18 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    from ._safe_io import read_text_limited_nofollow
+except ImportError:  # direct execution from automation/
+    from _safe_io import read_text_limited_nofollow
 
 CONTENT_JOBS = '/home/pwn/workspace/company/operations/runtime/content-jobs'
+
+# Cap per state file: content-job dirs are worker-writable, and a planted
+# symlink/FIFO/huge file must not hang or OOM this alarm cron.
+MAX_STATE_FILE_BYTES = 2 * 1024 * 1024
 
 
 def _env_float(name: str, default: float) -> float:
@@ -34,26 +44,34 @@ REVIEW_STALE_HOURS = _env_float('REVIEW_STALE_HOURS', 168.0)
 
 
 def job_state(job_dir: str):
-    """返回 (state, mtime) —— state 优先 lifecycle.json, 回退 status.json"""
-    lc = os.path.join(job_dir, 'lifecycle.json')
-    if os.path.exists(lc):
+    """返回 (state, mtime) —— state 优先 lifecycle.json, 回退 status.json.
+
+    状态文件位于 worker 可写的 job 目录: 以 O_NOFOLLOW + 字节上限读取,
+    绝不跟随 worker 植入的符号链接, 也不让超大文件拖垮告警 cron。
+    """
+    for name, key in (("lifecycle.json", "state"), ("status.json", "status")):
+        candidate = Path(job_dir) / name
         try:
-            with open(lc, encoding='utf-8') as stream:
-                d = json.load(stream)
-            if isinstance(d, dict):
-                return d.get('state'), os.path.getmtime(lc)
-        except (OSError, ValueError, TypeError):
-            pass
-    st = os.path.join(job_dir, 'status.json')
-    if os.path.exists(st):
-        try:
-            with open(st, encoding='utf-8') as stream:
-                d = json.load(stream)
-            if isinstance(d, dict):
-                return d.get('status'), os.path.getmtime(st)
-        except (OSError, ValueError, TypeError):
-            pass
-    return None, os.path.getmtime(job_dir)
+            if candidate.is_symlink():
+                continue
+            payload = read_text_limited_nofollow(
+                candidate, max_bytes=MAX_STATE_FILE_BYTES, errors="replace"
+            )
+            d = json.loads(payload)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(d, dict):
+            try:
+                modified = candidate.stat().st_mtime
+            except OSError:
+                modified = os.path.getmtime(job_dir)
+            return d.get(key), modified
+    # 目录可能正好在 isdir 检查后被删除; 告警脚本自身不允许被未捕获的
+    # OSError 打崩 (否则滞留告警会静默消失)。
+    try:
+        return None, os.path.getmtime(job_dir)
+    except OSError:
+        return None, 0.0
 
 
 def main():
@@ -62,7 +80,7 @@ def main():
     review_stale = []
     no_state = 0
     for job_dir in sorted(glob.glob(os.path.join(CONTENT_JOBS, '*'))):
-        if not os.path.isdir(job_dir):
+        if os.path.islink(job_dir) or not os.path.isdir(job_dir):
             continue
         state, mtime = job_state(job_dir)
         # job_state() falls back to status.json's raw status when lifecycle.json

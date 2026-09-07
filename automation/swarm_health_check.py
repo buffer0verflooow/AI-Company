@@ -33,24 +33,40 @@ def _ok(name: str, detail: str = "") -> None:
     CHECKS.append({"check": name, "ok": True, "detail": detail})
 
 
+def _emit_config_failure() -> int:
+    failed = [c for c in CHECKS if not c["ok"]]
+    if "--json" in sys.argv:
+        print(json.dumps({
+            "healthy": False,
+            "checks": CHECKS,
+            "failed_count": len(failed),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }, ensure_ascii=False, indent=1))
+    else:
+        print(f"❌ 配置: {failed[0]['detail']}")
+    return 1
+
+
 def main() -> int:
     try:
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("config root must be an object")
     except (OSError, ValueError) as exc:
         # A health check must report its own broken configuration cleanly
         # instead of dying with an unhandled traceback.
         _fail("配置", f"无法读取 {CONFIG_PATH}: {exc}")
-        failed = [c for c in CHECKS if not c["ok"]]
-        if "--json" in sys.argv:
-            print(json.dumps({
-                "healthy": False,
-                "checks": CHECKS,
-                "failed_count": len(failed),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }, ensure_ascii=False, indent=1))
-        else:
-            print(f"❌ 配置: {failed[0]['detail']}")
-        return 1
+        return _emit_config_failure()
+    # A syntactically valid config that is missing a required key (or holds a
+    # non-string value) must be reported the same way: the health check itself
+    # is the thing being checked, so it never dies with a raw KeyError/TypeError.
+    missing = [
+        key for key in ("swarm_repo", "executor", "swarm_db")
+        if not isinstance(config.get(key), str) or not config[key].strip()
+    ]
+    if missing:
+        _fail("配置", f"router_config.json 缺少必需字符串键: {', '.join(missing)}")
+        return _emit_config_failure()
     swarm_repo = Path(config["swarm_repo"])
 
     # 1. 路径有效性

@@ -989,6 +989,62 @@ def _record_postprocess_error(db_path: Path, run_id: str, detail: str) -> None:
         pass
 
 
+def _repair_stranded_run(
+    db_path: Path,
+    run_id: str,
+    opportunity_id: str,
+    error: str,
+    *,
+    failed: bool,
+    retrying: bool,
+    run_status: str,
+    opp_status: str,
+) -> None:
+    """Best-effort recovery when the post-worker finalize transaction fails.
+
+    The opportunity and its ``autonomy_runs`` row were committed as
+    ``running`` before the worker started.  If the finalize block then fails
+    (e.g. a locked DB under parallel workers, or a bad operational_runs
+    write), no other code path ever moves a ``running`` row —
+    ``select_executable`` needs 'open' and ``requeue_failed`` needs 'failed' —
+    so a standing-mission opportunity would be starved forever.  This parks
+    both rows out of ``running`` on a fresh connection using values already
+    computed in memory, mirroring ``_record_postprocess_error``'s best-effort
+    contract; the original finalize error still propagates to the cycle
+    report.
+    """
+    now = utc_now()
+    try:
+        repair_db = connect(db_path)
+        try:
+            repair_db.execute(
+                "UPDATE autonomy_runs SET status=?,error=?,updated_at=? WHERE run_id=?",
+                (run_status, error, now, run_id),
+            )
+            if retrying:
+                # Mirrors the normal retry path: re-open the opportunity with a
+                # bumped retry_count so the next cycle picks it up again.
+                repair_db.execute(
+                    """UPDATE autonomy_opportunities
+                       SET status='open',selected_at='',completed_at='',last_error=?,
+                           retry_count=retry_count+1,updated_at=?
+                       WHERE opportunity_id=?""",
+                    (error, now, opportunity_id),
+                )
+            else:
+                repair_db.execute(
+                    """UPDATE autonomy_opportunities
+                       SET status=?,completed_at=?,last_error=?,updated_at=?
+                       WHERE opportunity_id=?""",
+                    ("failed" if failed else opp_status, now, error, opportunity_id),
+                )
+            repair_db.commit()
+        finally:
+            repair_db.close()
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def execute_opportunity(
     db_path: Path,
     run_root: Path,
@@ -1069,6 +1125,18 @@ def execute_opportunity(
             )
         _record_operational_run(db, run_id, opportunity, run_dir, result, usage, now, completed)
         db.commit()
+    except Exception as exc:  # noqa: BLE001 -- a failed finalize must not strand rows in 'running'
+        # The opportunity/run were committed as 'running' before the worker
+        # started; if this finalize raises (e.g. database locked under parallel
+        # workers) the rollback on close leaves them 'running' forever.  Repair
+        # both rows best-effort, then let the cycle report the failure.
+        _repair_stranded_run(
+            db_path, run_id, opportunity["opportunity_id"], f"finalize failed: {exc}",
+            failed=failed, retrying=retrying,
+            run_status=str(result.get("status") or "failed"),
+            opp_status=final_status,
+        )
+        raise
     finally:
         db.close()
 

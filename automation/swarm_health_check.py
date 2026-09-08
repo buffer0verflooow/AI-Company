@@ -20,6 +20,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:
+    from ._safe_io import sqlite_uri
+except ImportError:  # direct execution from automation/
+    from _safe_io import sqlite_uri
+
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
 
 CHECKS: list[dict] = []
@@ -93,7 +98,11 @@ def main() -> int:
     else:
         _ok("swarm DB 存在", str(db_path))
         try:
-            db = sqlite3.connect(str(db_path))
+            # Health check is strictly read-only: a read-write connect would
+            # silently materialize a fresh empty DB file if the file vanished
+            # between the is_file() check above and the connect (TOCTOU), and
+            # the probe never writes.  Read-only mode reports the miss instead.
+            db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
         except sqlite3.Error as exc:
             _fail("swarm DB 存在", f"无法打开: {exc}")
             db = None

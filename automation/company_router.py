@@ -1767,8 +1767,13 @@ def _session_has_meaningful_content(
             if not user_count or not total_count:
                 return False
             # The current dispatch message may already be stored; be conservative
-            # and require at least 1 extra user message (meaning at least 2 total).
-            return int(user_count["c"]) >= (min_user_messages + 1) and int(total_count["c"]) >= min_total_messages
+            # and require one extra message on BOTH counts (the user bound then
+            # means at least 2 user rows, the total bound at least
+            # min_total_messages+1 rows), so the documented "beyond the current
+            # dispatch request" minima still hold when the current message is
+            # part of the same snapshot both COUNT(*) queries see.
+            return (int(user_count["c"]) >= (min_user_messages + 1)
+                    and int(total_count["c"]) >= (min_total_messages + 1))
         finally:
             db.close()
     except sqlite3.Error:

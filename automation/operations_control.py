@@ -89,7 +89,11 @@ def _decision_verdict(message: str) -> str:
     rejected = False
     for match in APPROVE_RE.finditer(message):
         start = match.start()
-        window = message[max(0, start - 4):start]
+        # A negator may be separated from the approve verb by whitespace
+        # ("不要 批准" / "暂不 同意"); strip it from the pre-verb window so
+        # such phrasings invert like the contiguous "不要批准" does instead of
+        # silently approving.
+        window = re.sub(r"\s+", "", message[max(0, start - 4):start])
         if window.endswith("不") or window.endswith("别") or window.endswith("未"):
             rejected = True
         elif any(window.endswith(negator) for negator in _APPROVE_NEGATORS):
@@ -487,7 +491,7 @@ def _classify_security_findings(
         r"注入|越权|绕过|弱口令|敏感信息|信息泄露|未授权|"
         r"xss|csrf|ssrf|sqli|idor|rce|命令执行|文件包含|"
         r"权限提升|敏感文件|备份文件|目录遍历|cors|jwt|"
-        r"broken\\s*(?:access\\s*)?control|misconfig|暴露)",
+        r"broken\s*(?:access\s*)?control|misconfig|暴露)",
         re.IGNORECASE,
     )
 

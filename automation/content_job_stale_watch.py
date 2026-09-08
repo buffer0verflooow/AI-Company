@@ -64,7 +64,15 @@ def job_state(job_dir: str):
             try:
                 modified = candidate.stat().st_mtime
             except OSError:
-                modified = os.path.getmtime(job_dir)
+                # The state file vanished between the read and the stat; fall
+                # back to the directory mtime — but the directory itself may
+                # have been removed concurrently, and this alarm cron must never
+                # crash on that race (a crash would silence every stuck-job
+                # alarm), so guard the fallback exactly like the final one below.
+                try:
+                    modified = os.path.getmtime(job_dir)
+                except OSError:
+                    modified = 0.0
             return d.get(key), modified
     # 目录可能正好在 isdir 检查后被删除; 告警脚本自身不允许被未捕获的
     # OSError 打崩 (否则滞留告警会静默消失)。

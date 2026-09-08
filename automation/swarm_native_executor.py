@@ -77,6 +77,26 @@ def _bounded_tool_output(text: str) -> str:
         return text
     return text[-MAX_TOOL_RESULT_CHARS:] + _TOOL_TRUNCATION_MARKER
 
+
+# model_profile is payload-carried configuration and may legitimately hold an
+# api_key (see _resolve_llm_config).  result_summary is persisted verbatim into
+# agent_tasks by worker.py, so credentials must never be echoed into it.
+_PROFILE_SECRET_KEYS = frozenset({
+    "api_key", "key", "secret", "token", "password", "passwd",
+    "authorization", "auth", "cookie", "bearer",
+})
+
+
+def _public_profile(profile: Any) -> dict[str, Any]:
+    """Copy of a model_profile that is safe to persist/display (no credentials)."""
+    if not isinstance(profile, dict):
+        return {}
+    return {
+        key: value for key, value in profile.items()
+        if str(key).strip().lower() not in _PROFILE_SECRET_KEYS
+    }
+
+
 _AGENT_SYSTEM_PROMPT = """你是蜂群分析 agent。你有只读工具可通过 mcp_tool.py 调用, 用于真实执行分析 (APK 逆向等), 输出必须以证据为准, 禁止编造文件内容、命令输出或漏洞。
 
 输出必须是单个合法 JSON 对象 (不要输出 JSON 以外的任何文本):
@@ -334,8 +354,16 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
     if not api_key:
         return _payload_error("no API key found (model_profile / ~/.hermes/config.yaml / ZENMUX_API_KEY)")
 
-    max_tokens = int(profile.get("max_tokens") or 16000)
-    temperature = float(profile.get("temperature") or 0.2)
+    try:
+        max_tokens = int(profile.get("max_tokens") or 16000)
+    except (TypeError, ValueError, OverflowError):
+        # A malformed model_profile field must degrade to the default instead
+        # of breaking the executor's clean-JSON stdin/stdout contract.
+        max_tokens = 16000
+    try:
+        temperature = float(profile.get("temperature") or 0.2)
+    except (TypeError, ValueError, OverflowError):
+        temperature = 0.2
     tool_block = _tools_prompt_block()
     system_prompt = _AGENT_SYSTEM_PROMPT + ("\n\n可用工具:\n" + tool_block if tool_block else "")
 
@@ -418,7 +446,7 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                     "content": answer,
                     "worker_agent": f"native-{role}",
                     "worker_role": role,
-                    "model_profile": profile or {},
+                    "model_profile": _public_profile(profile),
                     "backend": "llm",
                     "model": used_model,
                     "fallback": fallback,
@@ -473,7 +501,7 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                         "content": answer,
                         "worker_agent": f"native-{role}",
                         "worker_role": role,
-                        "model_profile": profile or {},
+                        "model_profile": _public_profile(profile),
                         "backend": "llm",
                         "model": used_model,
                         "fallback": fallback,
@@ -572,7 +600,7 @@ def _simulate(task: dict[str, Any], context: str, profile: dict[str, Any]) -> di
             "content": content[:500],
             "worker_agent": f"native-{role}",
             "worker_role": role,
-            "model_profile": profile or {},
+            "model_profile": _public_profile(profile),
             "backend": "simulate",
         },
         "metadata": {

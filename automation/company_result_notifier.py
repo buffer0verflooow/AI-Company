@@ -390,7 +390,7 @@ def list_terminal_deliveries(config: dict[str, Any], limit: int = 50) -> list[di
 
 
 def _terminal_reason(config: dict[str, Any], origin: dict[str, str]) -> str:
-    allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
+    allowed = {str(item).lower() for item in (config.get("proactive_delivery_platforms") or [])}
     if allowed and origin.get("platform", "").lower() not in allowed:
         return f"delivery platform not allowlisted: {origin.get('platform', '')}"
     return ""
@@ -1169,8 +1169,41 @@ def process_once(
             try:
                 status_path = content_job_path(config, run_id) / "status.json"
             except ValueError as exc:
-                state.update(event_id, status="failed", error=f"invalid content run path: {exc}")
-                summary["failed"] += 1
+                # A job whose run_id fails the SAFE regex (or whose directory is
+                # a symlink) will never resolve on a later tick; without an
+                # attempt advance this row would be re-polled forever (the
+                # pending query filters on delivery_attempts, not status), the
+                # same silent failure the sibling branches below guard against.
+                # Advance the counter so the row dead-letters after
+                # max_delivery_attempts.
+                attempts = _safe_counter(row["delivery_attempts"]) + 1
+                if attempts >= _int_config(config, "max_delivery_attempts", 10):
+                    terminal_error = _record_retry_exhaustion(
+                        config,
+                        kind="content",
+                        identifier=run_id,
+                        origin={},
+                        message=f"公司 Run {run_id} 路径非法，无法自动回传结果。",
+                        error=f"invalid content run path: {exc}",
+                    )
+                    state.update(
+                        event_id,
+                        status="failed",
+                        error=f"invalid content run path: {exc}",
+                        delivery_attempts=attempts,
+                        delivery_error=terminal_error,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["terminal"] += 1
+                else:
+                    state.update(
+                        event_id,
+                        status="failed",
+                        error=f"invalid content run path: {exc}",
+                        delivery_attempts=attempts,
+                        last_delivery_at=utc_now(),
+                    )
+                    summary["failed"] += 1
                 continue
             payload: dict[str, Any] = {}
             if status_path.exists():

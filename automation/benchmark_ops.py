@@ -44,7 +44,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://tsecbench.zc.tencent.com")
 API = BASE_URL + "/openapi/v1/challenges"
@@ -90,7 +90,9 @@ def _api(method: str, path: str, token: str, payload: Optional[Dict] = None) -> 
         return {"http": exc.code, **parsed}
     except urllib.error.URLError as exc:
         print(f"网络错误: {exc.reason}", file=sys.stderr)
-        raise SystemExit(4)
+        # The network error is already printed above; suppress the redundant
+        # "during handling of the above exception" traceback chaining.
+        raise SystemExit(4) from None
 
 
 def get_rows(token: str) -> List[Dict]:

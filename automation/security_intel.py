@@ -447,15 +447,23 @@ def collect_source(src: dict[str, Any], now: datetime) -> tuple[str, list[dict[s
         body = fetch(src["url"], insecure=src["id"] in TLS_INSECURE)
     except Exception as e:  # noqa: BLE001 -- an unreachable source must not abort the report
         return f"ERROR {type(e).__name__}", []
-    if src["kind"] == "html":
-        parser = HTML_PARSERS.get(src["id"])
+    # A fetchable-but-malformed body must not abort the whole run either: an
+    # upstream returning 200 with valid-but-wrong-shape JSON (root not an
+    # object, "vulnerabilities" not a list, ...) would otherwise raise out of
+    # the parser and out of ``collect_source``, losing every source's intel
+    # for the day before anything is persisted or reported.
+    try:
+        if src["kind"] == "html":
+            parser = HTML_PARSERS.get(src["id"])
+            if parser is None:
+                return "ERROR no-parser", []
+            return "ok", parser(body, src, now)
+        parser = PARSERS.get(src["kind"])
         if parser is None:
             return "ERROR no-parser", []
         return "ok", parser(body, src, now)
-    parser = PARSERS.get(src["kind"])
-    if parser is None:
-        return "ERROR no-parser", []
-    return "ok", parser(body, src, now)
+    except Exception as e:  # noqa: BLE001 -- one malformed feed must not abort the report
+        return f"ERROR parse-{src['id']} {type(e).__name__}", []
 
 
 # ---------------------------------------------------------------------------

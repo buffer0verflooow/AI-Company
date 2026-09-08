@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import tempfile
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -148,13 +149,26 @@ def read_text_limited_nofollow(
     file for a symlink, and the open would follow it.  Opening with
     ``O_NOFOLLOW`` makes the guard atomic; on platforms without the flag it
     degrades to a plain read-only open.
+
+    ``O_NONBLOCK`` plus a regular-file check keep a planted FIFO or device node
+    from hanging the caller forever (a plain ``os.open(..., O_RDONLY)`` blocks
+    on a FIFO until a writer appears) or leaking device bytes — several callers
+    read files from worker-writable directories.
     """
 
     if max_bytes < 0:
         raise ValueError("max_bytes must be non-negative")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     fd = os.open(path, flags)
     try:
+        # fstat after open: the check is atomic against a swap between a
+        # pre-open is_file() check and the open itself.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"refusing to read non-regular file: {path}")
         payload = os.read(fd, max_bytes + 1)
     finally:
         os.close(fd)

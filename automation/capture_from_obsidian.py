@@ -158,24 +158,35 @@ def load_tracking() -> dict:
     return {}
 
 
-def save_tracking(tracking: dict) -> None:
+def _merge_write_tracking(tracking: dict) -> None:
+    """Merge *tracking* into the on-disk history and persist it atomically.
+
+    The caller must already hold ``file_lock(TRACKING_FILE)`` — both
+    ``save_tracking`` and the per-note capture path in ``main`` rely on that so
+    the read-modify-write is serialized across concurrent scans.
+    """
     TRACKING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    current: dict = {}
+    if TRACKING_FILE.is_file():
+        try:
+            value = json.loads(read_text_limited(TRACKING_FILE, max_bytes=10 * 1024 * 1024))
+            if isinstance(value, dict):
+                current = value
+        except (OSError, ValueError) as exc:
+            # Never atomically replace an unreadable tracking history: the
+            # failure is almost always corruption, and overwriting it with
+            # just this run's entries would silently re-capture every
+            # previously tracked note (duplicates in the KB).
+            print(f"WARNING: refusing to overwrite unreadable tracking file {TRACKING_FILE}: {exc}", file=sys.stderr)
+            return
+    current.update(tracking)
+    atomic_write_text(TRACKING_FILE, json.dumps(current, ensure_ascii=False, indent=2))
+
+
+def save_tracking(tracking: dict) -> None:
+    """Merge a tracking update into the file under the tracking-file lock."""
     with file_lock(TRACKING_FILE):
-        current: dict = {}
-        if TRACKING_FILE.is_file():
-            try:
-                value = json.loads(read_text_limited(TRACKING_FILE, max_bytes=10 * 1024 * 1024))
-                if isinstance(value, dict):
-                    current = value
-            except (OSError, ValueError) as exc:
-                # Never atomically replace an unreadable tracking history: the
-                # failure is almost always corruption, and overwriting it with
-                # just this run's entries would silently re-capture every
-                # previously tracked note (duplicates in the KB).
-                print(f"WARNING: refusing to overwrite unreadable tracking file {TRACKING_FILE}: {exc}", file=sys.stderr)
-                return
-        current.update(tracking)
-        atomic_write_text(TRACKING_FILE, json.dumps(current, ensure_ascii=False, indent=2))
+        _merge_write_tracking(tracking)
 
 
 def get_title_from_note(text: str, path: Path) -> str:
@@ -276,14 +287,23 @@ def main():
         print("No notes with `swarm: capture` frontmatter found.")
         return
 
-    tracking = load_tracking()
     results = []
     unchanged = 0
 
     for path in sorted(candidates):
         rel = str(path.relative_to(vault))
-        content_hash = ""
-        if not args.dry_run:
+        if args.dry_run:
+            result = capture_note(path, dry_run=True)
+            results.append((rel, "dry-run"))
+            continue
+
+        # The tracking file is the sole dedup guard — the child capture.py
+        # always runs with --force-capture, so its own dedup is disabled.  A
+        # second overlapping scan (cron overlapping a manual run) could pass an
+        # unlocked "already captured?" check and insert a duplicate KB row, so
+        # the whole check → capture → record sequence holds the tracking-file
+        # lock and reloads the tracking state under it.
+        with file_lock(TRACKING_FILE):
             try:
                 raw = read_text_limited(path, max_bytes=10 * 1024 * 1024, errors="replace")
             except (OSError, ValueError) as exc:
@@ -292,9 +312,11 @@ def main():
                 continue
             content_hash = compute_content_hash(raw)
 
-            # Skip if already captured (same content hash). A legacy/corrupt
-            # tracking entry that is not a dict must degrade to "new" instead
-            # of aborting the whole scan with AttributeError.
+            # Reload under the lock instead of trusting a snapshot taken before
+            # the loop: another scan may have captured this note meanwhile.
+            # A legacy/corrupt tracking entry that is not a dict must degrade
+            # to "new" instead of aborting the whole scan with AttributeError.
+            tracking = load_tracking()
             existing = tracking.get(rel)
             if not isinstance(existing, dict):
                 existing = {}
@@ -304,22 +326,23 @@ def main():
                 unchanged += 1
                 continue
 
-        result = capture_note(path, dry_run=args.dry_run)
+            result = capture_note(path, dry_run=False)
 
-        if args.dry_run:
-            results.append((rel, "dry-run"))
-        elif result and not result.startswith(("read_error:", "error:", "timeout")):
-            tracking[rel] = {
-                "content_hash": content_hash,
-                "entry_id": result,
-                "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }
-            save_tracking(tracking)
-            print(f"  ✅ {rel} → {result[:12]}")
-            results.append((rel, "captured"))
-        else:
-            print(f"  ❌ {rel} → {result}")
-            results.append((rel, result))
+            if result and not result.startswith(("read_error:", "error:", "timeout")):
+                tracking[rel] = {
+                    "content_hash": content_hash,
+                    "entry_id": result,
+                    "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                # Lock already held — write directly instead of re-locking via
+                # save_tracking (a nested flock on a second descriptor would
+                # block forever).
+                _merge_write_tracking(tracking)
+                print(f"  ✅ {rel} → {result[:12]}")
+                results.append((rel, "captured"))
+            else:
+                print(f"  ❌ {rel} → {result}")
+                results.append((rel, result))
 
     # Summary
     captured = sum(1 for _, s in results if s == "captured")

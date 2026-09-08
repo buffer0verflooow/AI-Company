@@ -143,7 +143,7 @@ def _run_summary(operations_db: Path, now: datetime) -> tuple[int, int, int, int
     rows = _db_rows(
         operations_db,
         """SELECT status,outcome_status FROM operational_runs
-           WHERE COALESCE(completed_at,created_at)>=?""",
+           WHERE COALESCE(NULLIF(completed_at,''),created_at)>=?""",
         (start,),
     )
     completed = sum(1 for row in rows if str(row["status"]) == "completed")
@@ -200,7 +200,7 @@ def _failure_clusters(
         operations_db,
         """SELECT product_line,quality_status,outcome_notes,request_text
            FROM operational_runs
-           WHERE status='failed' AND COALESCE(completed_at,created_at)>=?""",
+           WHERE status='failed' AND COALESCE(NULLIF(completed_at,''),created_at)>=?""",
         (start,),
     )
     if not rows:

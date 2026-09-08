@@ -45,6 +45,16 @@ class SwarmExecutorPromptTests(unittest.TestCase):
         # interpolation.  Seeing them here proves the expression is escaped.
         self.assertIn('params={"query": "...", "num": 5}', prompt)
 
+    def test_prompt_embeds_evidence_discipline(self):
+        # 证据纪律必须是执行器默认行为（即使 worker 不加载任何 skill 也生效）：
+        # 外部 writeup 非证据、无法本地复现须标注、冲突以本地为准、拒绝先查环境。
+        prompt = build_prompt({"task": {"reason": "x"}, "context": ""})
+        self.assertIn("永远不是证据", prompt)
+        self.assertIn("外部来源、未本地验证", prompt)
+        self.assertIn("以本地实测为准", prompt)
+        self.assertIn("先核查环境状态", prompt)
+        self.assertIn("平台答案不符", prompt)
+
 
 class SwarmNativeExecutorContractTests(unittest.TestCase):
     def test_malformed_agent_command_returns_clean_json_failure(self):

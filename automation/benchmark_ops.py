@@ -44,7 +44,6 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional, Tuple
 
 BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://tsecbench.zc.tencent.com")
 API = BASE_URL + "/openapi/v1/challenges"
@@ -59,7 +58,7 @@ def _require_token() -> str:
     return token
 
 
-def _api(method: str, path: str, token: str, payload: Optional[Dict] = None) -> Dict:
+def _api(method: str, path: str, token: str, payload: dict | None = None) -> dict:
     """调用平台 API,统一返回 {"http": <code>|None, **body}。"""
     url = API + path
     data = json.dumps(payload).encode() if payload is not None else None
@@ -73,7 +72,9 @@ def _api(method: str, path: str, token: str, payload: Optional[Dict] = None) -> 
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # BASE_URL is set by the operator via BENCHMARK_BASE_URL (default https),
+        # never derived from untrusted input — scheme is operator-controlled.
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310
             body = resp.read().decode()
             if body.strip():
                 parsed = json.loads(body)
@@ -95,7 +96,7 @@ def _api(method: str, path: str, token: str, payload: Optional[Dict] = None) -> 
         raise SystemExit(4) from None
 
 
-def get_rows(token: str) -> List[Dict]:
+def get_rows(token: str) -> list[dict]:
     resp = _api("GET", "", token)
     if not isinstance(resp.get("http"), int) or not (200 <= resp["http"] < 300):
         raise SystemExit(
@@ -113,14 +114,14 @@ def get_rows(token: str) -> List[Dict]:
 
 # ── 纯函数(可单测) ──
 
-def find_row(rows: List[Dict], code: str) -> Optional[Dict]:
+def find_row(rows: list[dict], code: str) -> dict | None:
     for row in rows:
         if row.get("unique_code") == code:
             return row
     return None
 
 
-def summarize(rows: List[Dict]) -> Tuple[int, int, int]:
+def summarize(rows: list[dict]) -> tuple[int, int, int]:
     """(已完成题数, 总题数, 累计得分)。得分为已通关题 total_score 之和。"""
     done = sum(1 for r in rows if r.get("is_completed"))
     total = len(rows)
@@ -128,7 +129,7 @@ def summarize(rows: List[Dict]) -> Tuple[int, int, int]:
     return done, total, score
 
 
-def active_codes(rows: List[Dict]) -> List[str]:
+def active_codes(rows: list[dict]) -> list[str]:
     return [
         r["unique_code"]
         for r in rows
@@ -136,7 +137,7 @@ def active_codes(rows: List[Dict]) -> List[str]:
     ]
 
 
-def submit_plan(row: Optional[Dict], actives: List[str], max_active: int = MAX_ACTIVE) -> Dict:
+def submit_plan(row: dict | None, actives: list[str], max_active: int = MAX_ACTIVE) -> dict:
     """提交前门禁决策(纯函数)。
 
     Returns:
@@ -159,7 +160,7 @@ def submit_plan(row: Optional[Dict], actives: List[str], max_active: int = MAX_A
     return {"action": "need_start", "detail": f"容器 status={status},需要先 start"}
 
 
-def classify_submit(resp: Dict) -> str:
+def classify_submit(resp: dict) -> str:
     """把 submit 响应压成一行人类可读结论。"""
     if resp.get("http") == 409 and "duplicate" in str(resp.get("code", "")):
         return "duplicate: 该 flag 已正确提交过,跳过(不加分)"
@@ -264,7 +265,7 @@ def cmd_submit(token: str, code: str, flag: str) -> int:
 
 
 def cmd_resubmit(token: str, path: str) -> int:
-    pairs: List[Tuple[str, str]] = []
+    pairs: list[tuple[str, str]] = []
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -286,7 +287,7 @@ def cmd_resubmit(token: str, path: str) -> int:
     return 0 if ok == len(pairs) else 1
 
 
-def file_hash(path: str) -> Tuple[str, int, str]:
+def file_hash(path: str) -> tuple[str, int, str]:
     h = hashlib.sha256()
     size = 0
     with open(path, "rb") as fh:
@@ -299,14 +300,14 @@ def file_hash(path: str) -> Tuple[str, int, str]:
     return h.hexdigest(), size, path
 
 
-def cmd_hash(paths: List[str]) -> int:
+def cmd_hash(paths: list[str]) -> int:
     for p in paths:
         digest, size, name = file_hash(p)
         print(f"{name}  size={size}  sha256={digest}")
     return 0
 
 
-def first_diff_offset(a: str, b: str, scan_limit: int = 8 << 20) -> Optional[int]:
+def first_diff_offset(a: str, b: str, scan_limit: int = 8 << 20) -> int | None:
     """逐块找首个差异字节偏移(最多扫 scan_limit)。无差异/超限返回 None。"""
     offset = 0
     with open(a, "rb") as fa, open(b, "rb") as fb:
@@ -358,7 +359,7 @@ def cmd_checklist() -> int:
     return 0
 
 
-def main(argv: List[str]) -> int:
+def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__)
         return 0

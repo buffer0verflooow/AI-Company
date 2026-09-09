@@ -1125,7 +1125,7 @@ def execute_opportunity(
             )
         _record_operational_run(db, run_id, opportunity, run_dir, result, usage, now, completed)
         db.commit()
-    except Exception as exc:  # noqa: BLE001 -- a failed finalize must not strand rows in 'running'
+    except Exception as exc:  # a failed finalize must not strand rows in 'running'
         # The opportunity/run were committed as 'running' before the worker
         # started; if this finalize raises (e.g. database locked under parallel
         # workers) the rollback on close leaves them 'running' forever.  Repair

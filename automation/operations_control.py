@@ -94,9 +94,10 @@ def _decision_verdict(message: str) -> str:
         # such phrasings invert like the contiguous "不要批准" does instead of
         # silently approving.
         window = re.sub(r"\s+", "", message[max(0, start - 4):start])
-        if window.endswith("不") or window.endswith("别") or window.endswith("未"):
-            rejected = True
-        elif any(window.endswith(negator) for negator in _APPROVE_NEGATORS):
+        if (
+            window.endswith(("不", "别", "未"))
+            or any(window.endswith(negator) for negator in _APPROVE_NEGATORS)
+        ):
             rejected = True
         else:
             approved = True

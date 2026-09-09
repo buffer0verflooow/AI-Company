@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from automation.benchmark_ops import (
     classify_submit,
     file_hash,
-    first_diff_offset,
     find_row,
+    first_diff_offset,
     submit_plan,
     summarize,
 )

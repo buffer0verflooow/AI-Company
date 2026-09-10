@@ -215,8 +215,14 @@ def sync_forecast(db_path: Path, submissions: Path) -> bool:
     match = BOUNTY_RANGE_RE.search(content)
     if not match:
         return False
-    minimum = float(match.group(1).replace(",", ""))
-    maximum = float(match.group(2).replace(",", ""))
+    try:
+        minimum = float(match.group(1).replace(",", ""))
+        maximum = float(match.group(2).replace(",", ""))
+    except (TypeError, ValueError):
+        # The regex accepts a commas-only amount group (e.g. "总赏金 $, - $,");
+        # a malformed bounty line must degrade to "nothing to sync" like the
+        # unreadable-file path above instead of aborting the --sync cron.
+        return False
     try:
         submissions_hash = sha256_file(submissions)
     except OSError:

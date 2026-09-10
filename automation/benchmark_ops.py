@@ -77,9 +77,16 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
         with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310
             body = resp.read().decode()
             if body.strip():
-                parsed = json.loads(body)
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError:
+                    # A 2xx body that is not JSON (e.g. a WAF/proxy HTML page)
+                    # must surface as a normal API result, not crash the CLI.
+                    return {"http": resp.status, "message": body[:300]}
                 if isinstance(parsed, list):  # challenges GET 返回裸数组
                     return {"http": resp.status, "challenges": parsed}
+                if not isinstance(parsed, dict):
+                    return {"http": resp.status, "message": str(parsed)[:300]}
                 return {"http": resp.status, **parsed}
             return {"http": resp.status}
     except urllib.error.HTTPError as exc:
@@ -88,6 +95,10 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
             parsed = json.loads(body) if body.strip() else {}
         except json.JSONDecodeError:
             parsed = {"message": body[:300]}
+        if not isinstance(parsed, dict):
+            # An error body may be a bare array/scalar; wrapping keeps the
+            # ``{**parsed}`` merge below from raising TypeError.
+            parsed = {"message": str(parsed)[:300]}
         return {"http": exc.code, **parsed}
     except urllib.error.URLError as exc:
         print(f"网络错误: {exc.reason}", file=sys.stderr)

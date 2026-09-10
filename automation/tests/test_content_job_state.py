@@ -53,6 +53,14 @@ class ReadLifecycleDerivationTests(unittest.TestCase):
             job = _make_job(Path(td))
             self.assertEqual(read_lifecycle(job)["state"], "pending")
 
+    def test_non_object_status_file_derives_pending(self):
+        # A parseable non-object status.json (e.g. a JSON array) must degrade
+        # like an unreadable one instead of raising AttributeError.
+        with tempfile.TemporaryDirectory() as td:
+            job = _make_job(Path(td))
+            (job / "status.json").write_text("[1, 2]", encoding="utf-8")
+            self.assertEqual(read_lifecycle(job)["state"], "pending")
+
     def test_existing_lifecycle_takes_precedence(self):
         with tempfile.TemporaryDirectory() as td:
             job = _make_job(Path(td), "completed")
@@ -81,6 +89,18 @@ class TransitionFlowTests(unittest.TestCase):
             lc = read_lifecycle(job)
             self.assertEqual(lc["state"], "published")
             self.assertIsInstance(lc["history"], list)
+
+    def test_non_dict_history_entries_are_dropped(self):
+        # A hand-edited lifecycle.json may hold non-object history entries;
+        # ``show`` indexes each entry and must not raise AttributeError.
+        with tempfile.TemporaryDirectory() as td:
+            job = _make_job(Path(td), "completed")
+            (job / "lifecycle.json").write_text(
+                json.dumps({"state": "review", "history": ["oops", {"state": "qa"}]}),
+                encoding="utf-8",
+            )
+            history = read_lifecycle(job)["history"]
+            self.assertEqual(history, [{"state": "qa"}])
 
     def test_completed_job_can_be_archived(self):
         with tempfile.TemporaryDirectory() as td:

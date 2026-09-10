@@ -1189,6 +1189,11 @@ class RouterState:
                 stored_decision = json.loads(row["decision_json"])
             except (TypeError, json.JSONDecodeError):
                 stored_decision = {}
+            if not isinstance(stored_decision, dict):
+                # A parseable non-object decision_json (e.g. a JSON array) is
+                # as unusable as a corrupt one; treat it as empty so the
+                # dedup-key comparison below cannot raise AttributeError.
+                stored_decision = {}
             stored_targets = extract_target(str(row["message_excerpt"] or ""))
             if not stored_targets and stored_decision.get("target"):
                 stored_targets = [(

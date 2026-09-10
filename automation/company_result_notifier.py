@@ -177,6 +177,17 @@ def _positive_limit(value: Any, default: int) -> int:
     return number if number > 0 else default
 
 
+def _platform_limit_map(config: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return a per-platform limit map, degrading a malformed container to {}.
+
+    ``config`` is hand-edited JSON; the whole map can be the wrong type (list,
+    string, ...), not just an individual value, and every lookup below must
+    stay safe in that case.
+    """
+    value = config.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str) -> tuple[bool, str]:
     """Use Hermes' supported standalone sender for a confirmed delivery."""
     _ensure_hermes_imports(config)
@@ -449,7 +460,7 @@ def _format_content_message(row: Any, payload: dict[str, Any]) -> str:
 
 
 def _fit_delivery_message(config: dict[str, Any], origin: dict[str, str], message: str) -> str:
-    limits = config.get("proactive_delivery_chars_by_platform") or {}
+    limits = _platform_limit_map(config, "proactive_delivery_chars_by_platform")
     default_limit = _positive_limit(config.get("proactive_delivery_default_chars", 3000), 3000)
     limit = _positive_limit(limits.get(origin.get("platform", "")), default_limit)
     if limit <= 0 or len(message) <= limit:
@@ -643,7 +654,7 @@ def _cron_recovery_payload(
                 if stored["platform"] and stored["chat_id"]:
                     origin = stored
             limit = _positive_limit(
-                (config.get("tvcr_delivery_chars_by_platform") or {}).get(
+                _platform_limit_map(config, "tvcr_delivery_chars_by_platform").get(
                     origin.get("platform", ""),
                 ),
                 _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
@@ -1469,7 +1480,7 @@ def process_once(
                 message = format_review_message(
                     Path(operations_db), review_id,
                     limit=_positive_limit(
-                        (config.get("tvcr_delivery_chars_by_platform") or {}).get(origin["platform"]),
+                        _platform_limit_map(config, "tvcr_delivery_chars_by_platform").get(origin["platform"]),
                         _positive_limit(config.get("tvcr_delivery_default_chars", 1000), 1000),
                     ),
                 )

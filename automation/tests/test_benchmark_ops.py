@@ -4,10 +4,13 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from automation.benchmark_ops import (
+    _api,
     classify_submit,
     file_hash,
     find_row,
@@ -92,6 +95,39 @@ class ClassifyTests(unittest.TestCase):
     def test_duplicate(self):
         out = classify_submit({"http": 409, "code": "duplicate"})
         self.assertIn("duplicate", out)
+
+
+class ApiBodyParsingTests(unittest.TestCase):
+    def test_http_error_with_array_body_does_not_crash(self):
+        class FakeHTTPError(urllib.error.HTTPError):
+            def __init__(self):
+                super().__init__("http://x", 400, "bad", {}, None)
+
+            def read(self):
+                return b"[1, 2]"
+
+        with patch("automation.benchmark_ops.urllib.request.urlopen", side_effect=FakeHTTPError()):
+            resp = _api("GET", "", "token")
+        self.assertEqual(resp["http"], 400)
+        self.assertIn("message", resp)
+
+    def test_non_json_success_body_does_not_crash(self):
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"<html>not json</html>"
+
+        with patch("automation.benchmark_ops.urllib.request.urlopen", return_value=FakeResponse()):
+            resp = _api("GET", "", "token")
+        self.assertEqual(resp["http"], 200)
+        self.assertIn("message", resp)
 
 
 class DiffTests(unittest.TestCase):

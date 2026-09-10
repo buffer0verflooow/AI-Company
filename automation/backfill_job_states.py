@@ -43,6 +43,12 @@ def main() -> int:
         except (OSError, ValueError):
             skipped += 1
             continue
+        if not isinstance(status, dict):
+            # A parseable non-object status.json (e.g. a JSON array) is as
+            # unusable as an unreadable one; skip it instead of raising
+            # AttributeError and aborting the whole backfill.
+            skipped += 1
+            continue
         s = str(status.get('status') or '')
         if s == 'completed':
             target = 'review'

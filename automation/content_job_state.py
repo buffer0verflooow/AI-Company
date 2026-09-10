@@ -97,6 +97,11 @@ def _derive_initial_state(job_dir: Path) -> str:
     if status_path.is_file():
         try:
             status = json.loads(read_text_limited(status_path, max_bytes=2 * 1024 * 1024))
+            if not isinstance(status, dict):
+                # A parseable non-object status.json (e.g. a JSON array) must
+                # degrade to "unknown" like an unreadable one instead of
+                # raising AttributeError out of read_lifecycle.
+                raise ValueError("status root must be an object")
             value = str(status.get("status") or "").strip().lower()
         except (OSError, ValueError):
             value = ""
@@ -116,9 +121,13 @@ def read_lifecycle(job_dir: Path) -> dict[str, Any]:
         data = json.loads(read_text_limited(path, max_bytes=1024 * 1024))
         if isinstance(data, dict) and data.get("state") in VALID_STATES:
             # A corrupt file with a valid state but a non-list history would
-            # crash the transition append; coerce instead of trusting it.
+            # crash the transition append; coerce instead of trusting it.  Drop
+            # non-object entries too, so ``show`` cannot raise AttributeError on
+            # a hand-edited history list.
             if not isinstance(data.get("history"), list):
                 data["history"] = []
+            else:
+                data["history"] = [h for h in data["history"] if isinstance(h, dict)]
             return data
     except (OSError, ValueError):
         pass

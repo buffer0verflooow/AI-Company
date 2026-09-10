@@ -38,6 +38,16 @@ class FinanceLedgerTests(unittest.TestCase):
             self.assertTrue(result["actual_revenue_is_zero"])
             self.assertEqual(result["forecasts_excluded_from_actual"][0]["min_amount"], 10850.0)
 
+    def test_malformed_bounty_amount_degrades_to_no_sync(self):
+        # The bounty regex accepts digits-or-commas groups, so a commas-only
+        # line must degrade to "nothing to sync" instead of a ValueError that
+        # aborts the whole --sync cron.
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "ledger.db"
+            source = Path(td) / "SUBMISSIONS_INDEX.md"
+            source.write_text("**总赏金**: $, - $,", encoding="utf-8")
+            self.assertFalse(sync_forecast(db, source))
+
     def test_actual_transaction_requires_and_hashes_evidence(self):
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "ledger.db"

@@ -103,6 +103,20 @@ class NotifierConfigCoercionTests(unittest.TestCase):
         self.assertLessEqual(len(fitted), 3000)
         self.assertIn("通知已截断", fitted)
 
+    def test_fit_delivery_message_tolerates_non_dict_limit_map(self):
+        # The whole per-platform map can be the wrong container type, not just
+        # an individual value; that must not crash the delivery tick.
+        for bad in ([["weixin"]], "weixin", 3):
+            fitted = _fit_delivery_message(
+                {
+                    "proactive_delivery_chars_by_platform": bad,
+                    "proactive_delivery_default_chars": bad,
+                },
+                {"platform": "weixin", "chat_id": "chat"},
+                "x" * 5000,
+            )
+            self.assertLessEqual(len(fitted), 3000, bad)
+
 
 class NotifierTests(unittest.TestCase):
     def test_weixin_delivery_is_kept_to_one_compact_message(self):

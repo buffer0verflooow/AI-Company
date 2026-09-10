@@ -57,6 +57,22 @@ class SwarmExecutorPromptTests(unittest.TestCase):
 
 
 class SwarmNativeExecutorContractTests(unittest.TestCase):
+    def test_non_object_payload_returns_clean_json_failure(self):
+        # A parseable non-object payload (e.g. a JSON array) must produce the
+        # documented clean-JSON failure, not a raw AttributeError traceback.
+        import contextlib
+        import io
+
+        import automation.swarm_native_executor as sne
+        with patch("sys.stdin", io.StringIO("[1, 2]")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = sne.main()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertFalse(payload["success"])
+        self.assertIn("must be an object", payload["error"])
+
     def test_malformed_agent_command_returns_clean_json_failure(self):
         # A broken SWARM_NATIVE_AGENT_COMMAND (unbalanced quote) must surface as
         # a JSON error payload, not a raw ValueError traceback with no stdout.
@@ -154,6 +170,20 @@ class SwarmNativeLlmBackendSecurityTests(unittest.TestCase):
             (hermes / "config.yaml").write_text("custom_providers: [unclosed", encoding="utf-8")
             _base_url, api_key, model = _resolve_llm_config({})
         self.assertEqual(api_key, "env-key-456")
+        self.assertEqual(model, sne.DEFAULT_MODEL)
+
+    def test_resolve_llm_config_non_utf8_config_falls_back_to_env(self):
+        # A binary/non-UTF-8 config must degrade like a corrupt YAML file
+        # instead of raising UnicodeDecodeError out of the executor contract.
+        import automation.swarm_native_executor as sne
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ZENMUX_API_KEY": "env-key-789"}, clear=False), \
+                patch.object(sne.Path, "home", return_value=Path(td)):
+            hermes = Path(td) / ".hermes"
+            hermes.mkdir(parents=True, exist_ok=True)
+            (hermes / "config.yaml").write_bytes(b"custom_providers: [\xff\xfe")
+            _base_url, api_key, model = _resolve_llm_config({})
+        self.assertEqual(api_key, "env-key-789")
         self.assertEqual(model, sne.DEFAULT_MODEL)
 
     def test_llm_backend_trace_file_written_and_closed(self):

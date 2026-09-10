@@ -197,9 +197,10 @@ def _resolve_llm_config(profile: dict[str, Any]) -> tuple[str, str, str]:
         try:
             with open(config_path) as f:
                 cfg = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError) as exc:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             # Optional config: a missing/corrupt file must not break the
-            # executor — fall back to env-based defaults.
+            # executor — fall back to env-based defaults.  UnicodeDecodeError
+            # covers a binary/non-UTF-8 config that ``open`` cannot decode.
             print(f"swarm_native_executor: ignore unreadable optional config {config_path}: {exc}", file=sys.stderr)
     if isinstance(cfg, dict):
         for p in cfg.get("custom_providers", []) or []:
@@ -645,6 +646,12 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps(_payload_error(f"invalid executor input: {exc}"), ensure_ascii=False))
+        return 0
+    if not isinstance(payload, dict):
+        # A parseable non-object payload (e.g. a JSON array) must still produce
+        # the documented clean-JSON failure instead of a raw AttributeError,
+        # mirroring swarm_hermes_executor.main.
+        print(json.dumps(_payload_error("invalid executor input: payload must be an object"), ensure_ascii=False))
         return 0
 
     task = payload.get("task") if isinstance(payload.get("task"), dict) else {}

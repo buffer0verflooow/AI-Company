@@ -258,8 +258,11 @@ def main():
     args = parser.parse_args()
 
     if not SWARM_DB.is_file():
-        print(f"Swarm DB not found: {SWARM_DB}")
-        return
+        # 2026-09-11 M0.2: 旧库路径已是墓碑目录, 新库写入路径 M1-M4 才存在。
+        # 响亮失败, 避免每日 cron 把桥停摆误报为同步完成。
+        # 依据: research/swarm-knowledge/docs/QA-REVIEW-M0.2.md 第二节 (待 CR 裁决)
+        print(f"ERROR: swarm KB path missing or tombstoned: {SWARM_DB}", file=sys.stderr)
+        return 2
 
     try:
         entries = fetch_top_entries(SWARM_DB)

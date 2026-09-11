@@ -281,6 +281,12 @@ def main():
     if not CAPTURE_PY.is_file():
         print(f"ERROR: capture.py not found at {CAPTURE_PY}")
         sys.exit(1)
+    # 2026-09-11 M0.2: 旧库路径已立墓碑, 写入方无处可写; 扫描前硬失败,
+    # 避免整轮 unchanged 把桥停摆误报为全部最新。
+    # 依据: research/swarm-knowledge/docs/QA-REVIEW-M0.2.md 第二节 (待 CR 裁决)
+    if not SWARM_DB.is_file():
+        print(f"ERROR: swarm KB is not a writable DB file: {SWARM_DB}", file=sys.stderr)
+        sys.exit(2)
 
     candidates = find_candidate_notes(vault)
     if not candidates:

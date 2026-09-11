@@ -1329,17 +1329,24 @@ class RouterState:
 
 def _parse_json_output(output: str) -> dict[str, Any]:
     text = (output or "").strip()
+    # Every caller treats the result as an object (``.get(...)``), so a
+    # top-level JSON array/scalar must not be returned verbatim: fall through
+    # to the per-line scan and, failing that, raise the same error as a
+    # non-JSON body instead of handing back a value that crashes the caller.
     try:
-        return json.loads(text)
+        value = json.loads(text)
     except json.JSONDecodeError:
-        for line in reversed(text.splitlines()):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                return value
-    raise RuntimeError(f"command did not return JSON: {text[-500:]}")
+        value = None
+    if isinstance(value, dict):
+        return value
+    for line in reversed(text.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError(f"command did not return a JSON object: {text[-500:]}")
 
 
 def swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict[str, Any]:

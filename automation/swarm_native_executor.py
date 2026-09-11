@@ -149,6 +149,11 @@ def _run_mcp_tool(server: str, tool: str, args: dict, timeout: int = 400) -> str
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return _bounded_tool_output(f"[工具输出非 JSON] {proc.stdout[:500]}")
+    if not isinstance(payload, dict):
+        # A tool that prints a JSON array/scalar is as unusable as non-JSON;
+        # report it in-band instead of letting ``.get`` raise into the generic
+        # tool-error handler (which would count it as a tool failure).
+        return _bounded_tool_output(f"[工具输出非 JSON 对象] {proc.stdout[:500]}")
     if not payload.get("success"):
         return _bounded_tool_output(f"[工具错误] {payload.get('error') or payload}")
     contents = payload.get("content") or []

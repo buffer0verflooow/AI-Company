@@ -911,6 +911,11 @@ def _run_article_titles(run: dict[str, Any]) -> list[str]:
         artifacts = json.loads(run.get("artifacts_json") or "[]")
     except json.JSONDecodeError:
         return []
+    if not isinstance(artifacts, list):
+        # The column is written by sibling subsystems; a valid-but-non-array
+        # value (number/object) must degrade to "no titles", not raise out of
+        # the caller's backfill loop and abort the whole sweep.
+        return []
     by_name = {Path(str(a)).name: str(a) for a in artifacts if isinstance(a, str)}
     titles: list[str] = []
     seen: set[str] = set()

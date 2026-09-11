@@ -14,6 +14,7 @@ from automation.swarm_native_executor import (
     _resolve_llm_config,
     _run_command_backend,
     _run_llm_backend,
+    _run_mcp_tool,
 )
 
 
@@ -201,6 +202,19 @@ class SwarmNativeLlmBackendSecurityTests(unittest.TestCase):
             text = trace.read_text(encoding="utf-8")
             self.assertIn("type=answer", text)
             self.assertIn('{"answer": "done"}', text)
+
+
+class SwarmNativeMcpToolTests(unittest.TestCase):
+    def test_non_object_tool_stdout_is_reported_not_raised(self):
+        # An MCP tool printing a JSON array/scalar must surface as bounded
+        # in-band output, not an AttributeError counted as a tool failure.
+        fake = subprocess.CompletedProcess(
+            args=["mcp_tool"], returncode=0, stdout="[1, 2]", stderr="",
+        )
+        with patch("automation.swarm_native_executor.subprocess.run", return_value=fake):
+            result = _run_mcp_tool("apk", "jadx", {})
+        self.assertIn("非 JSON 对象", result)
+        self.assertIn("[1, 2]", result)
 
 
 if __name__ == "__main__":

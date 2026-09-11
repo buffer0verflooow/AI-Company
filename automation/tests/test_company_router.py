@@ -12,6 +12,7 @@ from automation.company_router import (
     RouterState,
     _float_config,
     _int_config,
+    _parse_json_output,
     build_context,
     classify_message,
     classify_with_fallback,
@@ -1016,6 +1017,26 @@ class RoutingTermConfigTests(unittest.TestCase):
                 router.reload_routing_terms(router.DEFAULT_CONFIG)
         # Defaults restored for the rest of the suite.
         self.assertIn("视频", router.VIDEO_TERMS)
+
+
+class ParseJsonOutputTests(unittest.TestCase):
+    def test_top_level_array_is_not_returned_as_an_object(self):
+        # swarmctl output is consumed as a dict (``result.get(...)``); a bare
+        # array must raise the documented error, not leak a list that crashes
+        # the caller calling ``.get``.
+        with self.assertRaises(RuntimeError):
+            _parse_json_output("[1, 2, 3]")
+
+    def test_top_level_scalar_is_not_returned_as_an_object(self):
+        with self.assertRaises(RuntimeError):
+            _parse_json_output("42")
+
+    def test_trailing_json_object_line_is_found_after_non_json_prefix(self):
+        # A command may print a human line before its JSON envelope.
+        self.assertEqual(
+            _parse_json_output('submitted\n{"run_id": "r1"}'),
+            {"run_id": "r1"},
+        )
 
 
 if __name__ == "__main__":

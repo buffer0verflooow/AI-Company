@@ -10,6 +10,7 @@ from pathlib import Path
 from automation.company_router import RouterState, classify_message
 from automation.operations_control import (
     _apportion_shared_sessions,
+    _run_article_titles,
     _safe_counter,
     _safe_float,
     apply_user_decision,
@@ -912,6 +913,19 @@ class StaleRunReaperTests(unittest.TestCase):
                 "running",
             )
             db.close()
+
+
+class RunArticleTitleTests(unittest.TestCase):
+    """A corrupt artifacts_json column must not abort the outcome backfill."""
+
+    def test_valid_but_non_array_artifacts_degrades_to_no_titles(self):
+        self.assertEqual(_run_article_titles({"artifacts_json": "5"}), [])
+        self.assertEqual(_run_article_titles({"artifacts_json": "null"}), [])
+        self.assertEqual(_run_article_titles({"artifacts_json": "{}"}), [])
+
+    def test_unparseable_artifacts_degrades_to_no_titles(self):
+        self.assertEqual(_run_article_titles({"artifacts_json": "not json"}), [])
+        self.assertEqual(_run_article_titles({"artifacts_json": ""}), [])
 
 
 if __name__ == "__main__":

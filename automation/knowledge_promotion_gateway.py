@@ -129,9 +129,12 @@ def connect_gate(path: Path) -> sqlite3.Connection:
 
 
 def _tags(value: Any) -> set[str]:
+    if not isinstance(value, (str, bytes, bytearray)):
+        # A non-TEXT DB column (integer JSON, blob) is not parseable text.
+        return set()
     try:
         parsed = json.loads(value or "[]")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError, ValueError):
         parsed = []
     if not isinstance(parsed, (list, tuple, set)):
         return set()
@@ -139,10 +142,13 @@ def _tags(value: Any) -> set[str]:
 
 
 def _trust(value: Any) -> dict[str, float]:
-    try:
-        parsed = json.loads(value or "{}")
-    except json.JSONDecodeError:
-        parsed = {}
+    if not isinstance(value, (str, bytes, bytearray)):
+        parsed: Any = {}
+    else:
+        try:
+            parsed = json.loads(value or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
     result: dict[str, float] = {}

@@ -17,6 +17,8 @@ from automation.company_router import (
     classify_message,
     classify_with_fallback,
     handle_hook,
+    parse_hook_stdin,
+    refresh_session_runs,
     select_company_result,
     submit_security,
 )
@@ -77,6 +79,14 @@ class ClassificationTests(unittest.TestCase):
 
     def test_external_probe_requires_authorization(self):
         decision = classify_message("扫描 example.com 并尝试绕过认证")
+        self.assertEqual(decision.route, "security")
+        self.assertEqual(decision.action, "approval_required")
+        self.assertTrue(decision.authorization_required)
+
+    def test_localhost_prefixed_external_domain_requires_authorization(self):
+        # A prefix match on "localhost" used to treat localhost.evil.com as an
+        # internal target and skip the external scope gate.
+        decision = classify_message("扫描 localhost.evil.com 的端口")
         self.assertEqual(decision.route, "security")
         self.assertEqual(decision.action, "approval_required")
         self.assertTrue(decision.authorization_required)
@@ -566,6 +576,28 @@ class HookTests(unittest.TestCase):
             rows = state.active_for_session("wanted")
             self.assertEqual([row["run_id"] for row in rows], ["run-wanted"])
             state.close()
+
+    def test_refresh_session_runs_coerces_non_string_status(self):
+        # swarmctl JSON is external: a list/object status must not reach the
+        # SQLite bind or set membership and abort the hook.
+        with tempfile.TemporaryDirectory() as td:
+            state = RouterState(str(Path(td) / "router.db"))
+            decision = classify_message("分析本机 APK 逆向报告中的认证逻辑")
+            event_id = state.insert("s1", "cli", "h1", "安全分析", decision)
+            state.update(event_id, run_id="run-1", status="running")
+            with patch("automation.company_router.swarm_command", return_value={"status": ["running"]}):
+                updates = refresh_session_runs({"executor": "x"}, state, "s1")
+            state.close()
+            self.assertEqual(updates, [])
+
+    def test_parse_hook_stdin_rejects_oversized_payload(self):
+        import io
+
+        import automation.company_router as router
+
+        oversized = "x" * (router.MAX_HOOK_STDIN_BYTES + 1)
+        with patch("sys.stdin", io.StringIO(oversized)), self.assertRaises(ValueError):
+            parse_hook_stdin()
 
     def test_already_delivered_legacy_result_is_not_retried_proactively(self):
         with tempfile.TemporaryDirectory() as td:

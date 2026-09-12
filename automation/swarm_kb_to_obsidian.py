@@ -180,7 +180,10 @@ def generate_strategy_md(entries: list[dict], timestamp: str) -> str:
     for domain, items in sorted(groups.items()):
         label = DOMAIN_LABELS.get(domain, domain)
         sections.append(f"\n### {label} ({len(items)} 条)\n")
-        for item in sorted(items, key=lambda x: -x["level"]):
+        # The level column is worker-written and can be non-numeric TEXT
+        # (SQLite orders TEXT above INTEGER, so it still passes ``level >= 3``);
+        # coerce before negating or the daily sync aborts with TypeError.
+        for item in sorted(items, key=lambda x: -_safe_level(x["level"])):
             trust_pct = f"{item['trust'] * 100:.0f}%" if item["trust"] else "—"
             title = _md_inline(item["title"], 240)
             agent = _md_inline(item["agent"], 120)

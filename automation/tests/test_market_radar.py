@@ -137,6 +137,16 @@ class MarketRadarTests(unittest.TestCase):
         self.assertEqual(records[0]["content_risk"], "prompt_injection")
         self.assertEqual(canonical_url("file:///etc/passwd"), "")
 
+    def test_batch_markdown_missing_theme_title_falls_back_to_theme(self):
+        # validate_queries only requires ``theme``; the parser must not raise
+        # KeyError and discard every batch when ``theme_title`` is absent.
+        text = "## Query 1: test\n### 1. Some title\n- **URL**: https://example.com/a\n"
+        records = parse_batch_markdown(
+            text, [{"id": "q1", "query": "x", "theme": "fallback-theme"}]
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["theme_title"], "fallback-theme")
+
     def test_canonical_url_rejects_credentials_and_private_network_literals(self):
         self.assertEqual(canonical_url("https://user:pass@example.com/path"), "")
         self.assertEqual(canonical_url("http://127.0.0.1/admin"), "")

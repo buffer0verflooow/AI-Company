@@ -397,7 +397,11 @@ def parse_batch_markdown(text: str, queries: list[dict[str, Any]]) -> list[dict[
                 query = queries[current_query]
                 current = {
                     "query_id": query["id"], "query_text": query["query"],
-                    "theme": query["theme"], "theme_title": query["theme_title"],
+                    "theme": query["theme"],
+                    # ``theme_title`` is optional in validate_queries; fall back
+                    # to the validated theme slug instead of raising KeyError
+                    # and discarding every batch of the run.
+                    "theme_title": query.get("theme_title", query["theme"]),
                     "product_line": query.get("product_line", "company"),
                     "channel": query.get("channel", "web"),
                     "title": result_match.group(1), "url": "", "snippet_lines": [],

@@ -467,6 +467,80 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertEqual(new_status, "dismissed")
             self.assertEqual(created, 0)
 
+    def test_non_object_evidence_json_does_not_crash_discovery(self):
+        # A completed market_pulse opportunity whose evidence_json is valid but
+        # non-object JSON must degrade to no evidence, not abort the cycle.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            market_db_path = root / "market.db"
+            config["market_signals_db"] = str(market_db_path)
+            config["standing_missions"] = []
+            now = datetime.now(timezone.utc)
+            now_text = now.isoformat(timespec="seconds")
+            market = connect_market(market_db_path)
+            for run_id in ("old-run", "new-run"):
+                market.execute(
+                    """INSERT INTO market_radar_runs
+                       (run_id,status,query_count,started_at,completed_at,created_at,updated_at)
+                       VALUES (?,'completed',2,?,?,?,?)""",
+                    (run_id, now_text, now_text, now_text, now_text),
+                )
+            pulse_values = (
+                "theme", "主题", "company", "summary", "[]", "[\"a\",\"b\"]",
+                "[\"https://a/x\",\"https://b/y\"]", 2, 2, 70, 82, 0.8,
+                str(root / "evidence"), now_text, now_text,
+            )
+            for pulse_id, run_id, status in (
+                ("old-pulse", "old-run", "evaluated"),
+                ("new-pulse", "new-run", "new"),
+            ):
+                market.execute(
+                    """INSERT INTO market_pulses
+                       (pulse_id,run_id,theme,theme_title,product_line,summary,signal_ids_json,
+                        source_domains_json,source_urls_json,independent_sources,signal_count,
+                        average_score,max_score,confidence,score,status,evidence_path,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (pulse_id, run_id, *pulse_values[:12], 82, status, *pulse_values[12:]),
+                )
+            market.commit()
+            market.close()
+            db_path = Path(config["operations_db"])
+            db = connect(db_path)
+            db.execute(
+                """INSERT INTO autonomy_opportunities
+                   (opportunity_id,idempotency_key,source_type,source_ref,product_line,title,
+                    description,action_kind,risk_level,requires_approval,approval_granted,score,
+                    status,evidence_json,created_at,updated_at,completed_at)
+                   VALUES ('old-opp','market-pulse:old-pulse','market_pulse','old-pulse','company',
+                           'old','old','market_validation','low',0,0,82,'completed',?,?,?,?)""",
+                ("[]", now_text, now_text, now_text),
+            )
+            db.commit()
+            db.close()
+
+            # Must not raise AttributeError from ``[].get``.
+            discover_opportunities(db_path, config, now=now + timedelta(hours=1))
+
+            db = connect(db_path)
+            created = db.execute(
+                "SELECT COUNT(*) FROM autonomy_opportunities WHERE source_ref='new-pulse'"
+            ).fetchone()[0]
+            db.close()
+            self.assertEqual(created, 1)  # degraded evidence -> no cooldown applied
+
+    def test_null_list_config_values_do_not_crash(self):
+        # Explicit JSON null for a list-valued config key must degrade to empty
+        # instead of raising TypeError from iterating None.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["standing_missions"] = None
+            config["auto_execute_risk_levels"] = None
+            db_path = Path(config["operations_db"])
+            discover_opportunities(db_path, config)
+            select_executable(db_path, config)
+
     def test_operator_proactively_delivers_cycle_summary_to_management_origin(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

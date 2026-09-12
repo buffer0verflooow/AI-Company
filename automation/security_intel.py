@@ -349,13 +349,24 @@ def parse_cisa_kev(body: str, src: dict[str, Any], now: datetime) -> list[dict[s
         data = json.loads(body)
     except json.JSONDecodeError:
         return []
-    vulns = data.get("vulnerabilities", [])
+    # The feed is external and can return valid-but-wrong-shape JSON (a bare
+    # array/scalar, or a non-list "vulnerabilities"); degrade to no items
+    # instead of raising AttributeError/TypeError out of the parser.
+    if not isinstance(data, dict):
+        return []
+    vulns = data.get("vulnerabilities")
+    if not isinstance(vulns, list):
+        return []
     items = []
     # CISA's KEV catalog is ordered ascending by dateAdded (newest appended at
     # the end), so walk it backwards and keep the NEWEST ``src["max"]`` records.
     # Truncating the head would keep only the oldest entries and, after the
     # first persist, deduplicate every later fetch into a no-op.
     for v in reversed(vulns):
+        if not isinstance(v, dict):
+            # A list element that is not an object cannot carry the fields
+            # below; skip it rather than crash the whole feed.
+            continue
         cve = str(v.get("cveID", ""))
         vendor = str(v.get("vendorProject", ""))
         product = str(v.get("product", ""))
@@ -600,7 +611,9 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
         lines.append("")
         for it in sorted(kev_items, key=lambda item: str(item.get("published") or ""), reverse=True)[:15]:
             title = it["title"].replace("|", "｜")
-            lines.append(f"- [{title}]({it['url']}) (CISA {it.get('published', '')[:10]})")
+            # ``published`` is the raw external dateAdded: it can be null or a
+            # number, so coerce before slicing or the whole report dies here.
+            lines.append(f"- [{title}]({it['url']}) (CISA {str(it.get('published') or '')[:10]})")
         lines.append("")
 
     # ---- 泛安全 (不入池, 备查) ----

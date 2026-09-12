@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.content_job_state import read_lifecycle, transition
+from automation.content_job_state import read_lifecycle, show, transition
 
 
 def _make_job(root: Path, status: str | None = None) -> Path:
@@ -101,6 +101,24 @@ class TransitionFlowTests(unittest.TestCase):
             )
             history = read_lifecycle(job)["history"]
             self.assertEqual(history, [{"state": "qa"}])
+
+    def test_show_tolerates_history_entry_missing_keys(self):
+        # read_lifecycle only guarantees entries are objects; a hand-edited
+        # entry without ts/event must not crash ``show`` with KeyError.
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as td:
+            job = _make_job(Path(td), "completed")
+            (job / "lifecycle.json").write_text(
+                json.dumps({"state": "review", "history": [{"state": "qa"}]}),
+                encoding="utf-8",
+            )
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = show(job)
+            self.assertEqual(rc, 0)
+            self.assertIn("qa", buf.getvalue())
 
     def test_completed_job_can_be_archived(self):
         with tempfile.TemporaryDirectory() as td:

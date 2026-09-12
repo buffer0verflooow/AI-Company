@@ -91,6 +91,12 @@ def main():
         if os.path.islink(job_dir) or not os.path.isdir(job_dir):
             continue
         state, mtime = job_state(job_dir)
+        # job_state() returns whatever JSON value the worker wrote for the
+        # state key.  A list/object is unhashable and would make the remap
+        # ``.get`` / set-membership tests below raise TypeError, silencing
+        # every stuck-job alarm; treat a non-string as "no usable state".
+        if not isinstance(state, str):
+            state = None
         # job_state() falls back to status.json's raw status when lifecycle.json
         # is absent (the executor writes status.json and never lifecycle.json).
         # Map the executor's terminal statuses onto the lifecycle vocabulary so

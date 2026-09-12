@@ -465,6 +465,10 @@ def discover_opportunities(
             ).fetchall()
             for completed_opportunity in completed_market:
                 evidence = _parse_json(completed_opportunity["evidence_json"], {})
+                if not isinstance(evidence, dict):
+                    # Valid-but-non-object evidence_json (a JSON array/scalar)
+                    # must degrade to no evidence, not crash the whole cycle.
+                    evidence = {}
                 theme = str(evidence.get("theme") or "")
                 completed_at = _parse_dt(str(completed_opportunity["completed_at"] or ""))
                 if not theme or not completed_at:
@@ -530,7 +534,7 @@ def discover_opportunities(
                     # re-appearing as opportunities).
                     LOGGER.warning("market pulse cooldown update failed: %s", exc, exc_info=True)
 
-        for mission in config.get("standing_missions", []):
+        for mission in config.get("standing_missions") or []:
             if not isinstance(mission, dict) or not mission.get("enabled", True):
                 continue
             cadence = max(1, _int_config(mission, "cadence_hours", 24))
@@ -571,7 +575,7 @@ def select_executable(
     limit: int | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    allowed_risks = {str(value) for value in config.get("auto_execute_risk_levels", ["low"])}
+    allowed_risks = {str(value) for value in (config.get("auto_execute_risk_levels") or ["low"])}
     minimum = _float_config(config, "minimum_score", 0)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -1313,7 +1317,7 @@ def run_cycle(
     delivery_error = ""
     chosen_deliverer = deliverer or _default_deliverer
     if config.get("proactive_delivery", True) and origin.get("platform") and origin.get("chat_id"):
-        allowed = {str(item).lower() for item in config.get("proactive_delivery_platforms", [])}
+        allowed = {str(item).lower() for item in (config.get("proactive_delivery_platforms") or [])}
         if allowed and origin["platform"].lower() not in allowed:
             try:
                 try:

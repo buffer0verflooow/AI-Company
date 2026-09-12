@@ -111,12 +111,15 @@ def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
             continue
         etype = event.get("type", "")
         if etype == "text":
-            part = event.get("part") or {}
-            if part.get("type") == "text":
+            part = event.get("part")
+            # ``part``/``tokens`` come from the external opencode process and
+            # can be any JSON type; a truthy non-dict must not reach ``.get``
+            # (the executor would exit without printing its JSON contract).
+            if isinstance(part, dict) and part.get("type") == "text":
                 content_parts.append(str(part.get("text") or ""))
         elif etype == "step_finish":
-            tokens = event.get("tokens") or {}
-            token_cost = _safe_counter(tokens.get("total"))
+            tokens = event.get("tokens")
+            token_cost = _safe_counter(tokens.get("total")) if isinstance(tokens, dict) else 0
 
     content = "\n".join(content_parts).strip()
     return {

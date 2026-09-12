@@ -208,7 +208,14 @@ def _resolve_llm_config(profile: dict[str, Any]) -> tuple[str, str, str]:
             # covers a binary/non-UTF-8 config that ``open`` cannot decode.
             print(f"swarm_native_executor: ignore unreadable optional config {config_path}: {exc}", file=sys.stderr)
     if isinstance(cfg, dict):
-        for p in cfg.get("custom_providers", []) or []:
+        custom_providers = cfg.get("custom_providers")
+        if not isinstance(custom_providers, list):
+            # A mapping (iteration would yield string keys) or scalar in the
+            # external config must not reach ``p.get`` and crash the executor.
+            custom_providers = []
+        for p in custom_providers:
+            if not isinstance(p, dict):
+                continue
             name = str(p.get("name") or "").strip().lower()
             if name:
                 providers[name] = p
@@ -393,7 +400,12 @@ def _run_llm_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[str,
                     data, err, content = data2, err2, content2
                     used_model, used_base, used_key, fallback = fb_model, fb_base, fb_key, True
         if isinstance(data, dict):
-            usage = data.get("usage") or {}
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                # An OpenAI-compatible endpoint may return a non-object
+                # ``usage``; reading ``.get`` on it would escape the token
+                # try/except below and crash the whole tool loop.
+                usage = {}
             try:
                 total_tokens += int(usage.get("total_tokens") or 0)
             except (TypeError, ValueError):

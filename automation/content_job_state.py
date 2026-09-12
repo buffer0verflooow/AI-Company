@@ -185,7 +185,9 @@ def show(job_dir: Path) -> int:
     print(f"history ({len(lc['history'])}):")
     for h in lc["history"]:
         d = f" — {h['detail']}" if h.get("detail") else ""
-        print(f"  {h['ts']}  {h['state']:<10} {h['event']}{d}")
+        # ``read_lifecycle`` only guarantees history entries are objects; a
+        # hand-edited entry missing a key must not crash ``show`` with KeyError.
+        print(f"  {h.get('ts', '')}  {h.get('state', '?')!s:<10} {h.get('event', '')}{d}")
     ev_path = job_dir / "events.jsonl"
     if ev_path.exists():
         try:

@@ -149,6 +149,16 @@ class SwarmBridgeTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", markdown)
         self.assertNotIn("\n## injected", markdown)
 
+    def test_generated_markdown_tolerates_non_numeric_level(self):
+        # A worker row can carry a non-numeric TEXT level that still satisfies
+        # ``level >= 3`` in SQLite; sorting must coerce instead of raising
+        # TypeError on unary minus.
+        markdown = generate_strategy_md([{
+            "id": "1", "level": "abc", "type": "knowledge",
+            "title": "t", "content": "c", "agent": "a", "tags": [], "trust": 0.9, "created": "",
+        }], "2026-07-29")
+        self.assertIn("t", markdown)
+
     def test_update_wiki_refuses_to_overwrite_unreadable_wiki(self):
         # An unreadable/oversized wiki must never be replaced by just the auto
         # section (that would destroy handwritten content).

@@ -117,6 +117,26 @@ class SwarmHermesExecutorTokenTests(unittest.TestCase):
         self.assertEqual(result["content"], "hello")
         self.assertEqual(result["token_cost"], 0)
 
+    def test_non_dict_event_fields_do_not_crash_opencode_parse(self):
+        # ``part``/``tokens`` can be any JSON type from the external opencode
+        # process; a truthy non-dict must degrade instead of reaching ``.get``.
+        events = [
+            {"type": "text", "part": ["not", "a", "dict"]},
+            {"type": "step_finish", "tokens": "not-a-dict"},
+            {"type": "text", "part": {"type": "text", "text": "ok"}},
+        ]
+        fake = subprocess.CompletedProcess(
+            args=["opencode"],
+            returncode=0,
+            stdout="\n".join(json.dumps(event) for event in events) + "\n",
+            stderr="",
+        )
+        with patch("automation.swarm_hermes_executor.subprocess.run", return_value=fake):
+            result = _run_opencode({"resolved_model": "free-model"}, "prompt", {})
+        self.assertTrue(result["success"])
+        self.assertEqual(result["content"], "ok")
+        self.assertEqual(result["token_cost"], 0)
+
 
 class SwarmNativeLlmBackendSecurityTests(unittest.TestCase):
     """Security/resource hardening of the self-implemented LLM backend."""
@@ -186,6 +206,38 @@ class SwarmNativeLlmBackendSecurityTests(unittest.TestCase):
             _base_url, api_key, model = _resolve_llm_config({})
         self.assertEqual(api_key, "env-key-789")
         self.assertEqual(model, sne.DEFAULT_MODEL)
+
+    def test_resolve_llm_config_non_dict_custom_providers_falls_back_to_env(self):
+        # A malformed custom_providers value (list of scalars, mapping, scalar)
+        # in the external config must not crash with AttributeError.
+        import automation.swarm_native_executor as sne
+        for raw in (
+            "custom_providers: [zenmux]\n",
+            "custom_providers: {zenmux: {api_key: k}}\n",
+            "custom_providers: 5\n",
+        ):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as td, \
+                    patch.dict(os.environ, {"ZENMUX_API_KEY": "env-key-cp"}, clear=False), \
+                    patch.object(sne.Path, "home", return_value=Path(td)):
+                hermes = Path(td) / ".hermes"
+                hermes.mkdir(parents=True, exist_ok=True)
+                (hermes / "config.yaml").write_text(raw, encoding="utf-8")
+                _base_url, api_key, model = _resolve_llm_config({})
+            self.assertEqual(api_key, "env-key-cp")
+            self.assertEqual(model, sne.DEFAULT_MODEL)
+
+    def test_llm_backend_non_dict_usage_does_not_crash(self):
+        # An OpenAI-compatible endpoint may return a non-object ``usage``;
+        # reading total_tokens must not raise out of the tool loop.
+        answer = {"choices": [{"message": {"content": '{"answer": "done"}'}}], "usage": ["x"]}
+        with patch.dict(os.environ, {"ZENMUX_API_KEY": "env-key"}), \
+                patch("automation.swarm_native_executor._chat_once", return_value=(answer, "")):
+            result = _run_llm_backend(
+                {"model_profile": {}},
+                {"required_role": "analyst", "task_type": "analyze"},
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["content"], "done")
 
     def test_llm_backend_trace_file_written_and_closed(self):
         # SWARM_EXECUTOR_TRACE must be written through a context manager: the

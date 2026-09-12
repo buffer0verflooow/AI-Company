@@ -100,6 +100,35 @@ class TVCRDailyReviewTests(unittest.TestCase):
         errors = validate_outputs(evidence, "report", payload)
         self.assertIn("technology-only", errors[0])
 
+    def test_validator_rejects_technology_only_proposal_as_bare_string(self):
+        # Untrusted LLM output may emit a bare string; the shape must not
+        # bypass the technology-only gate.
+        evidence = {"runs": [{"run_id": "r1", "outcome_status": "measured", "result_delivered": 0}]}
+        payload = {"proposals": [{
+            "title": "x", "success_metrics": [{"metric": "m"}],
+            "change_scopes": "technology", "evidence_run_ids": ["r1"],
+        }]}
+        errors = validate_outputs(evidence, "report", payload)
+        self.assertIn("technology-only", errors[0])
+
+    def test_non_dict_token_thresholds_do_not_crash(self):
+        pack = build_evidence_pack(
+            [{
+                "run_id": "article-1",
+                "product_line": "article-production",
+                "status": "completed",
+                "input_tokens": 10,
+                "outcome_status": "unmeasured",
+                "artifacts_json": "[]",
+                "evidence_json": "{}",
+            }],
+            review_day=date(2026, 7, 15),
+            period_start="2026-07-14T16:00:00+00:00",
+            period_end="2026-07-15T16:00:00+00:00",
+            thresholds=[],  # type: ignore[arg-type]
+        )
+        self.assertIsInstance(pack["signals"], list)
+
     def test_validator_rejects_unknown_cost_as_zero(self):
         evidence = {"runs": [{"run_id": "r1", "outcome_status": "measured", "cost_status": "unknown"}]}
         payload = {"proposals": [{

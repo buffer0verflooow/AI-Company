@@ -93,6 +93,7 @@ SKILL_REVIEW_MARKER = "update the skill library"
 HERMES_STATE_DB = Path("/home/pwn/.hermes/state.db")
 PRE_EVAL_MIN_PRIOR_MESSAGES = 3  # user+assistant messages before this dispatch
 PRE_EVAL_MIN_PRIOR_USER_MESSAGES = 1  # the current message doesn't count
+MAX_HOOK_STDIN_BYTES = 8 * 1024 * 1024  # bound the external pre_llm_call payload
 
 
 # ── Routing term tables ──────────────────────────────────────────────────────
@@ -706,7 +707,11 @@ def _is_internal_target(target_type: str, target: str) -> bool:
     if target_type == "apk":
         return True
     value = (target or "").lower()
-    if value.startswith(("/home/pwn/workspace/", "localhost")):
+    if value.startswith("/home/pwn/workspace/"):
+        return True
+    # Exact local name only: a prefix match would classify an external domain
+    # such as ``localhost.evil.com`` as internal and skip the scope gate.
+    if value == "localhost" or value.startswith("localhost:"):
         return True
     if target_type == "ip":
         try:
@@ -1569,7 +1574,9 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
         except Exception as exc:  # noqa: BLE001 -- a failing status query must not abort the session refresh
             updates.append(f"- 蜂群 {run_id[:8]} 状态查询失败：{exc}")
             continue
-        status = result.get("status", "unknown")
+        # ``status`` comes from the external swarmctl JSON: coerce it to text
+        # so a list/object can never reach the SQLite bind or set membership.
+        status = str(result.get("status") or "unknown")
         state.update(row["route_event_id"], status=status)
         if status == "completed" and not row["result_delivered"]:
             limit = _int_config(config, "result_context_chars", 6000)
@@ -2295,7 +2302,11 @@ def _handle_hook(
 
 
 def parse_hook_stdin() -> dict[str, Any]:
-    raw = sys.stdin.read()
+    # The payload is written by an external process: bound the read so a
+    # runaway writer to the hook pipe cannot exhaust memory.
+    raw = sys.stdin.read(MAX_HOOK_STDIN_BYTES + 1)
+    if len(raw) > MAX_HOOK_STDIN_BYTES:
+        raise ValueError(f"hook payload exceeds {MAX_HOOK_STDIN_BYTES} bytes")
     if not raw.strip():
         return {}
     value = json.loads(raw)

@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 
 from automation.knowledge_promotion_gateway import (
+    _tags,
+    _trust,
     approve,
     connect_gate,
     list_candidates,
@@ -230,6 +232,25 @@ class KnowledgePromotionTests(unittest.TestCase):
             )])
             counts = scan(source, gate)
             self.assertEqual(counts["needs_validation"], 1)
+
+
+class KnowledgeValueCoercionTests(unittest.TestCase):
+    """Non-TEXT tags/trust_vector DB values must degrade, not raise TypeError."""
+
+    def test_non_text_tags_degrade_to_empty_set(self):
+        for value in (5, 5.5, True, {"a": 1}, ["x"]):
+            with self.subTest(value=value):
+                self.assertEqual(_tags(value), set())
+
+    def test_non_text_trust_degrades_to_zero_scores(self):
+        for value in (5, 5.5, True, ["x"]):
+            with self.subTest(value=value):
+                trust = _trust(value)
+                self.assertEqual(
+                    set(trust),
+                    {"logic_soundness", "base_confidence", "cross_validation"},
+                )
+                self.assertEqual(set(trust.values()), {0.0})
 
 
 if __name__ == "__main__":

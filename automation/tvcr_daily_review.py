@@ -127,6 +127,10 @@ def build_evidence_pack(
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
     """Aggregate operating evidence while keeping observations separate from decisions."""
+    if not isinstance(thresholds, dict):
+        # A hand-edited config with a list/string for token_warning_thresholds
+        # must fall back to "no thresholds", not raise AttributeError.
+        thresholds = {}
     lines: dict[str, list[dict[str, Any]]] = defaultdict(list)
     signals: list[dict[str, Any]] = []
     evidence_runs: list[dict[str, Any]] = []
@@ -359,6 +363,10 @@ def validate_outputs(
         if not isinstance(metrics, list) or not metrics:
             errors.append(f"proposal {index} has no success metrics")
         scopes = proposal.get("change_scopes")
+        if isinstance(scopes, str):
+            # Untrusted LLM output may emit a bare string; normalize it so the
+            # technology-only gate below cannot be bypassed by shape.
+            scopes = [scopes]
         if scopes in (["technology"], ["code"]):
             errors.append(f"proposal {index} jumps directly to a technology-only change")
         evidence_ids = proposal.get("evidence_run_ids")

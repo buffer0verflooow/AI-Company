@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from automation.security_intel import build_report
+from automation.security_intel import build_report, parse_cisa_kev
 
 
 def _kev_items(count: int) -> list[dict]:
@@ -39,6 +39,59 @@ class KevSectionOrderingTests(unittest.TestCase):
         report = build_report([("cisa-kev: ok", _kev_items(20))], 0, now)
         header = report.split("## ⚠️ KEV 已利用漏洞")[1].splitlines()[0]
         self.assertIn("(20 条", header)
+
+    def test_kev_entry_with_missing_or_non_string_date_does_not_crash_report(self):
+        # ``published`` is the raw external dateAdded and may be absent/null or
+        # numeric; the report must still render the KEV section.
+        now = datetime.now(timezone.utc)
+        items = _kev_items(0)
+        items.append({
+            "source": "cisa-kev", "source_title": "CISA KEV", "cat": "漏洞情报",
+            "title": "CVE-2026-1 | vendor product",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-1",
+            "published": None, "summary": "", "authors": "",
+        })
+        items.append({
+            "source": "cisa-kev", "source_title": "CISA KEV", "cat": "漏洞情报",
+            "title": "CVE-2026-2 | vendor product",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-2",
+            "published": 20260811, "summary": "", "authors": "",
+        })
+        report = build_report([("cisa-kev: ok", items)], 0, now)
+        self.assertIn("KEV 已利用漏洞", report)
+        self.assertIn("CVE-2026-1", report)
+
+
+class KevParserRobustnessTests(unittest.TestCase):
+    """Malformed-but-valid JSON from the external KEV feed must degrade to no
+    items instead of raising out of the parser."""
+
+    def _src(self) -> dict:
+        return {"id": "cisa-kev", "title": "CISA KEV", "cat": "漏洞情报", "max": 15}
+
+    def test_non_object_root_returns_empty(self):
+        now = datetime.now(timezone.utc)
+        for body in ('[]', '"text"', '3', 'null', 'true'):
+            with self.subTest(body=body):
+                self.assertEqual(parse_cisa_kev(body, self._src(), now), [])
+
+    def test_non_list_vulnerabilities_returns_empty(self):
+        now = datetime.now(timezone.utc)
+        for body in ('{"vulnerabilities": null}', '{"vulnerabilities": {}}',
+                     '{"vulnerabilities": "nope"}', '{}'):
+            with self.subTest(body=body):
+                self.assertEqual(parse_cisa_kev(body, self._src(), now), [])
+
+    def test_non_object_entries_are_skipped(self):
+        now = datetime.now(timezone.utc)
+        body = '{"vulnerabilities": [1, "bad", null, {"cveID": "CVE-2026-1"}]}'
+        items = parse_cisa_kev(body, self._src(), now)
+        self.assertEqual(len(items), 1)
+        self.assertIn("CVE-2026-1", items[0]["title"])
+
+    def test_invalid_json_returns_empty(self):
+        now = datetime.now(timezone.utc)
+        self.assertEqual(parse_cisa_kev("<html>not json</html>", self._src(), now), [])
 
 
 if __name__ == "__main__":

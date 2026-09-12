@@ -659,8 +659,13 @@ def sync_operational_runs(
         if source is not None:
             source.row_factory = sqlite3.Row
             try:
-                for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
-                    router_rows[str(row["run_id"])] = dict(row)
+                try:
+                    for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
+                        router_rows[str(row["run_id"])] = dict(row)
+                except sqlite3.Error:
+                    # A DB that exists but lacks route_events (fresh/rotated/
+                    # archived) or is corrupt must degrade to no evidence.
+                    router_rows = {}
             finally:
                 source.close()
 
@@ -1512,10 +1517,14 @@ def _load_json_list(value: Any) -> list[Any]:
 
 
 def _proposal_change_scopes(row: sqlite3.Row) -> set[str]:
-    try:
-        return {str(scope).strip().lower() for scope in json.loads(row["change_scopes_json"] or "[]") if str(scope).strip()}
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return set()
+    # Reuse _load_json_list so a valid-but-non-array cell (e.g. a JSON object
+    # or bare string) cannot be iterated as keys/characters and silently
+    # produce bogus change scopes.
+    return {
+        str(scope).strip().lower()
+        for scope in _load_json_list(row["change_scopes_json"])
+        if str(scope).strip()
+    }
 
 
 def approved_change_scopes(db: sqlite3.Connection) -> set[str]:
@@ -1883,8 +1892,12 @@ def reap_stale_runs(
         if source is not None:
             source.row_factory = sqlite3.Row
             try:
-                for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
-                    runner_pids[str(row["run_id"])] = row["runner_pid"]
+                try:
+                    for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
+                        runner_pids[str(row["run_id"])] = row["runner_pid"]
+                except sqlite3.Error:
+                    # Same rotation/corruption tolerance as the sync path above.
+                    runner_pids = {}
             finally:
                 source.close()
 
@@ -1964,11 +1977,17 @@ def latest_origin(router_db: Path = DEFAULT_ROUTER_DB) -> dict[str, str]:
         return {}
     db.row_factory = sqlite3.Row
     try:
-        row = db.execute(
-            """SELECT delivery_platform,delivery_chat_id,delivery_thread_id,delivery_user_id
-               FROM route_events WHERE delivery_platform<>'' AND delivery_chat_id<>''
-               ORDER BY updated_at DESC LIMIT 1"""
-        ).fetchone()
+        try:
+            row = db.execute(
+                """SELECT delivery_platform,delivery_chat_id,delivery_thread_id,delivery_user_id
+                   FROM route_events WHERE delivery_platform<>'' AND delivery_chat_id<>''
+                   ORDER BY updated_at DESC LIMIT 1"""
+            ).fetchone()
+        except sqlite3.Error:
+            # A DB that exists but lacks route_events (fresh/rotated/archived)
+            # or is locked/corrupt must degrade to "no origin", not kill the
+            # read-only digest or strand the operator cycle.
+            return {}
         if not row:
             return {}
         return {

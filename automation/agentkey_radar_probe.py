@@ -393,10 +393,10 @@ def run_probe(config: dict) -> dict:
         return {"status": "no_themes", "signals": 0}
 
     run_id = f"AK-RUN-{uuid.uuid4().hex[:12]}"
-    run_root = Path(config.get("run_root", str(COMPANY_ROOT / "marketing" / "runtime" / "market-radar")))
+    run_root = Path(config.get("run_root") or str(COMPANY_ROOT / "marketing" / "runtime" / "market-radar"))
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    db_path = Path(config.get("market_db", str(DEFAULT_DB)))
+    db_path = Path(config.get("market_db") or str(DEFAULT_DB))
     started = utc_now()
 
     db = connect(db_path)

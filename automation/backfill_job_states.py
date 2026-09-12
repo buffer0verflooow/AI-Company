@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 try:
+    from ._safe_io import read_text_limited_nofollow
     from .content_job_state import (
         log_event,
         read_lifecycle,
@@ -16,6 +17,7 @@ try:
         write_lifecycle,
     )
 except ImportError:  # direct script execution
+    from _safe_io import read_text_limited_nofollow
     from content_job_state import (
         log_event,
         read_lifecycle,
@@ -39,7 +41,12 @@ def main() -> int:
                 skipped += 1
             continue
         try:
-            status = json.loads(status_path.read_text(encoding='utf-8', errors='replace'))
+            # status.json lives in the worker-writable job tree: bound the
+            # read and refuse symlinks exactly like content_job_state does,
+            # so a huge file or planted link cannot stall/OOM the backfill.
+            status = json.loads(read_text_limited_nofollow(
+                status_path, max_bytes=2 * 1024 * 1024, errors="replace",
+            ))
         except (OSError, ValueError):
             skipped += 1
             continue

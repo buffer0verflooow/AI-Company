@@ -596,7 +596,9 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
             title = it["title"].replace("|", "｜")
             src = it.get("source_title", "")
             if it.get("published"):
-                lines.append(f"- [{title}]({it['url']}) ({it['published'][:10]} · {src})")
+                # ``published`` is the raw external feed date: it can be a
+                # number, so coerce before slicing or the report dies here.
+                lines.append(f"- [{title}]({it['url']}) ({str(it.get('published') or '')[:10]} · {src})")
             else:
                 lines.append(f"- [{title}]({it['url']}) ({src})")
         lines.append("")
@@ -625,7 +627,8 @@ def build_report(results: list[tuple[str, list[dict[str, Any]]]], new_count: int
             title = it["title"].replace("|", "｜")
             src = it.get("source_title", "")
             if it.get("published"):
-                lines.append(f"- [{title}]({it['url']}) ({it['published'][:10]} · {src})")
+                # Same external-date coercion as the KEV section above.
+                lines.append(f"- [{title}]({it['url']}) ({str(it.get('published') or '')[:10]} · {src})")
             else:
                 lines.append(f"- [{title}]({it['url']}) ({src})")
         lines.append("")

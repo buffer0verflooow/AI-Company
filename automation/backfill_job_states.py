@@ -31,6 +31,11 @@ JOBS_DIR = Path('/home/pwn/workspace/company/operations/runtime/content-jobs')
 def main() -> int:
     done = 0
     skipped = 0
+    # A missing content-jobs directory (fresh host/cleanup/wrong mount) means
+    # there is nothing to backfill; it must not crash the cron.
+    if not JOBS_DIR.is_dir():
+        print(f"nothing to backfill: {JOBS_DIR} does not exist")
+        return 0
     for job_dir in sorted(JOBS_DIR.iterdir()):
         if not job_dir.is_dir():
             continue

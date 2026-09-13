@@ -629,7 +629,7 @@ def _apportion_shared_sessions(rows: list[dict[str, Any]]) -> None:
                 evidence = json.loads(row.get("evidence_json") or "{}")
                 if not isinstance(evidence, dict):
                     evidence = {}
-            except json.JSONDecodeError:
+            except (TypeError, ValueError, json.JSONDecodeError):
                 evidence = {}
             evidence["session_apportioned"] = {
                 "worker_session_id": session_id, "runs_sharing": n,
@@ -849,7 +849,7 @@ def reprice_runs(
                 evidence = json.loads(row["evidence_json"] or "{}")
                 if not isinstance(evidence, dict):
                     evidence = {}
-            except json.JSONDecodeError:
+            except (TypeError, ValueError, json.JSONDecodeError):
                 evidence = {}
             evidence["pricing"] = update.pop("_pricing")
             if not dry_run:
@@ -914,7 +914,7 @@ def _run_article_titles(run: dict[str, Any]) -> list[str]:
     """
     try:
         artifacts = json.loads(run.get("artifacts_json") or "[]")
-    except json.JSONDecodeError:
+    except (TypeError, ValueError, json.JSONDecodeError):
         return []
     if not isinstance(artifacts, list):
         # The column is written by sibling subsystems; a valid-but-non-array

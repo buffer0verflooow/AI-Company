@@ -425,11 +425,16 @@ def _contains_any(text: str, terms: Iterable[str]) -> int:
     return sum(1 for term in terms if str(term).lower() in lowered)
 
 
+def _term_list(value: Any) -> list[Any]:
+    """Coerce a hand-edited keyword config field to a list; a scalar -> []."""
+    return list(value) if isinstance(value, (list, tuple, set)) else []
+
+
 def score_signal(record: dict[str, Any], query: dict[str, Any], config: dict[str, Any], *, now: datetime | None = None) -> dict[str, float]:
     current = now or datetime.now(timezone.utc)
     haystack = f"{record['title']} {record['snippet']}"
-    strategic = list(config.get("strategic_keywords") or []) + list(query.get("keywords") or [])
-    commercial = list(config.get("commercial_keywords") or [])
+    strategic = _term_list(config.get("strategic_keywords")) + _term_list(query.get("keywords"))
+    commercial = _term_list(config.get("commercial_keywords"))
     relevance = min(35.0, 8.0 + _contains_any(haystack, strategic) * 4.5)
     commercial_score = min(25.0, _contains_any(haystack, commercial) * 4.0)
     published = record.get("published_at")
@@ -463,11 +468,11 @@ def signal_eligible(record: dict[str, Any], query: dict[str, Any], scores: dict[
     if scores["total"] < _float_config(config, "minimum_signal_score", 42):
         return False
     text = f"{record['title']} {record['snippet']}".lower()
-    required_any = [str(term).lower() for term in query.get("required_any") or []]
+    required_any = [str(term).lower() for term in _term_list(query.get("required_any"))]
     if required_any and not any(term in text for term in required_any):
         return False
-    for group in query.get("required_all_groups") or []:
-        terms = [str(term).lower() for term in group]
+    for group in _term_list(query.get("required_all_groups")):
+        terms = [str(term).lower() for term in _term_list(group)]
         if terms and not any(term in text for term in terms):
             return False
     return True

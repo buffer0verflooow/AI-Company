@@ -381,7 +381,12 @@ def _stored_decision(json_text: Any) -> RouteDecision | None:
     if not isinstance(parsed, dict):
         return None
     try:
-        return RouteDecision(**parsed)
+        decision = RouteDecision(**parsed)
+        # ``RouteDecision`` does not type-check: a corrupt stored row with a
+        # non-numeric confidence must be rejected here, not crash the numeric
+        # formatting in build_context later.
+        float(decision.confidence)
+        return decision
     except (TypeError, ValueError):
         return None
 
@@ -724,6 +729,12 @@ def _is_internal_target(target_type: str, target: str) -> bool:
 
 def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> RouteDecision:
     text = " ".join((message or "").split())
+    # A hand-edited scalar allowlist must not iterate into characters or raise
+    # TypeError out of classification.
+    if isinstance(authorized_targets, str):
+        authorized_targets = [authorized_targets]
+    elif not isinstance(authorized_targets, (list, tuple, set)):
+        authorized_targets = []
 
     # Keep the pure classifier safe when it is used for replay/CLI diagnostics
     # without going through handle_hook's envelope gate.
@@ -1026,6 +1037,10 @@ def classify_with_fallback(
     try:
         llm_confidence = float(result.get("confidence") or 0.0)
     except (TypeError, ValueError):
+        return decision
+    # ``json.loads`` accepts NaN/Infinity and ``nan < threshold`` is False, so
+    # a malformed reply would otherwise be accepted as high-confidence.
+    if not math.isfinite(llm_confidence):
         return decision
     prefix = _LLM_FALLBACK_PREFIX.get(route)
     threshold = _float_config(config, "llm_fallback_confidence", 0.5)

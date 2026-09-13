@@ -108,19 +108,22 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertEqual(selected[0]["action_kind"], "internal_mission")
 
     def test_worker_contract_requires_non_destructive_artifact_validation(self):
-        prompt = build_worker_prompt({
-            "title": "测试", "product_line": "company", "action_kind": "internal_mission",
-            "description": "生成内部脚本", "evidence_json": "{}",
-        }, Path(tempfile.mkdtemp(prefix="operator-run-")))
+        # TemporaryDirectory (not mkdtemp) so repeated runs cannot leak dirs.
+        with tempfile.TemporaryDirectory(prefix="operator-run-") as td:
+            prompt = build_worker_prompt({
+                "title": "测试", "product_line": "company", "action_kind": "internal_mission",
+                "description": "生成内部脚本", "evidence_json": "{}",
+            }, Path(td))
         self.assertIn("非破坏性验证", prompt)
         self.assertIn("缺少依赖时不得声称", prompt)
         self.assertIn("禁止填充 actual", prompt)
 
     def test_market_worker_contract_treats_external_content_as_untrusted(self):
-        prompt = build_worker_prompt({
-            "title": "市场验证", "product_line": "company", "action_kind": "market_validation",
-            "description": "验证需求", "evidence_json": "{}",
-        }, Path(tempfile.mkdtemp(prefix="operator-market-")))
+        with tempfile.TemporaryDirectory(prefix="operator-market-") as td:
+            prompt = build_worker_prompt({
+                "title": "市场验证", "product_line": "company", "action_kind": "market_validation",
+                "description": "验证需求", "evidence_json": "{}",
+            }, Path(td))
         self.assertIn("market-opportunity-brief.md", prompt)
         self.assertIn("至少打开并核对两个独立来源", prompt)
         self.assertIn("不得写成“已验证来源”", prompt)

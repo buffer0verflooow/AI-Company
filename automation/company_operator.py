@@ -537,9 +537,15 @@ def discover_opportunities(
         for mission in config.get("standing_missions") or []:
             if not isinstance(mission, dict) or not mission.get("enabled", True):
                 continue
+            # A hand-edited mission missing a required field must be skipped,
+            # not abort the whole discovery pass with a KeyError.
+            mission_id = str(mission.get("id") or "").strip()
+            title = str(mission.get("title") or "").strip()
+            prompt = str(mission.get("prompt") or "").strip()
+            if not mission_id or not title or not prompt:
+                continue
             cadence = max(1, _int_config(mission, "cadence_hours", 24))
             bucket = _mission_bucket(current, cadence)
-            mission_id = str(mission["id"])
             active = db.execute(
                 """SELECT 1 FROM autonomy_opportunities
                    WHERE mission_id=? AND status IN ('open','running','waiting_approval') LIMIT 1""",
@@ -553,8 +559,8 @@ def discover_opportunities(
                 "source_ref": bucket,
                 "mission_id": mission_id,
                 "product_line": mission.get("product_line", "company"),
-                "title": str(mission["title"]),
-                "description": str(mission["prompt"]),
+                "title": title,
+                "description": prompt,
                 "action_kind": "internal_mission",
                 "risk_level": str(mission.get("risk_level", "low")),
                 "requires_approval": False,
@@ -575,7 +581,13 @@ def select_executable(
     limit: int | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    allowed_risks = {str(value) for value in (config.get("auto_execute_risk_levels") or ["low"])}
+    raw_risks = config.get("auto_execute_risk_levels")
+    # A hand-edited scalar must not iterate into characters or raise TypeError.
+    if isinstance(raw_risks, str):
+        raw_risks = [raw_risks]
+    elif not isinstance(raw_risks, (list, tuple, set)):
+        raw_risks = ["low"]
+    allowed_risks = {str(value) for value in raw_risks}
     minimum = _float_config(config, "minimum_score", 0)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:

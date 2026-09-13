@@ -341,6 +341,10 @@ def _hermes_cost_snapshot(
         result["confirmed_cost_usd"] = round(result["confirmed_cost_usd"], 6)
         result["estimated_cost_usd"] = round(result["estimated_cost_usd"], 6)
         return result
+    except sqlite3.Error:
+        # A corrupt/locked Hermes DB must degrade to an empty snapshot instead
+        # of aborting the whole --sync cron (siblings catch sqlite3.Error too).
+        return result
     finally:
         db.close()
 

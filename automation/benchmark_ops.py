@@ -75,7 +75,7 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
         # BASE_URL is set by the operator via BENCHMARK_BASE_URL (default https),
         # never derived from untrusted input — scheme is operator-controlled.
         with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310
-            body = resp.read().decode()
+            body = resp.read().decode(errors="replace")
             if body.strip():
                 try:
                     parsed = json.loads(body)
@@ -90,7 +90,12 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
                 return {"http": resp.status, **parsed}
             return {"http": resp.status}
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
+        try:
+            body = exc.read().decode(errors="replace")
+        finally:
+            # The error response holds a socket/fd; repeated 4xx/5xx must not
+            # leak them for the life of the process.
+            exc.close()
         try:
             parsed = json.loads(body) if body.strip() else {}
         except json.JSONDecodeError:
@@ -115,11 +120,13 @@ def get_rows(token: str) -> list[dict]:
         )
     # 响应体本身是数组(platform 返回 list),或包在字段里——兼容两种
     if isinstance(resp, list):
-        return resp
+        return [row for row in resp if isinstance(row, dict)]
     for key in ("challenges", "data", "items"):
         val = resp.get(key)
         if isinstance(val, list):
-            return val
+            # A platform array may contain non-object elements; downstream
+            # code calls .get()/[key] on every row, so drop them here.
+            return [row for row in val if isinstance(row, dict)]
     raise SystemExit(f"challenges 响应结构无法解析: {str(resp)[:200]}")
 
 
@@ -132,19 +139,28 @@ def find_row(rows: list[dict], code: str) -> dict | None:
     return None
 
 
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def summarize(rows: list[dict]) -> tuple[int, int, int]:
     """(已完成题数, 总题数, 累计得分)。得分为已通关题 total_score 之和。"""
     done = sum(1 for r in rows if r.get("is_completed"))
     total = len(rows)
-    score = sum(int(r.get("total_score") or 0) for r in rows if r.get("is_completed"))
+    score = sum(_safe_int(r.get("total_score")) for r in rows if r.get("is_completed"))
     return done, total, score
 
 
 def active_codes(rows: list[dict]) -> list[str]:
     return [
-        r["unique_code"]
+        str(r["unique_code"])
         for r in rows
-        if r.get("container_status") == "available"
+        if isinstance(r, dict)
+        and r.get("container_status") == "available"
+        and r.get("unique_code")
     ]
 
 
@@ -197,7 +213,7 @@ def cmd_list(token: str) -> int:
     rows = get_rows(token)
     done, total, score = summarize(rows)
     print(f"进度: {done}/{total} 通关, 累计得分(近似) {score}")
-    for row in sorted(rows, key=lambda r: r.get("unique_code", "")):
+    for row in sorted(rows, key=lambda r: str(r.get("unique_code") or "")):
         flags = (
             f"{row.get('correct_flag_count')}/{row.get('total_flag_count')}"
             if row.get("flag_count") or row.get("correct_flag_count") is not None

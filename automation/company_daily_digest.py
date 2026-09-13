@@ -14,7 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from ._safe_io import read_text_limited, sqlite_uri
@@ -232,7 +232,12 @@ def _failure_clusters(
 
 
 def build_digest(config: dict[str, Any], *, now: datetime | None = None) -> tuple[str, dict[str, Any]]:
-    zone = ZoneInfo(str(config.get("timezone") or DEFAULT_TIMEZONE))
+    try:
+        zone = ZoneInfo(str(config.get("timezone") or DEFAULT_TIMEZONE))
+    except (ZoneInfoNotFoundError, ValueError):
+        # A hand-edited/typo IANA key must fall back to the default timezone
+        # rather than kill the whole digest cron.
+        zone = ZoneInfo(DEFAULT_TIMEZONE)
     current = now.astimezone(zone) if now else datetime.now(zone)
     operations_db = Path(str(config.get("operations_db") or COMPANY_ROOT / "operations/runtime/operations_control.db"))
     router_db = Path(str(config.get("state_db") or COMPANY_ROOT / "operations/runtime/company_router.db"))

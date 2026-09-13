@@ -63,6 +63,9 @@ SWARM_REPO = os.environ.get("SWARM_REPO", "/home/pwn/workspace/research/swarm-kn
 MAX_TOOL_ROUNDS = 14
 # Per-result cap for MCP tool evidence stored in the LLM conversation.
 MAX_TOOL_RESULT_CHARS = 200_000
+# Bound the LLM HTTP body so a runaway/misbehaving endpoint cannot exhaust
+# executor memory (the request itself is already timeout-bounded).
+MAX_LLM_RESPONSE_BYTES = 32 * 1024 * 1024
 _TOOL_TRUNCATION_MARKER = f"\n...[工具输出超过 {MAX_TOOL_RESULT_CHARS} 字符, 已截断]"
 
 
@@ -156,8 +159,16 @@ def _run_mcp_tool(server: str, tool: str, args: dict, timeout: int = 400) -> str
         return _bounded_tool_output(f"[工具输出非 JSON 对象] {proc.stdout[:500]}")
     if not payload.get("success"):
         return _bounded_tool_output(f"[工具错误] {payload.get('error') or payload}")
-    contents = payload.get("content") or []
-    texts = [c.get("text", "") for c in contents if isinstance(c, dict)]
+    # MCP tools may return a bare string for ``content`` instead of a list of
+    # parts; a string must not be iterated as characters and a non-iterable
+    # must not raise and be miscounted as a tool failure.
+    contents = payload.get("content")
+    if isinstance(contents, str):
+        texts = [contents]
+    elif isinstance(contents, list):
+        texts = [c.get("text", "") for c in contents if isinstance(c, dict)]
+    else:
+        texts = []
     result = "\n".join(texts).strip()
     # Tool evidence is appended verbatim into the LLM conversation and re-sent
     # on every later round; bound each result so a huge decompile/grep output
@@ -290,9 +301,12 @@ def _chat_once(base_url: str, api_key: str, model: str,
     )
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:  # nosec B310 -- scheme restricted to http/https above
-            return json.loads(resp.read()), ""
+            body = resp.read(MAX_LLM_RESPONSE_BYTES + 1)
+        if len(body) > MAX_LLM_RESPONSE_BYTES:
+            return None, f"LLM response exceeds {MAX_LLM_RESPONSE_BYTES} bytes"
+        return json.loads(body), ""
     except urllib.error.HTTPError as exc:
-        return None, f"LLM HTTP {exc.code}: {exc.read()[:300]!r}"
+        return None, f"LLM HTTP {exc.code}: {exc.read(300)[:300]!r}"
     except Exception as exc:  # noqa: BLE001 -- LLM network failure -> error string, never crash the loop
         return None, f"LLM call failed: {exc}"
 

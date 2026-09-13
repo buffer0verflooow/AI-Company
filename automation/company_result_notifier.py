@@ -262,7 +262,7 @@ def mirror_tvcr_message(config: dict[str, Any], origin: dict[str, str], message:
 
 
 def runner_is_alive(pid: int | None, run_id: str) -> bool:
-    if not pid or pid <= 0:
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
@@ -272,7 +272,7 @@ def runner_is_alive(pid: int | None, run_id: str) -> bool:
 
 
 def content_runner_is_alive(pid: int | None, run_id: str) -> bool:
-    if not pid or pid <= 0:
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
@@ -401,7 +401,14 @@ def list_terminal_deliveries(config: dict[str, Any], limit: int = 50) -> list[di
 
 
 def _terminal_reason(config: dict[str, Any], origin: dict[str, str]) -> str:
-    allowed = {str(item).lower() for item in (config.get("proactive_delivery_platforms") or [])}
+    raw_platforms = config.get("proactive_delivery_platforms") or []
+    # A hand-edited non-list (number/bool) would raise TypeError and abort the
+    # whole delivery tick; a bare string would iterate into single characters.
+    if isinstance(raw_platforms, str):
+        raw_platforms = [raw_platforms]
+    elif not isinstance(raw_platforms, (list, tuple, set)):
+        raw_platforms = []
+    allowed = {str(item).lower() for item in raw_platforms}
     if allowed and origin.get("platform", "").lower() not in allowed:
         return f"delivery platform not allowlisted: {origin.get('platform', '')}"
     return ""
@@ -778,8 +785,13 @@ def recover_failed_cron_deliveries(config: dict[str, Any]) -> int:
     db_path = _operations_db_path(config)
     if db_path is None:
         return 0
-    allow = config.get("cron_delivery_recovery_jobs") or ["company-daily-auto-fix"]
-    allowed = {str(item) for item in allow}
+    raw_allow = config.get("cron_delivery_recovery_jobs")
+    # A hand-edited non-list must not raise TypeError out of the recovery path.
+    if isinstance(raw_allow, str):
+        raw_allow = [raw_allow]
+    elif not isinstance(raw_allow, (list, tuple, set)):
+        raw_allow = ["company-daily-auto-fix"]
+    allowed = {str(item) for item in raw_allow}
     origin = _management_origin(config)
     queued = 0
     for job in _read_cron_jobs(config):

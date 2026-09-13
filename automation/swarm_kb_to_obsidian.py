@@ -103,7 +103,7 @@ def fetch_top_entries(db_path: Path) -> list[dict]:
             "level": r["level"],
             "type": r["knowledge_type"],
             "title": r["title"] or "(无标题)",
-            "content": (r["content"] or "")[:500],
+            "content": str(r["content"] or "")[:500],
             "agent": r["source_agent"] or "unknown",
             "tags": tags or [],
             "trust": trust,

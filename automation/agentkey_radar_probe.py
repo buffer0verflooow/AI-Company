@@ -362,7 +362,9 @@ def _score_signal(item: dict, theme: dict) -> dict:
 def extract_themes(config: dict) -> dict:
     """Extract unique themes from the market radar config queries."""
     topics: dict = {}
-    for q in config.get("queries", []):
+    # An explicit JSON ``null`` for ``queries`` must degrade to "no queries"
+    # instead of making the ``for`` raise TypeError and abort the probe.
+    for q in config.get("queries") or []:
         if not isinstance(q, dict):
             raise TypeError("each agentkey radar query must be an object")
         theme = str(q.get("theme") or "").strip()

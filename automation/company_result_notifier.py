@@ -200,12 +200,18 @@ def deliver_message(config: dict[str, Any], origin: dict[str, str], message: str
         pconfig = gateway_config.platforms.get(platform)
         if not pconfig or not pconfig.enabled:
             return False, f"platform {origin['platform']} is not enabled"
-        result = asyncio.run(_send_to_platform(
-            platform,
-            pconfig,
-            origin["chat_id"],
-            message,
-            thread_id=origin.get("thread_id") or None,
+        # A hung platform sender (DNS/TLS/plugin) must not stall the one-minute
+        # delivery tick and every queued notification behind it; bound the call
+        # and let the existing handler record it as a normal failure.
+        result = asyncio.run(asyncio.wait_for(
+            _send_to_platform(
+                platform,
+                pconfig,
+                origin["chat_id"],
+                message,
+                thread_id=origin.get("thread_id") or None,
+            ),
+            timeout=_int_config(config, "delivery_timeout_seconds", 30),
         ))
     except Exception as exc:  # noqa: BLE001 -- a broken sender plugin must not stop the tick
         return False, f"{exc.__class__.__name__}: {exc}"
@@ -395,7 +401,10 @@ def list_terminal_deliveries(config: dict[str, Any], limit: int = 50) -> list[di
                     continue
                 if isinstance(value, dict):
                     records.append(value)
-    except OSError:
+    except OSError as exc:
+        # An unreadable dead-letter file must not look like "nothing failed"
+        # on the operator's only locally surfaced recovery view.
+        LOGGER.warning("could not read terminal-delivery file %s: %s", path, exc, exc_info=True)
         return []
     return list(reversed(records))
 
@@ -510,7 +519,10 @@ def _management_origin(config: dict[str, Any]) -> dict[str, str]:
     router_db = Path(str(config.get("router_db") or config.get("state_db") or ""))
     try:
         return latest_origin(router_db)
-    except (OSError, ValueError, sqlite3.Error):
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        # A broken router DB would otherwise surface only as the benign
+        # "no management delivery target" recorded by the caller.
+        LOGGER.warning("management-origin lookup failed in %s: %s", router_db, exc, exc_info=True)
         return {}
 
 
@@ -526,7 +538,9 @@ def _read_cron_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
     path = Path(configured) if configured else Path("/home/pwn/.hermes/cron/jobs.json")
     try:
         payload = json.loads(read_text_limited(path, max_bytes=5 * 1024 * 1024))
-    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        # Recovery silently becoming a no-op must be visible to the operator.
+        LOGGER.warning("could not read cron jobs file %s: %s", path, exc, exc_info=True)
         return []
     if isinstance(payload, dict):
         payload = payload.get("jobs")
@@ -645,7 +659,8 @@ def _cron_recovery_payload(
                     "FROM tvcr_reviews WHERE review_id=?",
                     (review_id,),
                 ).fetchone()
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
+                LOGGER.warning("stored TVCR delivery target lookup failed in %s: %s", operations_db, exc, exc_info=True)
                 row = None
             finally:
                 if db is not None:
@@ -713,7 +728,8 @@ def _sync_tvcr_review_from_outbox(config: dict[str, Any], row: dict[str, Any]) -
             "SELECT delivered,delivery_attempts FROM tvcr_reviews WHERE review_id=?",
             (review_id,),
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("tvcr outbox projection read failed for review %s: %s", review_id, exc, exc_info=True)
         current = None
     finally:
         if db is not None:

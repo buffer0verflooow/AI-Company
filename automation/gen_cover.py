@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -55,6 +56,25 @@ def _find_font(size: int = 32) -> ImageFont.FreeTypeFont:
                 continue
     # Fallback to default
     return ImageFont.load_default()
+
+
+def _atomic_save(image: Image.Image, path: Path, fmt: str = "PNG") -> None:
+    """Save *image* to *path* atomically via a same-directory temporary file.
+
+    Readers of a generated cover (the publish step) must never observe a
+    half-written PNG, and two concurrent generations for the same slug must not
+    interleave bytes.  ``os.replace`` is atomic on the same filesystem.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".png")
+    os.close(fd)
+    temporary_path = Path(temporary)
+    try:
+        image.save(temporary_path, fmt)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _title_slug(title: str) -> str:
@@ -194,7 +214,7 @@ def generate_cover(title: str, output_dir: str, *,
     thumb_path = out_dir / f"cover-{slug}-thumb.png"
 
     try:
-        img.save(cover_path, "PNG")
+        _atomic_save(img, cover_path)
 
         # ── Thumbnail ──────────────────────────────────────────────────────
         thumb = img.copy()
@@ -207,11 +227,11 @@ def generate_cover(title: str, output_dir: str, *,
                     offset_x = (thumb_size[0] - thumb.size[0]) // 2
                     offset_y = (thumb_size[1] - thumb.size[1]) // 2
                     canvas.paste(thumb, (offset_x, offset_y))
-                    canvas.save(thumb_path, "PNG")
+                    _atomic_save(canvas, thumb_path)
                 finally:
                     canvas.close()
             else:
-                thumb.save(thumb_path, "PNG")
+                _atomic_save(thumb, thumb_path)
         finally:
             thumb.close()
     finally:

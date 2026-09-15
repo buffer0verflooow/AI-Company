@@ -375,7 +375,8 @@ def _find_worker_session(hermes_db: Path, job_dir: Path) -> dict[str, Any]:
         return {}
     try:
         db = sqlite3.connect(sqlite_uri(hermes_db, mode="ro"), uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("worker-session lookup could not open %s: %s", hermes_db, exc, exc_info=True)
         return {}
     db.row_factory = sqlite3.Row
     try:
@@ -386,7 +387,8 @@ def _find_worker_session(hermes_db: Path, job_dir: Path) -> dict[str, Any]:
             (f"%产物目录：{job_dir}%",),
         ).fetchone()
         return dict(session) if session else {}
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("worker-session lookup failed in %s: %s", hermes_db, exc, exc_info=True)
         return {}
     finally:
         db.close()
@@ -654,7 +656,8 @@ def sync_operational_runs(
     if router_db.is_file():
         try:
             source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            LOGGER.warning("route-event lookup could not open %s: %s", router_db, exc, exc_info=True)
             source = None
         if source is not None:
             source.row_factory = sqlite3.Row
@@ -662,9 +665,10 @@ def sync_operational_runs(
                 try:
                     for row in source.execute("SELECT * FROM route_events WHERE run_id<>''"):
                         router_rows[str(row["run_id"])] = dict(row)
-                except sqlite3.Error:
+                except sqlite3.Error as exc:
                     # A DB that exists but lacks route_events (fresh/rotated/
                     # archived) or is corrupt must degrade to no evidence.
+                    LOGGER.warning("route-event read failed in %s: %s", router_db, exc, exc_info=True)
                     router_rows = {}
             finally:
                 source.close()
@@ -1688,11 +1692,15 @@ def apply_user_decision(
         if proposal["status"] != "pending_approval":
             return {"ok": False, "message": f"提案 {proposal['proposal_id']} 当前状态为 {proposal['status']}，不能重复决策。"}
         now = utc_now()
-        db.execute(
+        # Guard on the observed status so a concurrent approve/reject (or an
+        # auto-approval policy run) cannot be silently flipped by a stale read.
+        cur = db.execute(
             """UPDATE improvement_proposals SET status=?,decided_by=?,decided_at=?,decision_note=?,updated_at=?
-               WHERE proposal_id=?""",
+               WHERE proposal_id=? AND status='pending_approval'""",
             (decision, actor, now, note or message[:1000], now, proposal["proposal_id"]),
         )
+        if cur.rowcount != 1:
+            return {"ok": False, "message": f"提案 {proposal['proposal_id']} 已被并发决策，请刷新后重试。"}
         experiment_id = ""
         if decision == "approved":
             experiment_id = _create_experiment_for_proposal(db, proposal, now)
@@ -1769,10 +1777,20 @@ def update_experiment(
         if conclusion:
             fields["conclusion"] = conclusion
         sql = ",".join(f"{key}=?" for key in fields)
-        # Field names come from the fixed mapping built above.
-        cur = db.execute(f"UPDATE operating_experiments SET {sql} WHERE experiment_id=?", (*fields.values(), experiment_id))  # nosec B608 -- fixed internal keys
+        # Field names come from the fixed mapping built above.  Without a
+        # status guard the deferred SELECT above takes no lock, so two
+        # concurrent transitions could both pass the check and the later
+        # UPDATE would silently overwrite the first.  force=True keeps its
+        # documented escape hatch.
+        if force:
+            where = "experiment_id=?"
+            params: tuple[Any, ...] = (*fields.values(), experiment_id)
+        else:
+            where = "experiment_id=? AND status=?"
+            params = (*fields.values(), experiment_id, cur_status)
+        cur = db.execute(f"UPDATE operating_experiments SET {sql} WHERE {where}", params)  # nosec B608 -- fixed internal keys
         if cur.rowcount != 1:
-            raise ValueError(f"unknown experiment: {experiment_id}")
+            raise ValueError(f"unknown or concurrently changed experiment: {experiment_id}")
         db.commit()
     finally:
         db.close()
@@ -1887,7 +1905,8 @@ def reap_stale_runs(
     if router_db.is_file():
         try:
             source = sqlite3.connect(sqlite_uri(router_db, mode="ro"), uri=True)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            LOGGER.warning("runner-pid lookup could not open %s: %s", router_db, exc, exc_info=True)
             source = None
         if source is not None:
             source.row_factory = sqlite3.Row
@@ -1895,8 +1914,9 @@ def reap_stale_runs(
                 try:
                     for row in source.execute("SELECT run_id, runner_pid FROM route_events WHERE run_id<>''"):
                         runner_pids[str(row["run_id"])] = row["runner_pid"]
-                except sqlite3.Error:
+                except sqlite3.Error as exc:
                     # Same rotation/corruption tolerance as the sync path above.
+                    LOGGER.warning("runner-pid read failed in %s: %s", router_db, exc, exc_info=True)
                     runner_pids = {}
             finally:
                 source.close()

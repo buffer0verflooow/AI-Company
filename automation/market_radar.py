@@ -220,7 +220,14 @@ def connect(path: Path = DEFAULT_DB) -> sqlite3.Connection:
         )
         signal_columns = {row[1] for row in db.execute("PRAGMA table_info(market_signals)")}
         if "eligible_for_pulse" not in signal_columns:
-            db.execute("ALTER TABLE market_signals ADD COLUMN eligible_for_pulse INTEGER NOT NULL DEFAULT 1")
+            try:
+                db.execute("ALTER TABLE market_signals ADD COLUMN eligible_for_pulse INTEGER NOT NULL DEFAULT 1")
+            except sqlite3.OperationalError:
+                # A concurrent connect() may have won the one-time migration;
+                # only re-raise if the column is genuinely still missing.
+                current_columns = {row[1] for row in db.execute("PRAGMA table_info(market_signals)")}
+                if "eligible_for_pulse" not in current_columns:
+                    raise
         db.commit()
         return db
     except BaseException:

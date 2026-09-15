@@ -718,9 +718,11 @@ class TieredApprovalTests(unittest.TestCase):
             db_path = Path(td) / "operations.db"
             # Establish an approved scope baseline via a manual P1 approval.
             r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
-            base_id = connect(db_path).execute(
+            db = connect(db_path)
+            base_id = db.execute(
                 "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
             ).fetchone()[0]
+            db.close()
             apply_user_decision(db_path, f"批准 {base_id}", actor="user")
 
             self._review(db_path, date(2026, 7, 11), [self._proposal(priority="P2", risk="低", scopes=("process",))])
@@ -737,9 +739,11 @@ class TieredApprovalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "operations.db"
             r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
-            base_id = connect(db_path).execute(
+            db = connect(db_path)
+            base_id = db.execute(
                 "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
             ).fetchone()[0]
+            db.close()
             apply_user_decision(db_path, f"批准 {base_id}", actor="user")
             self._review(db_path, date(2026, 7, 11), [self._proposal(priority="P2", risk="低", scopes=("technology",))])
             result = auto_approve_proposals(db_path)
@@ -750,9 +754,11 @@ class TieredApprovalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "operations.db"
             r1 = self._review(db_path, date(2026, 7, 10), [self._proposal(priority="P1", scopes=("process",), item_title="奠基提案")])
-            base_id = connect(db_path).execute(
+            db = connect(db_path)
+            base_id = db.execute(
                 "SELECT proposal_id FROM improvement_proposals WHERE review_id=?", (r1,)
             ).fetchone()[0]
+            db.close()
             apply_user_decision(db_path, f"批准 {base_id}", actor="user")
             self._review(db_path, date(2026, 7, 11), [
                 self._proposal(priority="P2", risk="高", scopes=("process",), item_title="高风险"),
@@ -802,9 +808,11 @@ class ProposalSLATests(unittest.TestCase):
             old_pid = import_proposals(db_path, old, self._payload("P1"))[0]
             s2, e2 = business_period(date(2026, 7, 5))
             create_review(db_path, review_day=date(2026, 7, 5), period_start=s2, period_end=e2)
-            new = connect(db_path).execute(
+            db = connect(db_path)
+            new = db.execute(
                 "SELECT review_id FROM tvcr_reviews WHERE review_date='2026-07-05'"
             ).fetchone()[0]
+            db.close()
             import_proposals(db_path, new, self._payload("P1"))
             result = escalate_stale_proposals(db_path, now="2026-07-06T00:00:00+00:00")
             self.assertIn(old_pid, result["superseded"])

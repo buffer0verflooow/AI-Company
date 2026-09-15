@@ -868,7 +868,8 @@ def worker_usage(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         return {}
     try:
         db = sqlite3.connect(sqlite_uri(state_db, mode="ro"), uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("worker usage lookup could not open %s: %s", state_db, exc, exc_info=True)
         return {}
     db.row_factory = sqlite3.Row
     try:
@@ -882,7 +883,8 @@ def worker_usage(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
             (f"%产物目录：{run_dir}%",),
         ).fetchone()
         return dict(row) if row else {}
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("worker usage lookup failed in %s: %s", state_db, exc, exc_info=True)
         return {}
     finally:
         db.close()
@@ -1057,8 +1059,10 @@ def _repair_stranded_run(
             repair_db.commit()
         finally:
             repair_db.close()
-    except (OSError, sqlite3.Error):
-        pass
+    except (OSError, sqlite3.Error) as exc:
+        # The repair is the only path that clears a stranded run; a silent
+        # failure here leaves the opportunity/run stuck in 'running' forever.
+        LOGGER.error("stranded-run repair failed for %s: %s", run_id, exc, exc_info=True)
 
 
 def execute_opportunity(

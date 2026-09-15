@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -20,6 +21,9 @@ try:
 except ImportError:  # direct ``python automation/finance_ledger.py`` invocation
     import pricing  # type: ignore[no-redef]
     from _safe_io import read_text_limited, sqlite_uri
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -284,7 +288,8 @@ def _hermes_cost_snapshot(
         price_table = pricing.load_price_table()
     try:
         db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        LOGGER.warning("hermes cost snapshot could not open %s: %s", path, exc, exc_info=True)
         return result
     db.row_factory = sqlite3.Row
     try:
@@ -341,9 +346,11 @@ def _hermes_cost_snapshot(
         result["confirmed_cost_usd"] = round(result["confirmed_cost_usd"], 6)
         result["estimated_cost_usd"] = round(result["estimated_cost_usd"], 6)
         return result
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         # A corrupt/locked Hermes DB must degrade to an empty snapshot instead
         # of aborting the whole --sync cron (siblings catch sqlite3.Error too).
+        # Log it: a silent snapshot would persist an unreadable source as $0.
+        LOGGER.warning("hermes cost snapshot failed for %s: %s", path, exc, exc_info=True)
         return result
     finally:
         db.close()

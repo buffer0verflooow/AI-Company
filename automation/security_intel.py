@@ -457,7 +457,9 @@ def collect_source(src: dict[str, Any], now: datetime) -> tuple[str, list[dict[s
     try:
         body = fetch(src["url"], insecure=src["id"] in TLS_INSECURE)
     except Exception as e:  # noqa: BLE001 -- an unreachable source must not abort the report
-        return f"ERROR {type(e).__name__}", []
+        # Keep a bounded exception message so a daily source failure is
+        # diagnosable instead of only naming the exception class.
+        return f"ERROR {type(e).__name__}: {str(e)[:200]}", []
     # A fetchable-but-malformed body must not abort the whole run either: an
     # upstream returning 200 with valid-but-wrong-shape JSON (root not an
     # object, "vulnerabilities" not a list, ...) would otherwise raise out of
@@ -474,7 +476,7 @@ def collect_source(src: dict[str, Any], now: datetime) -> tuple[str, list[dict[s
             return "ERROR no-parser", []
         return "ok", parser(body, src, now)
     except Exception as e:  # noqa: BLE001 -- one malformed feed must not abort the report
-        return f"ERROR parse-{src['id']} {type(e).__name__}", []
+        return f"ERROR parse-{src['id']} {type(e).__name__}: {str(e)[:200]}", []
 
 
 # ---------------------------------------------------------------------------
@@ -521,18 +523,18 @@ def persist_items(db: sqlite3.Connection, items: list[dict[str, Any]], now: date
     now_s = now.isoformat(timespec="seconds")
     for it in items:
         iid = item_id(it)
-        cur = db.execute("SELECT 1 FROM intel_items WHERE item_id = ?", (iid,))
-        if cur.fetchone():
-            continue
         track = classify_track(it)
-        db.execute(
+        # Make the insert itself idempotent: a SELECT-then-INSERT check leaves a
+        # race in which two overlapping collectors both observe the item as
+        # absent and the loser aborts the whole persist with IntegrityError.
+        cur = db.execute(
             "INSERT INTO intel_items (item_id, source, source_title, cat, title, url, published, authors, summary, first_seen, track)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(item_id) DO NOTHING",
             (iid, it["source"], it.get("source_title", ""), it.get("cat", ""),
              it["title"], it.get("url", ""), it.get("published"), it.get("authors", ""),
              it.get("summary", ""), now_s, track),
         )
-        new_count += 1
+        new_count += max(0, cur.rowcount)
     return new_count
 
 

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import os
 import re
 import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,7 +93,19 @@ def parse_rows(source: Path) -> list[dict[str, object]]:
 def import_rows(source: Path, evidence: Path, db_path: Path) -> int:
     rows = parse_rows(source)
     evidence.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, evidence)
+    # A crash or a concurrent import must not leave the fixed shared evidence
+    # path truncated; stage the copy in the same directory and atomically
+    # replace it, so the hash below always describes a complete file.
+    fd, temporary = tempfile.mkstemp(
+        dir=evidence.parent, prefix=f".{evidence.name}.", suffix=".tmp"
+    )
+    os.close(fd)
+    temporary_path = Path(temporary)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, evidence)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     evidence_hash = digest(evidence)
     collected_at = datetime.fromtimestamp(source.stat().st_mtime, tz=timezone.utc).isoformat()
     db = connect(db_path)

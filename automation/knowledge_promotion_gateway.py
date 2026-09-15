@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -20,6 +21,9 @@ try:
     from ._safe_io import atomic_write_text, read_text_limited, sqlite_uri
 except ImportError:  # direct script execution
     from _safe_io import atomic_write_text, read_text_limited, sqlite_uri
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
@@ -267,9 +271,11 @@ def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     try:
         source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         # A missing/corrupt swarm DB must degrade to "nothing scanned" instead
-        # of aborting the promotion cron with a traceback.
+        # of aborting the promotion cron with a traceback.  Log it so the
+        # empty success is not mistaken for a healthy scan.
+        LOGGER.warning("knowledge scan could not open %s: %s", swarm_db, exc, exc_info=True)
         return counts
     source.row_factory = sqlite3.Row
     gate: sqlite3.Connection | None = None
@@ -282,7 +288,8 @@ def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
                           trust_vector,status,tags,last_validated_at
                    FROM knowledge_entries WHERE status='active'"""
             )
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            LOGGER.warning("knowledge scan query failed in %s: %s", swarm_db, exc, exc_info=True)
             return counts
         for entry in entries:
             result = assess(entry)

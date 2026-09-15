@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 try:
-    from ._safe_io import read_text_limited_nofollow
+    from ._safe_io import file_lock, read_text_limited_nofollow
     from .content_job_state import (
         log_event,
         read_lifecycle,
@@ -17,7 +17,7 @@ try:
         write_lifecycle,
     )
 except ImportError:  # direct script execution
-    from _safe_io import read_text_limited_nofollow
+    from _safe_io import file_lock, read_text_limited_nofollow
     from content_job_state import (
         log_event,
         read_lifecycle,
@@ -74,12 +74,20 @@ def main() -> int:
         else:
             skipped += 1
             continue
-        lc = read_lifecycle(job_dir)
-        lc['state'] = target
-        lc.setdefault('history', []).append({
-            'state': target, 'ts': utc_now(), 'event': 'backfill', 'detail': detail,
-        })
-        write_lifecycle(job_dir, lc)
+        # Serialize the read-modify-write with content_job_state.transition():
+        # a concurrent human transition would otherwise be silently overwritten
+        # by a backfill that read the pre-transition lifecycle, and the existence
+        # re-check must happen under the same lock to avoid resurrecting a job.
+        with file_lock(lc_path):
+            if lc_path.exists():
+                skipped += 1
+                continue
+            lc = read_lifecycle(job_dir)
+            lc['state'] = target
+            lc.setdefault('history', []).append({
+                'state': target, 'ts': utc_now(), 'event': 'backfill', 'detail': detail,
+            })
+            write_lifecycle(job_dir, lc)
         log_event(job_dir, target, 'backfill', detail)
         print(f"{job_dir.name}: status={s} -> {target}")
         done += 1

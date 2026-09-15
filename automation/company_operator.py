@@ -1059,10 +1059,10 @@ def _repair_stranded_run(
             repair_db.commit()
         finally:
             repair_db.close()
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error):
         # The repair is the only path that clears a stranded run; a silent
         # failure here leaves the opportunity/run stuck in 'running' forever.
-        LOGGER.error("stranded-run repair failed for %s: %s", run_id, exc, exc_info=True)
+        LOGGER.exception("stranded-run repair failed for %s", run_id)
 
 
 def execute_opportunity(

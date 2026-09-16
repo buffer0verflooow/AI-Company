@@ -2,9 +2,11 @@
 """蜂群接入健康检查 — 早发现执行链路断点, 防 2026-08-09 事件重演。
 
 检查项:
-  1. 路径有效性: swarm_runner / swarmctl / executor / _safe_io / DB
-  2. 最近 run 健康: 长期 pending (>=30min 未消费) 的 run 数量
-  3. 最近执行痕迹: 24h 内是否有 completed 任务
+  1. 路径有效性: swarm_v2 活库 / swarmctl / executor / _safe_io
+  2. v2 schema 指纹: swarm_v2.db 含 v2 专有表 + knowledge_entries
+  3. v1 墓碑说明: v1 库位已停用(非 error)
+  4. 最近 run 健康: 长期 pending (>=30min 未消费) 的 run 数量
+  5. 最近执行痕迹: 24h 内是否有 completed 任务(市场零流量为正常态)
 
 用法:
   python3 swarm_health_check.py            # 检查, 异常 exit 1
@@ -16,14 +18,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
     from ._safe_io import sqlite_uri
+    from .swarm_db_guard import V2_MARKER_TABLES, SwarmDbUnavailable, check_v2_db
 except ImportError:  # direct execution from automation/
     from _safe_io import sqlite_uri
+    from swarm_db_guard import (  # type: ignore[no-redef]
+        V2_MARKER_TABLES,
+        SwarmDbUnavailable,
+        check_v2_db,
+    )
 
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
 
@@ -66,7 +75,7 @@ def main() -> int:
     # non-string value) must be reported the same way: the health check itself
     # is the thing being checked, so it never dies with a raw KeyError/TypeError.
     missing = [
-        key for key in ("swarm_repo", "executor", "swarm_db")
+        key for key in ("swarm_repo", "executor", "swarm_v2_db")
         if not isinstance(config.get(key), str) or not config[key].strip()
     ]
     if missing:
@@ -74,14 +83,33 @@ def main() -> int:
         return _emit_config_failure()
     swarm_repo = Path(config["swarm_repo"])
 
-    # 1. 路径有效性
-    runner = swarm_repo / "scripts" / "swarm_runner.py"
-    _ok("swarm_runner.py 存在", str(runner)) if runner.is_file() else _fail(
-        "swarm_runner.py 存在", f"缺失: {runner} (launch_runner 依赖, 8e00a60 移到 scripts/)")
-
+    # 1. 组件路径有效性(D-16.3: 改断言 v2 面)
     swarmctl = swarm_repo / "scripts" / "swarmctl.py"
-    _ok("swarmctl.py 存在", str(swarmctl)) if swarmctl.is_file() else _fail(
-        "swarmctl.py 存在", f"缺失: {swarmctl} (Router swarm_command 依赖)")
+    if swarmctl.is_file():
+        _ok("swarmctl.py 存在", str(swarmctl))
+        # v2 的执行面由 `swarmctl worker` 承担,与 v1 swarm_runner.py 无关;
+        # 用 `--help` 证明解释器能真正加载它,而不是只看到文件在。
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(swarmctl), "--help"],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if proc.returncode == 0:
+                _ok("swarmctl.py --help", "rc=0")
+            else:
+                _fail("swarmctl.py --help", f"rc={proc.returncode}: {proc.stderr.strip()[:200]}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            _fail("swarmctl.py --help", f"无法执行: {exc}")
+    else:
+        _fail("swarmctl.py 存在", f"缺失: {swarmctl} (v2 worker 依赖)")
+
+    # v1 墓碑说明: 不是 error。v1 库位自 M0.2 起是目录墓碑,读类已 repoint v2,
+    # 安全线 v1 入口已加护栏(D-16.2)。
+    v1_db = Path(str(config.get("swarm_db", "")))
+    if str(config.get("swarm_db", "")).strip() and v1_db.is_file():
+        _ok("v1 库位已停用", f"{v1_db} 仍为文件但已不再作为权威活库(安全线 v1 入口有护栏)")
+    else:
+        _ok("v1 库位已停用", f"{v1_db} 墓碑/缺席;读类已 repoint 到 swarm_v2.db")
 
     executor = Path(config["executor"])
     _ok("executor 存在", str(executor)) if executor.is_file() else _fail(
@@ -91,23 +119,30 @@ def main() -> int:
     _ok("_safe_io.py 存在", str(safe_io)) if safe_io.is_file() else _fail(
         "_safe_io.py 存在", f"缺失: {safe_io} (executor 环境清理依赖)")
 
-    db_path = Path(config["swarm_db"])
+    # 2. v2 活库存在 + schema 指纹为 v2
+    db_path = Path(config["swarm_v2_db"])
+    db = None
     if not db_path.is_file():
-        _fail("swarm DB 存在", f"缺失: {db_path}")
-        db = None
+        _fail("swarm_v2 活库存在", f"缺失: {db_path}")
     else:
-        _ok("swarm DB 存在", str(db_path))
         try:
-            # Health check is strictly read-only: a read-write connect would
-            # silently materialize a fresh empty DB file if the file vanished
-            # between the is_file() check above and the connect (TOCTOU), and
-            # the probe never writes.  Read-only mode reports the miss instead.
-            db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
-        except sqlite3.Error as exc:
-            _fail("swarm DB 存在", f"无法打开: {exc}")
-            db = None
+            check_v2_db(db_path)
+        except SwarmDbUnavailable as exc:
+            _fail("swarm_v2 schema 指纹", str(exc))
+        else:
+            _ok("swarm_v2 活库存在", str(db_path))
+            _ok("swarm_v2 schema 指纹", "v2 专有表 " + ",".join(V2_MARKER_TABLES) + " + knowledge_entries")
+            try:
+                # Health check is strictly read-only: a read-write connect would
+                # silently materialize a fresh empty DB file if the file vanished
+                # between the is_file() check above and the connect (TOCTOU), and
+                # the probe never writes.  Read-only mode reports the miss instead.
+                db = sqlite3.connect(sqlite_uri(db_path, mode="ro"), uri=True)
+            except sqlite3.Error as exc:
+                _fail("swarm_v2 活库存在", f"无法打开: {exc}")
+                db = None
 
-    # 2. 最近 run 健康: 长期 pending
+    # 3. 最近 run 健康: 长期 pending
     if db is not None:
         try:
             rows = db.execute(
@@ -148,7 +183,8 @@ def main() -> int:
             else:
                 _ok("最近 run 无断点", "无长期 pending 的 run")
 
-            # 3. 24h 内执行痕迹
+            # 3. 24h 内执行痕迹 —— 参考项。公司内容线为"用户触发路由即起 per-task
+            #    worker"(D-16.4),无真实流量时市场为空是**正常态**,不是断点。
             done24 = db.execute(
                 """SELECT COUNT(*) FROM agent_tasks
                    WHERE status='completed' AND updated_at >= datetime('now', '-1 day')"""
@@ -156,7 +192,10 @@ def main() -> int:
             if done24:
                 _ok("24h 内执行痕迹", f"{done24} 个任务 completed")
             else:
-                _fail("24h 内执行痕迹", "24h 内无 completed 任务 (蜂群可能闲置或链路断开)")
+                _ok(
+                    "24h 内执行痕迹",
+                    "0 条 completed —— 市场尚无真实流量(内容线由用户发任务触发,非断点)",
+                )
         except sqlite3.Error as exc:
             _fail("DB 查询", str(exc))
         finally:

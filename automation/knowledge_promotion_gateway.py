@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import sqlite3
+import sys
 import uuid
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -19,15 +20,28 @@ from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, read_text_limited, sqlite_uri
+    from .swarm_db_guard import (
+        EMPTY_KB_NOTE,
+        SwarmDbUnavailable,
+        check_v2_db,
+        count_knowledge_entries,
+    )
 except ImportError:  # direct script execution
     from _safe_io import atomic_write_text, read_text_limited, sqlite_uri
+    from swarm_db_guard import (  # type: ignore[no-redef]
+        EMPTY_KB_NOTE,
+        SwarmDbUnavailable,
+        check_v2_db,
+        count_knowledge_entries,
+    )
 
 
 LOGGER = logging.getLogger(__name__)
 
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
-DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db")
+# 2026-09-16 (D-16.1): 读类 repoint 到 v2 权威活库;v1 库位是墓碑目录。
+DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_v2.db")
 DEFAULT_GATE_DB = COMPANY_ROOT / "operations/runtime/knowledge_promotion.db"
 DEFAULT_WIKI_DIR = COMPANY_ROOT / "wiki/promoted"
 
@@ -272,11 +286,10 @@ def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
     try:
         source = sqlite3.connect(sqlite_uri(swarm_db, mode="ro"), uri=True)
     except sqlite3.Error as exc:
-        # A missing/corrupt swarm DB must degrade to "nothing scanned" instead
-        # of aborting the promotion cron with a traceback.  Log it so the
-        # empty success is not mistaken for a healthy scan.
-        LOGGER.warning("knowledge scan could not open %s: %s", swarm_db, exc, exc_info=True)
-        return counts
+        # D-16.1: a missing/corrupt swarm DB must fail loudly.  Returning an
+        # empty ``counts`` used to make the promotion cron look healthy with
+        # "0 candidates scanned" even when the authoritative DB was a tombstone.
+        raise SwarmDbUnavailable(swarm_db, f"无法以只读方式打开: {exc}") from exc
     source.row_factory = sqlite3.Row
     gate: sqlite3.Connection | None = None
     now = utc_now()
@@ -289,8 +302,11 @@ def scan(swarm_db: Path, gate_db: Path) -> dict[str, int]:
                    FROM knowledge_entries WHERE status='active'"""
             )
         except sqlite3.Error as exc:
-            LOGGER.warning("knowledge scan query failed in %s: %s", swarm_db, exc, exc_info=True)
-            return counts
+            # The query columns are v2-compatible (see report §4).  If a future
+            # schema drops one, surface it instead of silently scanning 0 rows.
+            raise SwarmDbUnavailable(
+                swarm_db, f"knowledge_entries 查询失败(列集与 v2 不符?): {exc}"
+            ) from exc
         for entry in entries:
             result = assess(entry)
             existing = gate.execute(
@@ -455,7 +471,29 @@ def main() -> int:
     if args.list:
         print(json.dumps(list_candidates(gate_db, args.status), ensure_ascii=False, indent=2))
         return 0
-    counts = scan(Path(args.swarm_db), gate_db)
+    swarm_db = Path(args.swarm_db)
+    try:
+        check_v2_db(swarm_db)
+        counts = scan(swarm_db, gate_db)
+    except SwarmDbUnavailable as exc:
+        print(f"ERROR: v2 swarm KB unavailable: {exc}", file=sys.stderr)
+        return 2
+    if not counts:
+        # An empty scan is not a healthy success: the v2 KB has no active
+        # entries because the memory layer (F7.1/F7.2) is not implemented.
+        try:
+            total = count_knowledge_entries(swarm_db)
+        except sqlite3.Error as exc:
+            print(f"ERROR: v2 swarm KB unreadable: {swarm_db} ({exc})", file=sys.stderr)
+            return 2
+        if total == 0:
+            print(f"WARNING: {EMPTY_KB_NOTE};no promotion candidates scanned", file=sys.stderr)
+            return 3
+        print(
+            f"WARNING: v2 KB 有 {total} 条条目但无 active 知识,未产生晋升候选",
+            file=sys.stderr,
+        )
+        return 3
     print(json.dumps(counts, ensure_ascii=False, sort_keys=True))
     return 0
 

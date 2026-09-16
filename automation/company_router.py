@@ -1384,6 +1384,29 @@ def swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict
     return _parse_json_output(proc.stdout)
 
 
+#: D-16.2: 安全线 v1 入口的停用说明 —— v1 库位已是墓碑目录,而安全线 v2 分支
+#: 代码未落库(仅存于归档补丁)。本批只在 v1 入口加护栏,**不实现** v2 分支。
+V1_SECURITY_LINE_DISABLED = (
+    "v1 已停用;安全线 v2 分支未落库,见 "
+    "~/workspace/swarm-progress/archive-gray1/gray1-wip.patch"
+)
+
+
+def _v1_swarm_db_unavailable(config: dict[str, Any]) -> str | None:
+    """Return a loud reason when the v1 swarm DB is a tombstone/unusable.
+
+    ``router_config.json:swarm_db`` 的键值按 D-16.2 不动,但该路径自 M0.2 起
+    是墓碑目录。安全线 v1 入口在提交/启动前显式拒绝,替代现在会冒出的
+    sqlite 裸错(``unable to open database file``)。
+    """
+    raw = config.get("swarm_db")
+    if not isinstance(raw, str) or not raw.strip():
+        return f"router_config.swarm_db 未配置;{V1_SECURITY_LINE_DISABLED}"
+    if not Path(raw).is_file():
+        return f"v1 swarm DB 不可用({raw});{V1_SECURITY_LINE_DISABLED}"
+    return None
+
+
 # ── v2 蜂群灰度接入 (M5 灰度接入 2: 内容线; 默认关, 未命中/异常一律回原路径) ──
 #
 # 复用批 1 的 `swarm_v2_gray` / `swarm_v2_db` / `swarm_v2_agent` /
@@ -1655,6 +1678,10 @@ def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> d
 
 
 def submit_security(config: dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> dict[str, Any]:
+    # D-16.2: v1 安全线入口护栏 —— 墓碑/不可用 ⇒ 明确报错,不留 sqlite 裸错。
+    unavailable = _v1_swarm_db_unavailable(config)
+    if unavailable:
+        raise RuntimeError(f"submit_security 拒绝执行:{unavailable}")
     metadata = json.dumps(
         {
             "company_product_line": product_line,
@@ -1712,6 +1739,10 @@ def build_runner_cmd(config: dict[str, Any], run_id: str, intent: str) -> list:
 
 
 def launch_runner(config: dict[str, Any], run_id: str, intent: str) -> int:
+    # D-16.2: v1 runner 同样前置墓碑检测(直接调用 launch_runner 时也拒绝)。
+    unavailable = _v1_swarm_db_unavailable(config)
+    if unavailable:
+        raise RuntimeError(f"launch_runner 拒绝执行:{unavailable}")
     # The run id is interpolated into the runner log path below; reject ids
     # that could carry a path separator / ".." / symlink component (mirrors
     # the content_job_path guard) so a corrupt row or backend payload cannot
@@ -2016,7 +2047,8 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
                 try:
                     quality = _classify_security_findings(
                         run_id,
-                        swarm_db=Path(config.get("swarm_db", "")),
+                        # D-16.1: 读类统计面 repoint 到 v2 活库;v1 库位是墓碑目录。
+                        swarm_db=Path(config.get("swarm_v2_db") or config.get("swarm_db", "")),
                         log_dir=Path(config.get("log_dir", "")),
                     )
                     state.update(row["route_event_id"], quality_status=quality)

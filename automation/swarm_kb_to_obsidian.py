@@ -25,11 +25,24 @@ from typing import Any
 
 try:
     from ._safe_io import atomic_write_text, file_lock, read_text_limited, sqlite_uri
+    from .swarm_db_guard import (
+        EMPTY_KB_NOTE,
+        SwarmDbUnavailable,
+        check_v2_db,
+        count_knowledge_entries,
+    )
 except ImportError:  # direct script execution
     from _safe_io import atomic_write_text, file_lock, read_text_limited, sqlite_uri
+    from swarm_db_guard import (  # type: ignore[no-redef]
+        EMPTY_KB_NOTE,
+        SwarmDbUnavailable,
+        check_v2_db,
+        count_knowledge_entries,
+    )
 
 COMPANY_ROOT = Path(__file__).resolve().parent.parent
-SWARM_DB = Path.home() / "workspace" / "research" / "swarm-knowledge" / "swarm_knowledge.db"
+# 2026-09-16 (D-16.1): v1 库位已是墓碑目录;读类 repoint 到 v2 权威活库。
+SWARM_DB = Path.home() / "workspace" / "research" / "swarm-knowledge" / "swarm_v2.db"
 WIKI_PATH = COMPANY_ROOT / "wiki" / "swarm-strategies.md"
 
 # Keep entries below this threshold from being added
@@ -260,23 +273,41 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     args = parser.parse_args()
 
-    if not SWARM_DB.is_file():
-        # 2026-09-11 M0.2: 旧库路径已是墓碑目录, 新库写入路径 M1-M4 才存在。
-        # 响亮失败, 避免每日 cron 把桥停摆误报为同步完成。
-        # 依据: research/swarm-knowledge/docs/QA-REVIEW-M0.2.md 第二节 (待 CR 裁决)
-        print(f"ERROR: swarm KB path missing or tombstoned: {SWARM_DB}", file=sys.stderr)
+    # 2026-09-16 (D-16.1): 读类消费者 repoint 到 v2 权威活库;缺库 / 非 v2 schema
+    # 一律响亮失败,绝不把"库不可用"降级成"同步成功但 0 条"。
+    try:
+        check_v2_db(SWARM_DB)
+    except SwarmDbUnavailable as exc:
+        print(f"ERROR: v2 swarm KB unavailable: {exc}", file=sys.stderr)
         return 2
 
     try:
         entries = fetch_top_entries(SWARM_DB)
     except sqlite3.Error as exc:
-        # The is_file() check is not atomic; a DB rotated between the check
-        # and the read-only connect must degrade cleanly.
-        print(f"Swarm DB unreadable: {SWARM_DB} ({exc})")
-        return
+        # The check above is not atomic; a DB rotated between validation and the
+        # read must still fail loudly instead of exiting 0 with no output.
+        print(f"ERROR: v2 swarm KB unreadable: {SWARM_DB} ({exc})", file=sys.stderr)
+        return 2
+
     if not entries:
-        print("No L3/L4 entries found in Swarm KB.")
-        return
+        # Distinguish "table empty" (记忆层未实现, M-1) from "table has rows
+        # but none qualify as L3/L4 active knowledge".  Neither may look like a
+        # successful export: both exit non-zero and label the condition.
+        try:
+            total = count_knowledge_entries(SWARM_DB)
+        except sqlite3.Error as exc:
+            print(f"ERROR: v2 swarm KB unreadable: {SWARM_DB} ({exc})", file=sys.stderr)
+            return 2
+        if total == 0:
+            print(f"WARNING: {EMPTY_KB_NOTE};策略面板未生成(库位 {SWARM_DB})", file=sys.stderr)
+            print(f"😶 v2 KB 尚无条目(记忆层未实现,见审计报告 M-1): {SWARM_DB}")
+            return 3
+        print(
+            f"WARNING: v2 KB 有 {total} 条条目但无 L3/L4 活跃知识,未生成策略面板",
+            file=sys.stderr,
+        )
+        print("😶 v2 KB 无 L3/L4 活跃条目,未生成策略面板")
+        return 3
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     md_section = generate_strategy_md(entries, timestamp)
@@ -284,7 +315,7 @@ def main():
     if args.dry_run:
         print(f"Would write {len(entries)} entries to {WIKI_PATH}")
         print(md_section[:2000])
-        return
+        return 0
 
     if not update_wiki(md_section):
         print(

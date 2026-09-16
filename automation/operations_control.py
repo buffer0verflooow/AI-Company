@@ -57,7 +57,7 @@ DEFAULT_CONTENT_JOBS = COMPANY_ROOT / "operations/runtime/content-jobs"
 DEFAULT_HERMES_DB = Path("/home/pwn/.hermes/state.db")
 DEFAULT_FINANCE_DB = COMPANY_ROOT / "finance/finance_ledger.db"
 DEFAULT_ARTICLE_PERF_DB = COMPANY_ROOT / "marketing/article_performance.db"
-DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db")
+DEFAULT_SWARM_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_v2.db")
 DEFAULT_LOG_DIR = COMPANY_ROOT / "operations/runtime/logs"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
@@ -478,6 +478,23 @@ def _classify_security_findings(
             # are detectable instead of silently lowering every run to
             # log-fragments-only.
             LOGGER.warning("swarm db read failed for run %s: %s", run_id, exc, exc_info=True)
+    else:
+        # D-16.1: never let a tombstoned/missing live DB look like a clean
+        # "no DB fragments" run.  The v1 path is a tombstone directory and the
+        # read path is repointed to v2; say so explicitly instead of silently
+        # returning an empty result.
+        if swarm_db.exists():
+            LOGGER.warning(
+                "swarm DB path is not a file (v1 tombstone / unsupported layout), "
+                "quality classification falls back to logs only: %s",
+                swarm_db,
+            )
+        else:
+            LOGGER.warning(
+                "swarm DB missing (repointed to v2 live DB?), "
+                "quality classification falls back to logs only: %s",
+                swarm_db,
+            )
 
     combined = "\n".join(fragments)
 

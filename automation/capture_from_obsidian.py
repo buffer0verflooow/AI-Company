@@ -38,8 +38,13 @@ from pathlib import Path
 
 try:
     from ._safe_io import atomic_write_text, file_lock, read_text_limited
+    from .swarm_db_guard import SwarmDbUnavailable, check_v2_db
 except ImportError:  # direct script execution
     from _safe_io import atomic_write_text, file_lock, read_text_limited
+    from swarm_db_guard import (  # type: ignore[no-redef]
+        SwarmDbUnavailable,
+        check_v2_db,
+    )
 
 OBSIDIAN_VAULT = Path(os.environ.get(
     "OBSIDIAN_VAULT_PATH",
@@ -48,8 +53,11 @@ OBSIDIAN_VAULT = Path(os.environ.get(
 CAPTURE_PY = (
     Path.home() / "workspace" / "research" / "swarm-knowledge" / "scripts" / "capture.py"
 )
+# 2026-09-16 (D-16.1): v1 库位是墓碑目录。归档 v1 与 v2 的 knowledge_entries
+# 列集/DLL/索引**逐字同构**(见交付报告 §4),所以写类允许 repoint 到 v2 活库;
+# 非 v2 schema 仍响亮失败(不发明写入语义)。
 SWARM_DB = (
-    Path.home() / "workspace" / "research" / "swarm-knowledge" / "swarm_knowledge.db"
+    Path.home() / "workspace" / "research" / "swarm-knowledge" / "swarm_v2.db"
 )
 TRACKING_FILE = (
     Path.home() / "workspace" / "company" / "operations" / "runtime" / "obsidian-capture-tracking.json"
@@ -281,11 +289,12 @@ def main():
     if not CAPTURE_PY.is_file():
         print(f"ERROR: capture.py not found at {CAPTURE_PY}")
         sys.exit(1)
-    # 2026-09-11 M0.2: 旧库路径已立墓碑, 写入方无处可写; 扫描前硬失败,
-    # 避免整轮 unchanged 把桥停摆误报为全部最新。
-    # 依据: research/swarm-knowledge/docs/QA-REVIEW-M0.2.md 第二节 (待 CR 裁决)
-    if not SWARM_DB.is_file():
-        print(f"ERROR: swarm KB is not a writable DB file: {SWARM_DB}", file=sys.stderr)
+    # 2026-09-16 (D-16.1): 写类目标 repoint 到 v2 活库(列集与归档 v1 同构)。
+    # 缺库 / 非 v2 schema 一律硬失败, 避免整轮 unchanged 把桥停摆误报为全部最新。
+    try:
+        check_v2_db(SWARM_DB)
+    except SwarmDbUnavailable as exc:
+        print(f"ERROR: v2 swarm KB is not writable/usable: {exc}", file=sys.stderr)
         sys.exit(2)
 
     candidates = find_candidate_notes(vault)

@@ -1607,6 +1607,28 @@ def v2_gray_decision(config: dict[str, Any], decision: RouteDecision, message: s
     return result
 
 
+def _v2_subprocess_env(cmd: list[str]) -> dict[str, str] | None:
+    """v2 子进程环境(盐兜底)。
+
+    发布路径要 `SWARM_CLIENT_SALT`(fail-closed:未设置即拒 client 发布)。调用方可能是
+    cron/systemd/其它 launcher,不保证继承了登录 shell 的环境变量;故这里在**进程环境缺失**时
+    从 `~/.company-env`(600,`KEY=value`)读一次。
+    两处都没有 ⇒ 返回 None(子进程沿用当前环境):v2 侧照旧 fail-closed 拒绝,不静默降级/不伪造盐。
+    """
+    if os.environ.get("SWARM_CLIENT_SALT"):
+        return None
+    env_file = Path.home() / ".company-env"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("SWARM_CLIENT_SALT="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return {**os.environ, "SWARM_CLIENT_SALT": value}
+    except OSError:
+        return None
+    return None
+
+
 def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict[str, Any]:
     """Run a v2 `swarmctl` subcommand against the v2 live DB.
 
@@ -1624,7 +1646,7 @@ def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> d
     ]
     proc = subprocess.run(
         cmd, cwd=config["swarm_repo"], capture_output=True, text=True,
-        timeout=timeout, check=False)
+        timeout=timeout, check=False, env=_v2_subprocess_env(cmd))
     if proc.returncode != 0:
         raise RuntimeError(
             proc.stderr.strip() or proc.stdout.strip()

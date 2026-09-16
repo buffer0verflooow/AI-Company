@@ -133,11 +133,26 @@ class DefaultOffTests(unittest.TestCase):
             v1.assert_called_once()
             v2cli.assert_not_called()
 
-    def test_repository_default_config_is_disabled(self):
+    def test_repository_config_gray_integrity(self):
+        """仓库配置件不变量:开关形态合法;启用态**不得半配置**。
+
+        2026-09-16 起仓库配置为已启用(content 10%,用户授权):原"默认必须关"的断言
+        改为「关 ⇒ 零 v2 调用(见 test_absent_gray_block_reads_as_disabled)」+
+        「开 ⇒ run_types/db/agent/judge/client_source 齐备 ∧ judge≠agent」的组合不变量,
+        防止启用后漏配身份/来源导致「命中却总回退」或自判。
+        """
         config = json.loads(
             (Path(__file__).resolve().parent.parent / "router_config.json")
             .read_text(encoding="utf-8"))
-        self.assertFalse(v2_gray_config(config)["enabled"])
+        gray = v2_gray_config(config)
+        self.assertIsInstance(gray["enabled"], bool)
+        if gray["enabled"]:
+            self.assertTrue(gray["run_types"], "启用灰度必须给出 run_types")
+            self.assertTrue(gray["db"], "启用灰度必须配置 v2 库")
+            self.assertTrue(gray["agent"], "启用灰度必须配置执行身份")
+            self.assertTrue(gray["judge"], "启用灰度必须配置判定身份")
+            self.assertNotEqual(gray["agent"], gray["judge"], "禁自判(F5.1)")
+            self.assertTrue(gray["client_source"], "启用灰度必须配置发布者来源(脱敏标签前置)")
 
 
 class GrayHitTests(unittest.TestCase):

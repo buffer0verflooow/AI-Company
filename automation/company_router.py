@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1383,6 +1384,254 @@ def swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict
     return _parse_json_output(proc.stdout)
 
 
+# ── v2 蜂群灰度接入 (M5 灰度接入 2: 内容线; 默认关, 未命中/异常一律回原路径) ──
+#
+# 复用批 1 的 `swarm_v2_gray` / `swarm_v2_db` / `swarm_v2_agent` /
+# `swarm_v2_judge` 配置键与口径:
+#   * `enabled=false`(缺省)⇒ 本模块不导入 v2 代码、不发起任何 v2 CLI 调用;
+#     内容派发保持既有 `launch_content_job(... content_hermes_executor.py
+#     --job-dir)` 逐字不变。
+#   * 灰度判定优先复用 v2 侧 `src.swarm_v2.company_router` 的纯函数
+#     (`GrayPolicy` / `gray_decision` / `route_key_of` / `gray_factor`),
+#     仅在 v2 模块不可导入时退回等价本地实现(公式一致性由测试锁定)。
+#   * 任一前置条件不满足(开关 / run_types / ratio / 库位 / 身份 / 自判 /
+#     来源标识)或 v2 CLI 非零退出 ⇒ 记录回退原因并落回原内容路径;绝不丢任务。
+V2_GRAY_DEFAULT_TOKEN_BUDGET = 100000
+V2_GRAY_DEFAULT_EST_TOKENS = 100000
+V2_GRAY_DEFAULT_BASE_PRIORITY = 0
+V2_GRAY_DEFAULT_POLL_INTERVAL = 5.0
+
+#: 公司 route → v2 run_type(v2 `value_params.RUN_TYPES` = vuln|content|ops)。
+#: 内容三子线(article/video/company)统一进 content,子类走 focus_params。
+_V2_RUN_TYPE_BY_ROUTE = {
+    "security": "vuln", "research": "ops",
+    "article": "content", "video": "content", "company": "content",
+}
+#: 公司 intent → v2 task_type(v2 `verdicts.TASK_TYPES`;内容线默认 custom)。
+_V2_TASK_TYPE_BY_INTENT = {
+    "recon": "scan", "exploit": "exploit", "report": "report",
+    "analyze": "analyze", "research": "research", "custom": "custom",
+}
+#: v2 `run_create.INTENTS` 闭集(内容线固定 custom;子类在 focus_params)。
+_V2_RUN_INTENTS = frozenset({
+    "recon", "exploit", "analyze", "defend", "report", "research", "custom",
+})
+
+
+def _v2_gray_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def v2_gray_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the optional ``swarm_v2_gray`` block (batch-1 keys).
+
+    Returns a stable dict even when the block is absent (older deployment) or
+    hand-edited into a bad shape; a missing/malformed block reads as disabled,
+    which is exactly the pre-v2 behavior.
+    """
+    raw = config.get("swarm_v2_gray") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def _str_list(value: Any) -> list:
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _text(key: str) -> str:
+        return str(config.get(key) or "").strip() if isinstance(config, dict) else ""
+
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "run_types": _str_list(raw.get("run_types", [])),
+        "task_types": _str_list(raw.get("task_types", [])),
+        "ratio_pct": _v2_gray_int(raw.get("ratio_pct", 0), 0),
+        "client_source": str(raw.get("client_source") or "").strip(),
+        "token_budget": _v2_gray_int(
+            raw.get("token_budget"), V2_GRAY_DEFAULT_TOKEN_BUDGET),
+        "est_tokens": _v2_gray_int(
+            raw.get("est_tokens"), V2_GRAY_DEFAULT_EST_TOKENS),
+        "base_priority": _v2_gray_int(
+            raw.get("base_priority"), V2_GRAY_DEFAULT_BASE_PRIORITY),
+        "poll_interval": V2_GRAY_DEFAULT_POLL_INTERVAL,
+        "db": _text("swarm_v2_db"),
+        "agent": _text("swarm_v2_agent"),
+        "judge": _text("swarm_v2_judge"),
+    }
+
+
+def _v2_route_key(client_source: str, message: str) -> str:
+    return hashlib.sha256(f"{client_source}|{message}".encode()).hexdigest()[:16]
+
+
+def _v2_gray_factor(route_key: str) -> float:
+    digest = hashlib.sha256(route_key.encode("utf-8")).hexdigest()
+    return int(digest[:16], 16) / 2**64 * 100.0
+
+
+def _local_v2_gray_decision(*, run_types, task_types, ratio_pct, run_type,
+                            task_type, route_key) -> dict[str, Any]:
+    """Fallback mirror of v2 ``company_router.gray_decision`` (same formula).
+
+    Only used when the v2 module cannot be imported; the equivalence test locks
+    it to the upstream implementation.
+    """
+    factor = _v2_gray_factor(route_key)
+    if run_type not in run_types:
+        return {"path": "legacy_v1", "basis": "run_type_not_gray", "factor": factor}
+    if task_types and task_type not in task_types:
+        return {"path": "legacy_v1", "basis": "task_type_not_gray", "factor": factor}
+    if factor >= ratio_pct:
+        return {"path": "legacy_v1", "basis": "ratio_miss", "factor": factor}
+    return {"path": "market_v2", "basis": "ratio_hit", "factor": factor}
+
+
+def _load_v2_company_router(config: dict[str, Any]):
+    """Best-effort import of the v2 decision port; ``None`` when unavailable."""
+    repo = config.get("swarm_repo") if isinstance(config, dict) else None
+    if not repo:
+        return None
+    try:
+        import importlib
+
+        repo_path = str(Path(repo).resolve())
+        inserted = repo_path not in sys.path
+        if inserted:
+            sys.path.insert(0, repo_path)
+        try:
+            return importlib.import_module("src.swarm_v2.company_router")
+        finally:
+            if inserted and repo_path in sys.path:
+                sys.path.remove(repo_path)
+    except Exception:  # noqa: BLE001 -- reuse is best-effort; local mirror below
+        return None
+
+
+def _v2_gray_eval(config: dict[str, Any], *, run_type: str, task_type: str,
+                  client_source: str, message: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the gray ratio, preferring the v2 module's pure functions."""
+    route_key = _v2_route_key(client_source, message)
+    module = _load_v2_company_router(config)
+    if module is not None and hasattr(module, "GrayPolicy") \
+            and hasattr(module, "gray_decision"):
+        policy = module.GrayPolicy(
+            run_types=frozenset(cfg["run_types"]),
+            task_types=frozenset(cfg["task_types"]),
+            ratio_pct=cfg["ratio_pct"],
+        )
+        decision = module.gray_decision(
+            policy, run_type=run_type, task_type=task_type, route_key=route_key)
+    else:
+        decision = _local_v2_gray_decision(
+            run_types=frozenset(cfg["run_types"]),
+            task_types=frozenset(cfg["task_types"]),
+            ratio_pct=cfg["ratio_pct"], run_type=run_type,
+            task_type=task_type, route_key=route_key)
+    decision = dict(decision)
+    decision["route_key"] = route_key
+    return decision
+
+
+def v2_gray_decision(config: dict[str, Any], decision: RouteDecision, message: str) -> dict[str, Any]:
+    """Decide whether a company task should enter the v2 market.
+
+    ``enabled=False`` returns immediately without importing v2 code or calling
+    any CLI.  Every unmet precondition or evaluation error yields ``hit=False``
+    plus a stable reason so the caller can record the fallback.  Never raises.
+    """
+    cfg = v2_gray_config(config)
+    result: dict[str, Any] = {
+        "hit": False,
+        "enabled": cfg["enabled"],
+        "reason": "",
+        "run_type": "",
+        "task_type": "",
+        "policy": {
+            "run_types": list(cfg["run_types"]),
+            "task_types": list(cfg["task_types"]),
+            "ratio_pct": cfg["ratio_pct"],
+        },
+    }
+    if not cfg["enabled"]:
+        result["reason"] = "v2_gray_disabled"
+        return result
+    run_type = _V2_RUN_TYPE_BY_ROUTE.get(getattr(decision, "route", ""), "")
+    task_type = "custom" if run_type == "content" else \
+        _V2_TASK_TYPE_BY_INTENT.get(getattr(decision, "intent", ""), "custom")
+    result["run_type"] = run_type
+    result["task_type"] = task_type
+    if not run_type:
+        result["reason"] = "route_not_applicable"
+        return result
+    if not cfg["run_types"]:
+        result["reason"] = "v2_gray_run_types_empty"
+        return result
+    if cfg["ratio_pct"] <= 0:
+        result["reason"] = "v2_gray_ratio_zero"
+        return result
+    if run_type not in cfg["run_types"]:
+        result["reason"] = "run_type_not_gray"
+        return result
+    if not cfg["db"]:
+        result["reason"] = "v2_db_not_configured"
+        return result
+    if not cfg["agent"]:
+        result["reason"] = "v2_agent_not_configured"
+        return result
+    if not cfg["judge"]:
+        result["reason"] = "v2_judge_not_configured"
+        return result
+    if cfg["agent"] == cfg["judge"]:
+        result["reason"] = "v2_self_judge_forbidden"
+        return result
+    if not cfg["client_source"]:
+        result["reason"] = "v2_client_source_not_configured"
+        return result
+    try:
+        evaluated = _v2_gray_eval(
+            config, run_type=run_type, task_type=task_type,
+            client_source=cfg["client_source"], message=message, cfg=cfg)
+    except Exception as exc:  # noqa: BLE001 -- a decision failure must fall back
+        result["reason"] = f"v2_gray_decision_error: {type(exc).__name__}"
+        return result
+    result["reason"] = str(evaluated.get("basis") or "ratio_miss")
+    result["factor"] = evaluated.get("factor")
+    result["route_key"] = evaluated.get("route_key", "")
+    if evaluated.get("path") == "market_v2":
+        result["hit"] = True
+    return result
+
+
+def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict[str, Any]:
+    """Run a v2 `swarmctl` subcommand against the v2 live DB.
+
+    `swarmctl` short-circuits the `v2`/`worker`/`company` namespaces before
+    argparse, so the v2 DB flag is appended after the subcommand arguments
+    (both `v2 run create` and `market publish` accept `--db` there).  The v1
+    global `--db`/`swarm_db` is intentionally not reused.
+    """
+    cmd = [
+        sys.executable,
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
+        *args,
+        "--db", config["swarm_v2_db"],
+        "--json",
+    ]
+    proc = subprocess.run(
+        cmd, cwd=config["swarm_repo"], capture_output=True, text=True,
+        timeout=timeout, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            proc.stderr.strip() or proc.stdout.strip()
+            or f"swarmctl v2 exited {proc.returncode}")
+    return _parse_json_output(proc.stdout)
+
+
 def submit_security(config: dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> dict[str, Any]:
     metadata = json.dumps(
         {
@@ -1533,6 +1782,142 @@ def launch_content_job(
             start_new_session=True,
             close_fds=True,
             env=executor_env,
+        )
+    except BaseException:
+        log_fh.close()
+        raise
+    log_fh.close()
+    return proc.pid
+
+
+def _v2_content_intent(decision: RouteDecision) -> str:
+    intent = str(getattr(decision, "intent", "") or "custom")
+    return intent if intent in _V2_RUN_INTENTS else "custom"
+
+
+def submit_content_v2(
+    config: dict[str, Any],
+    *,
+    decision: RouteDecision,
+    message: str,
+    session_id: str,
+    platform: str,
+    gray: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish one content task into the v2 market (gray hit only).
+
+    Writes a v2 run (`v2 run create`) then publishes the task (`market
+    publish`).  Any non-zero CLI exit raises; the caller turns that into the
+    original content path, so a failed v2 submit never drops the task.  The
+    content subtype (article/video/company) travels in ``focus_params`` rather
+    than expanding the v2 ``task_type`` closed set.
+    """
+    cfg = v2_gray_config(config)
+    run_type = "content"
+    task_type = "custom"
+    run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
+    intent = _v2_content_intent(decision)
+    target = str(getattr(decision, "target", "") or "company-internal")
+    focus = json.dumps(
+        {
+            "content_route": str(getattr(decision, "route", "")),
+            "task_intent": intent,
+            "company_task": message,
+            "company_session_id": session_id,
+            "company_platform": platform,
+            "client_source": cfg["client_source"],
+        },
+        ensure_ascii=False, sort_keys=True)
+    by = cfg["agent"]
+    v2_swarm_command(
+        config, "v2", "run", "create",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--intent", intent,
+        "--target-type", "unknown",
+        "--target", target,
+        "--token-budget", str(cfg["token_budget"]),
+        "--by", by,
+    )
+    publication = v2_swarm_command(
+        config, "market", "publish",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--task-type", task_type,
+        "--publisher", "client",
+        "--est", str(cfg["est_tokens"]),
+        "--base", str(cfg["base_priority"]),
+        "--by", by,
+        "--client-source", cfg["client_source"],
+        "--focus", focus,
+        # Pin the market task id to the run id: the stdin executor builds its job
+        # directory as content_job_dir/<task_id>, so this keeps it exactly at
+        # content_job_path(config, run_id) and leaves the existing
+        # refresh_session_content_jobs() status lookup working unchanged.
+        "--task-id", run_id,
+    )
+    task_id = str(publication.get("task_id") or run_id)
+    return {
+        "run_id": run_id,
+        "request_id": task_id,
+        "status": "submitted",
+        "_v2_dispatch": "v2",
+        "_v2_run_type": run_type,
+        "_v2_task_type": task_type,
+        "_v2_task_id": task_id,
+    }
+
+
+def build_v2_content_worker_cmd(config: dict[str, Any]) -> list:
+    """Build the v2 content worker command (pure; testable).
+
+    The executor is the content executor in its v2 stdin contract mode.  The v2
+    worker is market-wide (no v1 ``--role-counts`` semantics), so identity comes
+    from ``swarm_v2_agent``/``swarm_v2_judge``; ``--max-tasks 1`` makes one
+    dispatch correspond to one claimed task instead of leaving a market-wide
+    content worker resident.
+    """
+    cfg = v2_gray_config(config)
+    executor_command = "{} {} --stdin-json".format(
+        shlex.quote(str(sys.executable)),
+        shlex.quote(str(config["content_executor"])),
+    )
+    return [
+        sys.executable,
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
+        "worker",
+        "--db", config["swarm_v2_db"],
+        "--agent", cfg["agent"],
+        "--judge-by", cfg["judge"],
+        "--executor-command", executor_command,
+        "--poll-interval", str(cfg["poll_interval"]),
+        "--max-tasks", "1",
+    ]
+
+
+def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
+    """Launch the v2 content worker detached (mirrors ``launch_content_job``)."""
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid swarm v2 content run id: {value!r}")
+    log_dir = Path(config["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"swarm-v2-content-{value}.log"
+    cmd = build_v2_content_worker_cmd(config)
+    worker_env, _dropped = scrub_environment()
+    worker_env["COMPANY_ROUTER_BYPASS"] = "1"
+    worker_env["HERMES_SESSION_SOURCE"] = "tool"
+    log_fh = log_path.open("a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=config["swarm_repo"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=worker_env,
         )
     except BaseException:
         log_fh.close()
@@ -2297,21 +2682,62 @@ def _handle_hook(
                 }),
                 status_updates=updates + ["- 已达到本会话内容产线并发上限，新任务暂未提交。"],
             )}
-        try:
-            run_id = str(uuid.uuid4())
-            pid = launch_content_job(
-                config,
-                run_id,
-                route=decision.route,
-                message=message,
-                session_id=session_id,
-                platform=platform,
-            )
-            run = {"run_id": run_id, "status": "running"}
-            state.update(event_id, run_id=run_id, runner_pid=pid, status="running", last_heartbeat=utc_now())
-        except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
-            state.update(event_id, status="failed", error=str(exc))
-            updates.append(f"- 内容产线自动提交失败：{exc}")
+        fallback_reason = ""
+        gray = v2_gray_decision(config, decision, message)
+        if gray["hit"]:
+            try:
+                v2_run = submit_content_v2(
+                    config,
+                    decision=decision,
+                    message=message,
+                    session_id=session_id,
+                    platform=platform,
+                    gray=gray,
+                )
+                run_id = str(v2_run.get("run_id") or "")
+                pid = launch_v2_content_worker(config, run_id)
+                run = {"run_id": run_id, "status": "running"}
+                state.update(event_id, run_id=run_id,
+                             request_id=str(v2_run.get("request_id") or ""),
+                             runner_pid=pid, status="running",
+                             last_heartbeat=utc_now())
+                updates.append(
+                    f"- v2 灰度命中：{decision.route} 任务已发布至蜂群 v2 市场"
+                    f"（run_id={run_id}）。"
+                )
+            except Exception as exc:  # noqa: BLE001 -- v2 must never drop the task
+                fallback_reason = (
+                    f"v2 content submit failed: {type(exc).__name__}: {exc}")
+                LOGGER.warning("company_router content v2 fallback: %s", fallback_reason)
+        elif gray["enabled"]:
+            # v2 was administratively enabled but not selected: keep the original
+            # content path and record why (same style as batch 1's fallback).
+            fallback_reason = str(gray.get("reason") or "v2_gray_not_selected")
+            LOGGER.info("company_router content v2 not selected: %s", fallback_reason)
+
+        if run is None:
+            try:
+                run_id = str(uuid.uuid4())
+                pid = launch_content_job(
+                    config,
+                    run_id,
+                    route=decision.route,
+                    message=message,
+                    session_id=session_id,
+                    platform=platform,
+                )
+                run = {"run_id": run_id, "status": "running"}
+                fields: dict[str, Any] = {
+                    "run_id": run_id, "runner_pid": pid, "status": "running",
+                    "last_heartbeat": utc_now(),
+                }
+                if fallback_reason:
+                    fields["error"] = f"v2 content gray fallback: {fallback_reason}"
+                    updates.append(f"- v2 内容灰度回退：{fallback_reason}")
+                state.update(event_id, **fields)
+            except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
+                state.update(event_id, status="failed", error=str(exc))
+                updates.append(f"- 内容产线自动提交失败：{exc}")
 
     return {"context": build_context(decision, run=run, status_updates=updates)}
 

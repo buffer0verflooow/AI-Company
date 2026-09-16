@@ -28,6 +28,7 @@ class SwarmIntegrationPathTests(unittest.TestCase):
         cls.config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         cls.swarm_repo = Path(cls.config["swarm_repo"])
         cls.db_path = Path(cls.config["swarm_db"])
+        cls.v2_db_path = Path(cls.config["swarm_v2_db"])
 
     def test_runner_script_exists(self):
         """swarm_runner.py 必须存在于 scripts/ (8e00a60 重构后位置)"""
@@ -71,10 +72,18 @@ class SwarmIntegrationPathTests(unittest.TestCase):
         )
 
     def test_swarm_db_exists(self):
-        """swarm_knowledge.db (任务市场/知识库) 必须存在"""
+        """v1 `swarm_knowledge.db` 自 M0.2 起墓碑化;v2 活库 `swarm_v2.db` 须存在。
+
+        旧断言假设 v1 库是文件,但 v1 库现为墓碑目录(或已缺席),所以基线里
+        它是既有失败。此处显式断言墓碑态 + v2 活库存在,反映真实部署形态。
+        """
         self.assertTrue(
-            self.db_path.is_file(),
-            f"swarm DB 不存在: {self.db_path}",
+            self.db_path.is_dir() or not self.db_path.exists(),
+            f"v1 库应为墓碑目录或缺席,不再是可写文件: {self.db_path}",
+        )
+        self.assertTrue(
+            self.v2_db_path.is_file(),
+            f"v2 活库不存在: {self.v2_db_path}",
         )
 
     def test_runner_role_counts_are_valid(self):

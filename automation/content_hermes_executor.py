@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +38,22 @@ COMPANY = WORKSPACE / "company"
 HERMES_DB = Path("/home/pwn/.hermes/state.db")
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
 CONTENT_ONLY_TOOLSETS = ("file", "web", "image_gen", "vision")
+#: Router config used only to resolve ``content_job_dir`` when the stdin contract
+#: mode is invoked without ``COMPANY_CONTENT_JOB_DIR`` in the environment.
+DEFAULT_ROUTER_CONFIG = Path(__file__).resolve().parent / "router_config.json"
+#: Bound the executor-contract stdin read: the payload is written by an external
+#: worker and a runaway writer must not exhaust memory.
+MAX_STDIN_BYTES = 8 * 1024 * 1024
+#: Token counters summed into the v2 ``token_cost`` reading.  ``worker_usage``
+#: returns the Hermes session row; ``tool_call_count``/``*_usd``/``cost_status``
+#: are not token counts and are deliberately excluded.
+_USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
 
 
 def utc_now() -> str:
@@ -317,11 +335,13 @@ def build_worker_invocation(
     return command, cwd, env
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a delegated company execution or content-production job")
-    parser.add_argument("--job-dir", required=True)
-    args = parser.parse_args()
-    job_dir = Path(args.job_dir).resolve()
+def execute_job(job_dir: Path) -> dict[str, Any]:
+    """Run one job in ``job_dir`` (the legacy ``--job-dir`` execution path).
+
+    Returns the final status payload written to ``status.json``.  The legacy
+    CLI ignores it and keeps its historical exit-0 semantics; the stdin contract
+    mode uses it to decide the executor exit code.
+    """
     request_path = job_dir / "request.json"
     try:
         request = json.loads(read_text_limited(request_path, max_bytes=2 * 1024 * 1024))
@@ -330,11 +350,12 @@ def main() -> int:
         if request.get("route") not in {"company", "article", "video"}:
             raise ValueError(f"unsupported content route: {request.get('route')!r}")
     except Exception as exc:  # noqa: BLE001 -- invalid request -> failed status, exit cleanly
-        write_status(job_dir, {"status": "failed", "error": f"invalid request: {exc}", "artifacts": []})
+        payload = {"status": "failed", "error": f"invalid request: {exc}", "artifacts": []}
+        write_status(job_dir, payload)
         write_progress(job_dir, "failed", percent=100, detail="invalid request")
         append_event(job_dir, "terminated", state="terminated",
                      detail=f"invalid request: {exc}")
-        return 0
+        return payload
 
     prompt, expected = build_prompt(request, job_dir)
     write_status(job_dir, {
@@ -360,17 +381,18 @@ def main() -> int:
             check=False,
         )
     except Exception as exc:  # noqa: BLE001 -- worker crash -> failed status, never crash the executor
-        write_status(job_dir, {
+        payload = {
             "status": "failed",
             "route": request["route"],
             "run_id": request.get("run_id"),
             "error": str(exc),
             "artifacts": [],
-        })
+        }
+        write_status(job_dir, payload)
         write_progress(job_dir, "failed", percent=100, detail="worker launch failed")
         append_event(job_dir, "terminated", state="terminated",
                      detail=f"worker launch failed: {exc}")
-        return 0
+        return payload
 
     write_progress(job_dir, "post_processing", percent=80)
     append_event(job_dir, "worker_finished", state="qa",
@@ -386,13 +408,14 @@ def main() -> int:
             and not (path.name.startswith(".") and path.name.endswith(".tmp"))
         ]
     except OSError as exc:
-        write_status(job_dir, {
+        payload = {
             "status": "failed", "route": request["route"],
             "run_id": request.get("run_id"), "error": f"artifact scan failed: {exc}",
             "artifacts": [],
-        })
+        }
+        write_status(job_dir, payload)
         write_progress(job_dir, "failed", percent=100, detail="artifact scan failed")
-        return 0
+        return payload
     usage = worker_usage(job_dir)
     missing = [name for name in expected if not (job_dir / name).is_file()]
     content = proc.stdout.strip()[-12000:]
@@ -414,7 +437,7 @@ def main() -> int:
             reasons.append(error or f"Hermes exited {proc.returncode}")
         if missing:
             reasons.append(f"missing required artifacts: {', '.join(missing)}")
-        write_status(job_dir, {
+        payload = {
             "status": "failed",
             "route": request["route"],
             "run_id": request.get("run_id"),
@@ -423,17 +446,18 @@ def main() -> int:
             "artifacts": artifacts,
             "worker_session_id": str(usage.get("id") or ""),
             "usage": usage,
-        })
+        }
+        write_status(job_dir, payload)
         write_progress(job_dir, "failed", percent=100, detail="; ".join(reasons)[:200])
         append_event(job_dir, "terminated", state="terminated",
                      detail="; ".join(reasons)[:300])
-        return 0
+        return payload
 
     if request["route"] == "company":
         worker_status = str(worker_result["status"])
         summary = str(worker_result.get("summary") or content or "公司执行任务已完成。")
         if worker_status == "failed":
-            write_status(job_dir, {
+            payload = {
                 "status": "failed",
                 "route": request["route"],
                 "run_id": request.get("run_id"),
@@ -442,12 +466,13 @@ def main() -> int:
                 "artifacts": artifacts,
                 "worker_session_id": str(usage.get("id") or ""),
                 "usage": usage,
-            })
+            }
+            write_status(job_dir, payload)
             write_progress(job_dir, "failed", percent=100, detail="worker reported failed")
             append_event(job_dir, "terminated", state="terminated",
                          detail=f"worker reported failed: {summary[:200]}")
-            return 0
-        write_status(job_dir, {
+            return payload
+        payload = {
             "status": worker_status,
             "route": request["route"],
             "run_id": request.get("run_id"),
@@ -458,14 +483,15 @@ def main() -> int:
             "usage": usage,
             "completed_at": utc_now(),
             "error": "",
-        })
+        }
+        write_status(job_dir, payload)
         write_progress(job_dir, worker_status, percent=100)
         append_event(job_dir, "completed", state="review",
                      detail=f"company job {worker_status}",
                      payload={"artifacts": len(artifacts)})
-        return 0
+        return payload
 
-    write_status(job_dir, {
+    payload = {
         "status": "completed",
         "route": request["route"],
         "run_id": request.get("run_id"),
@@ -475,11 +501,192 @@ def main() -> int:
         "usage": usage,
         "completed_at": utc_now(),
         "error": "",
-    })
+    }
+    write_status(job_dir, payload)
     write_progress(job_dir, "completed", percent=100)
     append_event(job_dir, "completed", state="review",
                  detail="content job completed, awaiting human review",
                  payload={"artifacts": len(artifacts)})
+    return payload
+
+
+def _content_job_dir_root() -> Path:
+    """Resolve the content job root from the environment, then router config."""
+    env = (os.environ.get("COMPANY_CONTENT_JOB_DIR") or "").strip()
+    if env:
+        return Path(env)
+    try:
+        config = json.loads(read_text_limited(DEFAULT_ROUTER_CONFIG, max_bytes=1024 * 1024))
+    except Exception as exc:  # noqa: BLE001 -- missing/unreadable config -> caller reports
+        raise RuntimeError(
+            f"content_job_dir unconfigured and router config unreadable: {exc}") from exc
+    root = config.get("content_job_dir") if isinstance(config, dict) else None
+    if not root or not str(root).strip():
+        raise RuntimeError(
+            "content_job_dir unconfigured: set COMPANY_CONTENT_JOB_DIR or router_config.json")
+    return Path(str(root))
+
+
+def _content_job_dir(task_id: str) -> Path:
+    """Build and guard the job directory for one v2 ``task.task_id``.
+
+    Delegates to ``company_router.content_job_path`` so the ``..``/separator/
+    symlink escape guard has a single implementation and cannot drift between
+    the legacy launcher and the stdin contract mode.
+    """
+    try:
+        from .company_router import content_job_path
+    except ImportError:  # direct script execution (``python automation/...``)
+        from company_router import content_job_path
+    return content_job_path({"content_job_dir": str(_content_job_dir_root())}, task_id)
+
+
+def token_cost_from_usage(usage: Any) -> int | None:
+    """Sum the measured Hermes token counters; ``None`` when unmeasured.
+
+    The v2 side records ``actual_source=unknown`` when ``token_cost`` is
+    omitted, so an absent/zero reading must return ``None`` rather than a
+    fabricated ``0``.
+    """
+    if not isinstance(usage, dict) or not usage:
+        return None
+    values = [
+        usage[key] for key in _USAGE_TOKEN_KEYS
+        if isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool)
+    ]
+    if not values:
+        return None
+    total = sum(values)
+    return total if total > 0 else None
+
+
+def _maybe_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def stdin_request_from_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map the v2 executor stdin payload to a content ``request.json`` body.
+
+    v2 feeds ``{"task": {...}, "context": "..."}``; the router publishes the
+    content subtype inside ``task.focus_params`` (also mirrored as the raw
+    context string), so both shapes are accepted.
+    """
+    task = payload.get("task")
+    if not isinstance(task, dict):
+        raise TypeError("stdin payload.task must be a JSON object")
+    task_id = str(task.get("task_id") or "").strip()
+    if not task_id:
+        raise ValueError("stdin payload.task.task_id is required")
+    context = payload.get("context")
+    focus = task.get("focus_params")
+    if not isinstance(focus, dict):
+        focus = _maybe_json_object(context)
+    route = str(focus.get("content_route") or focus.get("route") or "").strip()
+    if route not in {"company", "article", "video"}:
+        raise ValueError(f"unsupported content route in focus_params: {route!r}")
+    message = str(
+        focus.get("company_task") or focus.get("task") or context or ""
+    ).strip()
+    if not message:
+        raise ValueError("stdin payload carries no task text")
+    request = {
+        "run_id": str(task.get("run_id") or task_id),
+        "route": route,
+        "message": message,
+        "session_id": str(
+            focus.get("company_session_id") or focus.get("session_id") or ""),
+        "platform": str(focus.get("company_platform") or focus.get("platform") or ""),
+        "created_at": utc_now(),
+    }
+    return task_id, request
+
+
+def _stdin_summary(status: dict[str, Any], job_dir: Path, request: dict[str, Any]) -> str:
+    state = str(status.get("status") or "unknown")
+    route = str(status.get("route") or request.get("route") or "")
+    parts = [f"内容任务 {state}(route={route})"]
+    result = str(status.get("result") or "").strip()
+    if result:
+        parts.append(result[:2000])
+    artifacts = status.get("artifacts")
+    if isinstance(artifacts, list) and artifacts:
+        parts.append("产物: " + "、".join(str(item) for item in artifacts))
+    else:
+        parts.append(f"产物目录: {job_dir}")
+    return "\n".join(parts)
+
+
+def run_stdin_mode() -> int:
+    """Execute one job from the v2 ``--executor-command`` stdin contract.
+
+    stdout is exactly one JSON line (``{"content": ..., "token_cost": N}``,
+    ``token_cost`` omitted when unmeasured); progress/logs go to stderr and the
+    job directory.  A failed/rejected job exits non-zero so the v2 worker
+    records ``rejected``.
+    """
+    try:
+        raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+    except OSError as exc:
+        print(f"[stdin-json] stdin read failed: {exc}", file=sys.stderr)
+        return 2
+    if len(raw) > MAX_STDIN_BYTES:
+        print(f"[stdin-json] stdin payload exceeds {MAX_STDIN_BYTES} bytes",
+              file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise TypeError("stdin payload must be a JSON object")
+        task_id, request = stdin_request_from_payload(payload)
+        job_dir = _content_job_dir(task_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        locked_atomic_write_text(
+            job_dir / "request.json",
+            json.dumps(request, ensure_ascii=False, indent=2),
+        )
+    except Exception as exc:  # noqa: BLE001 -- invalid contract -> clean rejection, non-zero
+        print(f"[stdin-json] rejected: {exc}", file=sys.stderr)
+        return 2
+
+    status = execute_job(job_dir)
+    if str(status.get("status") or "") == "failed":
+        print(f"[stdin-json] job failed: {status.get('error') or 'unknown error'}",
+              file=sys.stderr)
+        return 1
+    result: dict[str, Any] = {"content": _stdin_summary(status, job_dir, request)}
+    token_cost = token_cost_from_usage(status.get("usage"))
+    if token_cost is not None:
+        result["token_cost"] = token_cost
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run a delegated company execution or content-production job")
+    parser.add_argument("--job-dir")
+    parser.add_argument(
+        "--stdin-json",
+        action="store_true",
+        help="v2 executor contract: read {task,context} JSON from stdin and "
+             "print one JSON line {content,token_cost} to stdout",
+    )
+    args = parser.parse_args()
+    if args.stdin_json:
+        return run_stdin_mode()
+    if not args.job_dir:
+        parser.error("--job-dir is required unless --stdin-json is given")
+    job_dir = Path(args.job_dir).resolve()
+    execute_job(job_dir)
+    # Legacy mode keeps its historical exit-0 semantics on every outcome.
     return 0
 
 

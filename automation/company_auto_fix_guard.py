@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +43,10 @@ SPARSE_PATHS = ("automation",)
 #: checkout of automation/ is ~2 MB; the floor is deliberately generous so a
 #: surprise (e.g. a future non-sparse fallback) fails loudly, not mid-checkout.
 MIN_FREE_BYTES = 512 * 1024 * 1024
+
+#: Run directories under the worktree base older than this are garbage collected
+#: on the next run, so an interrupted run cannot accumulate forever.
+GC_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 
 
 def _worktree_base() -> Path:
@@ -80,6 +85,34 @@ def _discard_worktree(worktree: Path, temporary_root: Path) -> None:
     shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+def _gc_stale_run_dirs(base: Path) -> list[str]:
+    """Delete run directories left behind by earlier runs.
+
+    Every run materialises its own ``company-auto-fix-*`` directory under *base*;
+    instruction 5 asks the agent to remove it, but an interrupted run does not.
+    Only directories older than a week are dropped -- the repair commit lives in
+    the repository, never solely in the worktree.
+    """
+    removed: list[str] = []
+    cutoff = time.time() - GC_MAX_AGE_SECONDS
+    try:
+        candidates = sorted(base.glob("company-auto-fix-*"))
+    except OSError:
+        return removed
+    for path in candidates:
+        try:
+            if not path.is_dir() or path.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        _run("git", "worktree", "remove", "--force", str(path / "worktree"))
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(path.name)
+    if removed:
+        _run("git", "worktree", "prune")
+    return removed
+
+
 def _stop(message: str, detail: str = "") -> int:
     print("MANDATORY SAFETY STOP: " + message)
     if detail:
@@ -111,6 +144,7 @@ def main() -> int:
 
     # Clear registrations left by earlier runs before adding a new worktree.
     _run("git", "worktree", "prune")
+    gc_removed = _gc_stale_run_dirs(base)
 
     temporary_root = Path(tempfile.mkdtemp(prefix="company-auto-fix-", dir=base))
     worktree = temporary_root / "worktree"
@@ -136,6 +170,7 @@ def main() -> int:
         "sparse_paths": list(SPARSE_PATHS),
         "dirty_paths": dirty_paths,
         "automation_dirty_paths": automation_dirty,
+        "gc_removed_run_dirs": gc_removed,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     print("=== MANDATORY AUTO-FIX SAFETY OVERRIDE ===")

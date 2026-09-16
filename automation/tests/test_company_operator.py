@@ -579,6 +579,36 @@ class CompanyOperatorTests(unittest.TestCase):
             self.assertIn("公司自驱日报", delivered[0][1])
             self.assertIn("主动完成", delivered[0][1])
 
+    def test_operator_bare_string_platform_allowlist_is_not_split_into_characters(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = self._config(root)
+            config["proactive_delivery"] = True
+            config["proactive_delivery_platforms"] = "weixin"
+            router = sqlite3.connect(config["router_db"])
+            router.execute(
+                """CREATE TABLE route_events (
+                   delivery_platform TEXT,delivery_chat_id TEXT,delivery_thread_id TEXT,
+                   delivery_user_id TEXT,updated_at TEXT)"""
+            )
+            router.execute(
+                "INSERT INTO route_events VALUES ('weixin','chat-1','','user-1','2026-07-15T00:00:00+00:00')"
+            )
+            router.commit()
+            router.close()
+            delivered = []
+
+            def fake_deliverer(_config, origin, message):
+                delivered.append((origin, message))
+                return True, ""
+
+            result = run_cycle(config, worker=lambda *_args: {
+                "status": "completed", "summary": "主动完成", "next_action": "", "metrics": {}, "error": "",
+            }, deliverer=fake_deliverer)
+
+            self.assertTrue(result["delivered"])
+            self.assertEqual(delivered[0][0]["chat_id"], "chat-1")
+
     def test_operator_queues_default_delivery_in_notification_outbox(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -803,6 +833,12 @@ class CompanyOperatorTests(unittest.TestCase):
             row = db.execute("SELECT status,retry_count FROM autonomy_opportunities").fetchone()
             self.assertEqual(row["status"], "open")
             self.assertEqual(row["retry_count"], 1)
+            # An empty_output completion is a failure for the run/ledger tables
+            # too, so TVCR does not count a useless run as productive.
+            for table in ("autonomy_runs", "operational_runs"):
+                self.assertEqual(
+                    db.execute(f"SELECT status FROM {table}").fetchone()[0], "failed", table
+                )
             db.close()
 
     def test_worker_model_degrades_along_ladder(self):

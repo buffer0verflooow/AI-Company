@@ -252,40 +252,46 @@ def record_failure(
     now = now_dt.isoformat(timespec="seconds")
     db = connect(db_path)
     try:
-        row = db.execute(
-            "SELECT attempts FROM notification_outbox WHERE notification_id=?",
-            (notification_id,),
-        ).fetchone()
-        if not row:
-            raise KeyError(f"unknown notification: {notification_id}")
-        attempts = _safe_counter(row["attempts"]) + 1
-        exhausted = attempts >= max(1, int(max_attempts))
-        if exhausted:
-            state = "dead_letter"
-            next_attempt = ""
-            dead_at = now
-        else:
-            state = "pending"
-            delay = _retry_delay_seconds(
-                notification_id, attempts, retry_base_seconds, retry_max_seconds,
+        # Serialize the read-modify-write: the one-minute notifier can overlap
+        # with a manual run, and two processes both reading attempts=N would
+        # each write N+1, losing a failed-attempt increment (and delaying or
+        # skipping dead-lettering).  Single-statement enqueue/mark updates rely
+        # on SQLite's own serialization; only this RMW needs the file lock.
+        with file_lock(db_path):
+            row = db.execute(
+                "SELECT attempts FROM notification_outbox WHERE notification_id=?",
+                (notification_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"unknown notification: {notification_id}")
+            attempts = _safe_counter(row["attempts"]) + 1
+            exhausted = attempts >= max(1, int(max_attempts))
+            if exhausted:
+                state = "dead_letter"
+                next_attempt = ""
+                dead_at = now
+            else:
+                state = "pending"
+                delay = _retry_delay_seconds(
+                    notification_id, attempts, retry_base_seconds, retry_max_seconds,
+                )
+                next_attempt = (now_dt + timedelta(seconds=delay)).isoformat(timespec="seconds")
+                dead_at = ""
+            db.execute(
+                """UPDATE notification_outbox
+                   SET state=?,attempts=?,next_attempt_at=?,last_attempt_at=?,last_error=?,
+                       updated_at=?,dead_lettered_at=?
+                   WHERE notification_id=? AND state='pending'""",
+                (state, attempts, next_attempt, now, str(error or "delivery failed"), now, dead_at, notification_id),
             )
-            next_attempt = (now_dt + timedelta(seconds=delay)).isoformat(timespec="seconds")
-            dead_at = ""
-        db.execute(
-            """UPDATE notification_outbox
-               SET state=?,attempts=?,next_attempt_at=?,last_attempt_at=?,last_error=?,
-                   updated_at=?,dead_lettered_at=?
-               WHERE notification_id=? AND state='pending'""",
-            (state, attempts, next_attempt, now, str(error or "delivery failed"), now, dead_at, notification_id),
-        )
-        db.commit()
-        updated = db.execute(
-            "SELECT * FROM notification_outbox WHERE notification_id=?",
-            (notification_id,),
-        ).fetchone()
-        return dict(updated) if updated else {
-            "notification_id": notification_id, "state": state, "attempts": attempts,
-        }
+            db.commit()
+            updated = db.execute(
+                "SELECT * FROM notification_outbox WHERE notification_id=?",
+                (notification_id,),
+            ).fetchone()
+            return dict(updated) if updated else {
+                "notification_id": notification_id, "state": state, "attempts": attempts,
+            }
     finally:
         db.close()
 

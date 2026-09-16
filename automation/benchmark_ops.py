@@ -48,6 +48,9 @@ import urllib.request
 BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://tsecbench.zc.tencent.com")
 API = BASE_URL + "/openapi/v1/challenges"
 MAX_ACTIVE = 3  # 平台同时活跃容器上限
+#: Bound the platform response body so a hostile/broken endpoint cannot OOM
+#: this CLI (the request itself is already timeout-bounded).
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 def _require_token() -> str:
@@ -75,23 +78,27 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
         # BASE_URL is set by the operator via BENCHMARK_BASE_URL (default https),
         # never derived from untrusted input — scheme is operator-controlled.
         with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310
-            body = resp.read().decode(errors="replace")
-            if body.strip():
-                try:
-                    parsed = json.loads(body)
-                except json.JSONDecodeError:
-                    # A 2xx body that is not JSON (e.g. a WAF/proxy HTML page)
-                    # must surface as a normal API result, not crash the CLI.
-                    return {"http": resp.status, "message": body[:300]}
-                if isinstance(parsed, list):  # challenges GET 返回裸数组
-                    return {"http": resp.status, "challenges": parsed}
-                if not isinstance(parsed, dict):
-                    return {"http": resp.status, "message": str(parsed)[:300]}
-                return {"http": resp.status, **parsed}
-            return {"http": resp.status}
+            status = resp.status
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            return {"http": status, "message": f"response exceeds {MAX_RESPONSE_BYTES} bytes"}
+        body = raw.decode(errors="replace")
+        if body.strip():
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                # A 2xx body that is not JSON (e.g. a WAF/proxy HTML page)
+                # must surface as a normal API result, not crash the CLI.
+                return {"http": status, "message": body[:300]}
+            if isinstance(parsed, list):  # challenges GET 返回裸数组
+                return {"http": status, "challenges": parsed}
+            if not isinstance(parsed, dict):
+                return {"http": status, "message": str(parsed)[:300]}
+            return {"http": status, **parsed}
+        return {"http": status}
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read().decode(errors="replace")
+            body = exc.read(MAX_RESPONSE_BYTES + 1).decode(errors="replace")
         finally:
             # The error response holds a socket/fd; repeated 4xx/5xx must not
             # leak them for the life of the process.

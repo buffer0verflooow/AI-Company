@@ -27,9 +27,19 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
-    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
+    from ._safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        scrub_environment,
+    )
 except ImportError:  # direct script execution
-    from _safe_io import atomic_write_text, read_text_limited, scrub_environment
+    from _safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        scrub_environment,
+    )
 
 COMPANY_ROOT = Path("/home/pwn/workspace/company")
 DEFAULT_CONFIG = COMPANY_ROOT / "automation/market_radar_config.json"
@@ -228,7 +238,10 @@ def _run_one_query(theme_title: str, query: str, output_dir: Path) -> list[dict]
             return [{"error": "agentkey worker produced no output file"}]
 
         try:
-            results = json.loads(read_text_limited(output_path, max_bytes=MAX_OUTPUT_BYTES))
+            # The output file is written by the isolated worker: read it with
+            # O_NOFOLLOW so a planted symlink cannot make the probe read an
+            # arbitrary host file (mirrors company_operator/company_result_notifier).
+            results = json.loads(read_text_limited_nofollow(output_path, max_bytes=MAX_OUTPUT_BYTES))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as exc:
             return [{"error": f"invalid JSON from agentkey worker: {exc}"}]
         if isinstance(results, dict):

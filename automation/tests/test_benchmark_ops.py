@@ -103,7 +103,7 @@ class ApiBodyParsingTests(unittest.TestCase):
             def __init__(self):
                 super().__init__("http://x", 400, "bad", {}, None)
 
-            def read(self):
+            def read(self, *args):
                 return b"[1, 2]"
 
         with patch("automation.benchmark_ops.urllib.request.urlopen", side_effect=FakeHTTPError()):
@@ -121,7 +121,7 @@ class ApiBodyParsingTests(unittest.TestCase):
             def __exit__(self, *exc):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return b"<html>not json</html>"
 
         with patch("automation.benchmark_ops.urllib.request.urlopen", return_value=FakeResponse()):

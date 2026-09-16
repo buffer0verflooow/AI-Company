@@ -56,6 +56,20 @@ class SwarmExecutorPromptTests(unittest.TestCase):
         self.assertIn("先核查环境状态", prompt)
         self.assertIn("平台答案不符", prompt)
 
+    def test_build_prompt_redacts_model_profile_secrets(self):
+        # model_profile may carry an api_key; it must never be echoed into the
+        # prompt (sent to the provider and passed as worker argv).
+        prompt = build_prompt({
+            "task": {"reason": "x"},
+            "model_profile": {
+                "provider": "zenmux", "model": "m", "api_key": "sk-secret-value",
+                "nested": {"token": "t0ken"},
+            },
+        })
+        self.assertIn("zenmux", prompt)
+        self.assertNotIn("sk-secret-value", prompt)
+        self.assertNotIn("t0ken", prompt)
+
 
 class SwarmNativeExecutorContractTests(unittest.TestCase):
     def test_non_object_payload_returns_clean_json_failure(self):
@@ -73,6 +87,36 @@ class SwarmNativeExecutorContractTests(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertFalse(payload["success"])
         self.assertIn("must be an object", payload["error"])
+
+    def test_oversized_stdin_returns_clean_json_failure(self):
+        # The external stdin payload must be size-bounded, mirroring
+        # content_hermes_executor / company_router.
+        import contextlib
+        import io
+
+        import automation.swarm_native_executor as sne
+        with patch("sys.stdin", io.StringIO("x" * (sne.MAX_STDIN_BYTES + 1))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = sne.main()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertFalse(payload["success"])
+        self.assertIn("exceeds", payload["error"])
+
+    def test_hermes_oversized_stdin_returns_clean_json_failure(self):
+        import contextlib
+        import io
+
+        import automation.swarm_hermes_executor as she
+        with patch("sys.stdin", io.StringIO("x" * (she.MAX_STDIN_BYTES + 1))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = she.main()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertFalse(payload["success"])
+        self.assertIn("exceeds", payload["error"])
 
     def test_malformed_agent_command_returns_clean_json_failure(self):
         # A broken SWARM_NATIVE_AGENT_COMMAND (unbalanced quote) must surface as

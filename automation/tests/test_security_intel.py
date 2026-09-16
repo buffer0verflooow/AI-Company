@@ -7,6 +7,7 @@ the oldest (least actionable) entries and silently drops the newest ones.
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
 
@@ -92,6 +93,21 @@ class KevParserRobustnessTests(unittest.TestCase):
     def test_invalid_json_returns_empty(self):
         now = datetime.now(timezone.utc)
         self.assertEqual(parse_cisa_kev("<html>not json</html>", self._src(), now), [])
+
+    def test_parser_keeps_newest_entries_when_feed_is_newest_first(self):
+        # The live CISA KEV feed delivers newest-first.  The parser must cap to
+        # the newest records regardless of upstream ordering; the old
+        # ``reversed(vulns)`` kept the 20 oldest (2021-11-03) in production.
+        now = datetime.now(timezone.utc)
+        vulns = [
+            {"cveID": f"CVE-2026-{index:04d}", "dateAdded": f"2026-01-{index + 1:02d}"}
+            for index in range(30)
+        ][::-1]
+        body = json.dumps({"vulnerabilities": vulns})
+        items = parse_cisa_kev(body, self._src(), now)
+        self.assertEqual(len(items), 15)
+        self.assertEqual(items[0]["published"], "2026-01-30")
+        self.assertEqual(items[-1]["published"], "2026-01-16")
 
 
 if __name__ == "__main__":

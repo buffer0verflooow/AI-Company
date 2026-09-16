@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from automation import content_job_stale_watch as stale
 from automation.content_job_state import read_lifecycle, show, transition
 
 
@@ -131,6 +132,22 @@ class TransitionFlowTests(unittest.TestCase):
             job = _make_job(Path(td), "failed")
             self.assertNotEqual(transition(job, "published"), 0)
             self.assertEqual(read_lifecycle(job)["state"], "terminated")
+
+
+class StaleWatchStateFallbackTests(unittest.TestCase):
+    def test_lifecycle_without_state_key_falls_back_to_status_json(self):
+        # job_state documents lifecycle.json -> status.json fallback; a
+        # lifecycle.json that parses but has no usable "state" must not shadow
+        # a valid status.json.
+        with tempfile.TemporaryDirectory() as td:
+            job = Path(td) / "job"
+            job.mkdir()
+            (job / "lifecycle.json").write_text(
+                json.dumps({"history": []}), encoding="utf-8")
+            (job / "status.json").write_text(
+                json.dumps({"status": "failed"}), encoding="utf-8")
+            state, _mtime = stale.job_state(str(job))
+            self.assertEqual(state, "failed")
 
 
 if __name__ == "__main__":

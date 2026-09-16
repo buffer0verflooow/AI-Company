@@ -17,10 +17,10 @@ from typing import Any
 
 try:
     from . import pricing
-    from ._safe_io import read_text_limited, sqlite_uri
+    from ._safe_io import file_lock, read_text_limited, sqlite_uri
 except ImportError:  # direct ``python automation/finance_ledger.py`` invocation
     import pricing  # type: ignore[no-redef]
-    from _safe_io import read_text_limited, sqlite_uri
+    from _safe_io import file_lock, read_text_limited, sqlite_uri
 
 
 LOGGER = logging.getLogger(__name__)
@@ -74,10 +74,14 @@ def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db: sqlite3.Connection | None = None
     try:
-        db = sqlite3.connect(path)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(
+        # Protect schema creation and the ALTER migration: concurrent connects
+        # that both observe a missing column would otherwise race and one would
+        # raise "duplicate column name", aborting --sync/--add-actual.
+        with file_lock(path):
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript(
             """
         CREATE TABLE IF NOT EXISTS actual_transactions (
             transaction_id TEXT PRIMARY KEY,
@@ -139,10 +143,10 @@ def connect(path: Path) -> sqlite3.Connection:
         );
             """
         )
-        db.commit()
-        _migrate_usage_snapshots(db)
-        db.commit()
-        return db
+            db.commit()
+            _migrate_usage_snapshots(db)
+            db.commit()
+            return db
     except BaseException:
         if db is not None:
             db.close()

@@ -103,10 +103,13 @@ def import_rows(source: Path, evidence: Path, db_path: Path) -> int:
     temporary_path = Path(temporary)
     try:
         shutil.copy2(source, temporary_path)
+        # Hash the staged bytes before publishing them: a concurrent import for
+        # a different source could replace ``evidence`` between the replace and
+        # a later digest(evidence), recording a hash for the other file.
+        evidence_hash = digest(temporary_path)
         os.replace(temporary_path, evidence)
     finally:
         temporary_path.unlink(missing_ok=True)
-    evidence_hash = digest(evidence)
     collected_at = datetime.fromtimestamp(source.stat().st_mtime, tz=timezone.utc).isoformat()
     db = connect(db_path)
     try:

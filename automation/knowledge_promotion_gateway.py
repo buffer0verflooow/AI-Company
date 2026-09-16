@@ -224,7 +224,12 @@ def sanitize_preview(text: str, limit: int = 600) -> str:
 
 def _yaml_scalar(value: Any) -> str:
     text = str(value or "")
-    if re.fullmatch(r"[A-Za-z0-9_.:@+/-]+", text) and text.lower() not in {
+    # Only a conservative identifier-like token is safe as a YAML plain
+    # scalar.  The old allow-set permitted ':' and '@', which produce invalid
+    # frontmatter ("@alice" / "team:"), and bare dates/numbers
+    # ("2026-07-15", "10:30") that YAML parsers silently coerce to non-strings.
+    # Everything else is emitted as a JSON string, which is valid YAML.
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", text) and text.lower() not in {
         "null", "true", "false", "yes", "no", "on", "off",
     }:
         return text

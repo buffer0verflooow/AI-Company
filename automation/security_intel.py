@@ -358,15 +358,21 @@ def parse_cisa_kev(body: str, src: dict[str, Any], now: datetime) -> list[dict[s
     if not isinstance(vulns, list):
         return []
     items = []
-    # CISA's KEV catalog is ordered ascending by dateAdded (newest appended at
-    # the end), so walk it backwards and keep the NEWEST ``src["max"]`` records.
-    # Truncating the head would keep only the oldest entries and, after the
-    # first persist, deduplicate every later fetch into a no-op.
-    for v in reversed(vulns):
-        if not isinstance(v, dict):
-            # A list element that is not an object cannot carry the fields
-            # below; skip it rather than crash the whole feed.
-            continue
+    # The live CISA KEV feed is ordered newest-first by dateAdded, but do not
+    # rely on upstream ordering: sort by dateAdded descending so the
+    # ``src["max"]`` cap always keeps the NEWEST records.  Walking the raw list
+    # in reverse kept only the oldest entries, which then deduplicated every
+    # later fetch into a no-op.  Non-object elements are filtered before the
+    # sort (they cannot carry a dateAdded).
+    def _date_added(entry: dict[str, Any]) -> str:
+        value = entry.get("dateAdded")
+        return "" if value is None else str(value)
+
+    for v in sorted(
+        (entry for entry in vulns if isinstance(entry, dict)),
+        key=_date_added,
+        reverse=True,
+    ):
         cve = str(v.get("cveID", ""))
         vendor = str(v.get("vendorProject", ""))
         product = str(v.get("product", ""))

@@ -133,7 +133,13 @@ def find_candidate_notes(vault: Path) -> list[Path]:
     candidates = []
     for md_file in vault.rglob("*.md"):
         rel = str(md_file.relative_to(vault))
-        if any(pat in rel for pat in EXCLUDE_PATTERNS):
+        # Directory patterns are path fragments; the trailing entries are exact
+        # filenames.  A raw substring match dropped any note whose name merely
+        # contained one of them ("catalog.md", "blog.md", "myindex.md").
+        if any(
+            (pat in rel) if pat.endswith("/") else (md_file.name == pat)
+            for pat in EXCLUDE_PATTERNS
+        ):
             continue
         try:
             raw = read_text_limited(md_file, max_bytes=10 * 1024 * 1024, errors="replace")

@@ -558,7 +558,7 @@ def discover_opportunities(
                 "source_type": "standing_mission",
                 "source_ref": bucket,
                 "mission_id": mission_id,
-                "product_line": mission.get("product_line", "company"),
+                "product_line": mission.get("product_line") or "company",
                 "title": title,
                 "description": prompt,
                 "action_kind": "internal_mission",
@@ -948,7 +948,14 @@ def _record_operational_run(
             output_bytes += path.stat().st_size
         except OSError:
             continue
-    status = "completed" if result["status"] in {"completed", "needs_approval"} else "failed"
+    # A nominally completed run that produced no usable output is a failure for
+    # the ledger too: recording it as "completed" made TVCR count an empty run
+    # as productive and schedule a bogus outcome follow-up.  This mirrors the
+    # opportunity-state decision made by execute_opportunity.
+    if result["status"] == "completed" and _is_empty_output(result, artifacts):
+        status = "failed"
+    else:
+        status = "completed" if result["status"] in {"completed", "needs_approval"} else "failed"
     now = utc_now()
     db.execute(
         """INSERT INTO operational_runs
@@ -1117,7 +1124,7 @@ def execute_opportunity(
             """UPDATE autonomy_runs SET status=?,result_summary=?,next_action=?,metrics_json=?,
                artifacts_json=?,worker_session_id=?,error=?,completed_at=?,updated_at=? WHERE run_id=?""",
             (
-                result["status"], result.get("summary", ""), result.get("next_action", ""),
+                "failed" if failed else result["status"], result.get("summary", ""), result.get("next_action", ""),
                 _json(result.get("metrics", {})), _json(artifacts), str(usage.get("id") or ""),
                 result.get("error", ""), completed, completed, run_id,
             ),
@@ -1333,7 +1340,14 @@ def run_cycle(
     delivery_error = ""
     chosen_deliverer = deliverer or _default_deliverer
     if config.get("proactive_delivery", True) and origin.get("platform") and origin.get("chat_id"):
-        allowed = {str(item).lower() for item in (config.get("proactive_delivery_platforms") or [])}
+        raw_platforms = config.get("proactive_delivery_platforms") or []
+        # A bare string must not iterate into single characters, and a scalar
+        # must not raise TypeError (mirrors company_result_notifier).
+        if isinstance(raw_platforms, str):
+            raw_platforms = [raw_platforms]
+        elif not isinstance(raw_platforms, (list, tuple, set)):
+            raw_platforms = []
+        allowed = {str(item).lower() for item in raw_platforms}
         if allowed and origin["platform"].lower() not in allowed:
             try:
                 try:

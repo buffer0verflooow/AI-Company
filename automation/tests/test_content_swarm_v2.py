@@ -658,5 +658,35 @@ class TokenCostUnitTests(unittest.TestCase):
         self.assertIsNone(che.token_cost_from_usage(None))
 
 
+class ResultArtifactSymlinkTests(unittest.TestCase):
+    def test_company_result_json_symlink_is_refused(self):
+        # result.json lives in the worker-writable job dir.  A symlink planted
+        # there must be treated as a missing artifact, not read through (which
+        # would deliver an arbitrary host file as the worker summary).
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = Path(td) / "job"
+            job_dir.mkdir()
+            (job_dir / "request.json").write_text(json.dumps({
+                "run_id": "company-run", "route": "company", "message": "do work",
+            }), encoding="utf-8")
+            secret = Path(td) / "secret.txt"
+            secret.write_text("TOP-SECRET", encoding="utf-8")
+
+            def fake_run(command, **kwargs):  # noqa: ARG001 -- executor subprocess
+                (job_dir / "task-report.md").write_text("report", encoding="utf-8")
+                link = job_dir / "result.json"
+                link.unlink(missing_ok=True)
+                link.symlink_to(secret)
+                return _FakeProc(returncode=0)
+
+            with patch.object(che.subprocess, "run", side_effect=fake_run), \
+                    patch.object(che, "worker_usage", return_value={}):
+                status = che.execute_job(job_dir)
+
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("result.json", status["error"])
+            self.assertNotIn("TOP-SECRET", json.dumps(status, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     unittest.main()

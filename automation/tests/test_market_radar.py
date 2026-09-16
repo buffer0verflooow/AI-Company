@@ -228,5 +228,25 @@ class MarketRadarTests(unittest.TestCase):
             self.assertIn("quota exhausted", row[1])
 
 
+class BatchMarkdownNullFieldTests(unittest.TestCase):
+    def test_null_optional_query_fields_fall_back(self):
+        # A JSON null for theme_title/product_line/channel must fall back, not
+        # insert None into the NOT NULL signal columns and abort the whole run.
+        text = (
+            "## Query 1:\n"
+            "### 1. Example headline\n"
+            "- **URL**: https://example.com/article\n"
+            "snippet text\n"
+        )
+        records = parse_batch_markdown(text, [{
+            "id": "q1", "query": "query text", "theme": "ai",
+            "theme_title": None, "product_line": None, "channel": None,
+        }])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["theme_title"], "ai")
+        self.assertEqual(records[0]["product_line"], "company")
+        self.assertEqual(records[0]["channel"], "web")
+
+
 if __name__ == "__main__":
     unittest.main()

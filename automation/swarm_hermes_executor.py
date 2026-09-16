@@ -16,6 +16,31 @@ except ImportError:  # direct script execution
 
 WORKSPACE = "/home/pwn/workspace"
 INTERNAL_WORKER_PREFIX = "[COMPANY_WORKER_INTERNAL]"
+#: Bound the external executor stdin payload (mirrors content_hermes_executor
+#: and company_router) so a runaway writer cannot buffer the whole pipe in RAM.
+MAX_STDIN_BYTES = 8 * 1024 * 1024
+
+#: ``model_profile`` is payload-carried configuration and may legitimately hold
+#: an api_key (see swarm_native_executor._resolve_llm_config).  It must never be
+#: echoed into the prompt: the prompt is sent to the model provider every round
+#: and passed as a process argument to the worker CLI (visible via ps).
+_PROFILE_SECRET_KEYS = frozenset({
+    "api_key", "key", "secret", "token", "password", "passwd",
+    "authorization", "auth", "cookie", "bearer",
+})
+
+
+def _redacted_profile(value: Any) -> Any:
+    """Copy of a model_profile with credential keys removed (recursively)."""
+    if isinstance(value, dict):
+        return {
+            key: _redacted_profile(item)
+            for key, item in value.items()
+            if str(key).strip().lower() not in _PROFILE_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_redacted_profile(item) for item in value]
+    return value
 
 
 def _safe_counter(value: Any) -> int:
@@ -47,7 +72,7 @@ def build_prompt(payload: dict[str, Any]) -> str:
 任务角色：{task.get('required_role', 'analyst')}
 任务类型：{task.get('task_type', 'analyze')}
 任务说明：{reason}
-模型画像：{json.dumps(profile, ensure_ascii=False)}
+模型画像：{json.dumps(_redacted_profile(profile), ensure_ascii=False)}
 
 共享上下文：
 {context}
@@ -138,7 +163,19 @@ def _run_opencode(profile: dict, prompt: str, env: dict) -> dict:
 
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
+        raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+    except OSError as exc:
+        print(json.dumps({"success": False, "error": f"stdin read failed: {exc}", "capture": False}))
+        return 0
+    if len(raw) > MAX_STDIN_BYTES:
+        print(json.dumps({
+            "success": False,
+            "error": f"stdin payload exceeds {MAX_STDIN_BYTES} bytes",
+            "capture": False,
+        }))
+        return 0
+    try:
+        payload = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps({"success": False, "error": f"invalid executor input: {exc}", "capture": False}))
         return 0

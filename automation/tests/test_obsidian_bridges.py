@@ -182,5 +182,23 @@ class SwarmBridgeTests(unittest.TestCase):
             self.assertIn("# 自动段", wiki.read_text(encoding="utf-8"))
 
 
+class CaptureCandidateScanTests(unittest.TestCase):
+    def test_filename_exclusions_match_exact_basename_not_substring(self):
+        # "log.md"/"index.md"/"Home.md" are exact filenames, not substrings:
+        # a substring match silently skipped catalog.md / travel-log.md.
+        with tempfile.TemporaryDirectory() as td:
+            vault = Path(td)
+            (vault / "catalog.md").write_text(
+                "---\nswarm: capture\n---\nbody", encoding="utf-8")
+            (vault / "log.md").write_text(
+                "---\nswarm: capture\n---\nbody", encoding="utf-8")
+            notes = vault / "notes"
+            notes.mkdir()
+            (notes / "travel-log.md").write_text(
+                "---\nswarm: capture\n---\nbody", encoding="utf-8")
+            found = {path.name for path in capture.find_candidate_notes(vault)}
+            self.assertEqual(found, {"catalog.md", "travel-log.md"})
+
+
 if __name__ == "__main__":
     unittest.main()

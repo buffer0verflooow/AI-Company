@@ -37,7 +37,11 @@ def main() -> int:
         print(f"nothing to backfill: {JOBS_DIR} does not exist")
         return 0
     for job_dir in sorted(JOBS_DIR.iterdir()):
-        if not job_dir.is_dir():
+        # Reject a worker-planted symlink: is_dir() follows links, so a link in
+        # the worker-writable jobs tree would send the lifecycle/lock/event
+        # writes below to an arbitrary host directory.  Mirrors
+        # content_job_stale_watch and operations_control.sync_operational_runs.
+        if not job_dir.is_dir() or job_dir.is_symlink():
             continue
         status_path = job_dir / 'status.json'
         lc_path = job_dir / 'lifecycle.json'

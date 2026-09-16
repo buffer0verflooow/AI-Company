@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from automation._safe_io import (
     atomic_write_text,
@@ -60,6 +61,27 @@ class SafeIOTests(unittest.TestCase):
             self.assertEqual(
                 read_text_limited_nofollow(target, max_bytes=1024), "secret"
             )
+
+    def test_read_text_limited_nofollow_handles_short_reads(self):
+        # os.read() may return fewer bytes than requested (network/FUSE).  A
+        # single short read must not truncate the payload or let an oversized
+        # file slip past the max_bytes guard.
+        import automation._safe_io as safe_io
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "payload.txt"
+            path.write_text("abcdefghij", encoding="utf-8")
+            real_read = safe_io.os.read
+
+            def short_read(fd, count):
+                return real_read(fd, min(count, 3))
+
+            with mock.patch.object(safe_io.os, "read", side_effect=short_read):
+                self.assertEqual(
+                    read_text_limited_nofollow(path, max_bytes=100), "abcdefghij"
+                )
+                with self.assertRaises(ValueError):
+                    read_text_limited_nofollow(path, max_bytes=5)
 
     def test_atomic_write_preserves_existing_permissions(self):
         with tempfile.TemporaryDirectory() as td:

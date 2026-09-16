@@ -169,7 +169,19 @@ def read_text_limited_nofollow(
         # pre-open is_file() check and the open itself.
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"refusing to read non-regular file: {path}")
-        payload = os.read(fd, max_bytes + 1)
+        # A single os.read() may return short (notably on network/FUSE
+        # filesystems); treating that as EOF would silently truncate the
+        # payload and let an oversized file slip past the max_bytes guard.
+        # Loop until EOF or max_bytes + 1 bytes have been collected.
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(fd, max_bytes + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        payload = b"".join(chunks)
     finally:
         os.close(fd)
     if len(payload) > max_bytes:
@@ -311,7 +323,10 @@ def sqlite_connection(
         else:
             db = sqlite3.connect(sqlite_uri(path, mode="ro"), uri=True, timeout=timeout)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA busy_timeout=5000")
+        # ``sqlite3.connect(timeout=...)`` already installs the busy handler;
+        # re-setting a hard-coded 5000 ms here would silently override a caller
+        # that asked for a shorter timeout.  Mirror the requested timeout.
+        db.execute(f"PRAGMA busy_timeout={max(0, int(timeout * 1000))}")
         if not read_only:
             db.execute("PRAGMA journal_mode=WAL")
         yield db

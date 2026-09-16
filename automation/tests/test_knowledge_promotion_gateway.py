@@ -9,6 +9,7 @@ from pathlib import Path
 from automation.knowledge_promotion_gateway import (
     _tags,
     _trust,
+    _yaml_scalar,
     approve,
     connect_gate,
     list_candidates,
@@ -16,6 +17,17 @@ from automation.knowledge_promotion_gateway import (
     sanitize_preview,
     scan,
 )
+
+
+class YamlScalarTests(unittest.TestCase):
+    def test_unsafe_plain_scalars_are_quoted(self):
+        # A plain YAML scalar containing '@'/':' is invalid or type-coerced
+        # (dates, sexagesimals); only conservative identifiers stay unquoted.
+        self.assertEqual(_yaml_scalar("reviewer"), "reviewer")
+        self.assertEqual(_yaml_scalar("kb_2026-07-15"), "kb_2026-07-15")
+        for value in ("@alice", "team:", "10:30", "2026-07-15", ".inf", "null", "yes"):
+            rendered = _yaml_scalar(value)
+            self.assertTrue(rendered.startswith('"'), (value, rendered))
 
 
 class KnowledgePromotionTests(unittest.TestCase):

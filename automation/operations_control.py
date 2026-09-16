@@ -1495,13 +1495,20 @@ def _recompute_review_status(db: sqlite3.Connection, review_id: str, now: str) -
     return review_status
 
 
-def _approve_proposal(db: sqlite3.Connection, proposal: sqlite3.Row, *, actor: str, note: str, now: str) -> str:
-    """Approve one proposal and spawn its experiment (no commit — caller owns tx)."""
-    db.execute(
+def _approve_proposal(db: sqlite3.Connection, proposal: sqlite3.Row, *, actor: str, note: str, now: str) -> str | None:
+    """Approve one proposal and spawn its experiment (no commit — caller owns tx).
+
+    Returns the new experiment id, or ``None`` when a concurrent decision (or
+    auto-approval) already moved the proposal off ``pending_approval``; the
+    caller must not then create an experiment for a decided row.
+    """
+    changed = db.execute(
         """UPDATE improvement_proposals SET status='approved',decided_by=?,decided_at=?,decision_note=?,updated_at=?
-           WHERE proposal_id=?""",
+           WHERE proposal_id=? AND status='pending_approval'""",
         (actor, now, note, now, proposal["proposal_id"]),
     )
+    if changed.rowcount != 1:
+        return None
     experiment_id = _create_experiment_for_proposal(db, proposal, now)
     _recompute_review_status(db, proposal["review_id"], now)
     return experiment_id
@@ -1597,13 +1604,16 @@ def auto_approve_proposals(
             if reason:
                 skipped.append({"proposal_id": row["proposal_id"], "reason": reason})
                 continue
-            if not dry_run:
-                _approve_proposal(
-                    db, row,
-                    actor=actor,
-                    note=f"策略化自动批准：P2/低风险，change_scopes {sorted(scopes)} 落在已批准范围内",
-                    now=stamp,
-                )
+            if not dry_run and _approve_proposal(
+                db, row,
+                actor=actor,
+                note=f"策略化自动批准：P2/低风险，change_scopes {sorted(scopes)} 落在已批准范围内",
+                now=stamp,
+            ) is None:
+                # A concurrent user decision won the race: never overwrite it
+                # or spawn an experiment for a row we no longer own.
+                skipped.append({"proposal_id": row["proposal_id"], "reason": "decided concurrently"})
+                continue
             approved_ids.append(row["proposal_id"])
         if not dry_run:
             db.commit()
@@ -1658,15 +1668,19 @@ def escalate_stale_proposals(
         for row in pending:
             product_line = str(row["product_line"] or "company")
             if str(row["review_date"] or "") < latest_date.get(product_line, ""):
-                superseded.append(row["proposal_id"])
                 if not dry_run:
-                    db.execute(
+                    changed = db.execute(
                         """UPDATE improvement_proposals
                            SET status='superseded',decided_by='sla-auto-expire',decided_at=?,
                                decision_note='更晚的复盘已取代本提案，SLA 自动过期。',updated_at=?
-                           WHERE proposal_id=?""",
+                           WHERE proposal_id=? AND status='pending_approval'""",
                         (stamp, stamp, row["proposal_id"]),
                     )
+                    if changed.rowcount != 1:
+                        # A concurrent approval/rejection already decided this
+                        # row; do not silently flip a human decision.
+                        continue
+                superseded.append(row["proposal_id"])
                 continue
             if str(row["priority"] or "") == "P0" and not str(row["escalated_at"] or "").strip():
                 try:
@@ -1848,11 +1862,15 @@ def reap_experiments(
                     backfilled.append(exp_id)
                 due_dt = _parse_dt(due)
                 if due_dt and due_dt <= now_dt:
-                    db.execute(
-                        "UPDATE operating_experiments SET status='evaluating',updated_at=? WHERE experiment_id=?",
+                    # Guard on the observed status so a concurrent stop/success
+                    # cannot be resurrected into 'evaluating'.
+                    changed = db.execute(
+                        "UPDATE operating_experiments SET status='evaluating',updated_at=? "
+                        "WHERE experiment_id=? AND status='running'",
                         (now, exp_id),
                     )
-                    advanced.append(exp_id)
+                    if changed.rowcount == 1:
+                        advanced.append(exp_id)
             elif row["status"] == "planned":
                 created = _parse_dt(row["created_at"])
                 if created and (now_dt - created) >= timedelta(hours=evaluation_window_hours):

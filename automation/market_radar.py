@@ -405,12 +405,13 @@ def parse_batch_markdown(text: str, queries: list[dict[str, Any]]) -> list[dict[
                 current = {
                     "query_id": query["id"], "query_text": query["query"],
                     "theme": query["theme"],
-                    # ``theme_title`` is optional in validate_queries; fall back
-                    # to the validated theme slug instead of raising KeyError
-                    # and discarding every batch of the run.
-                    "theme_title": query.get("theme_title", query["theme"]),
-                    "product_line": query.get("product_line", "company"),
-                    "channel": query.get("channel", "web"),
+                    # ``theme_title`` is optional in validate_queries; a JSON
+                    # ``null`` for any of these optional fields must still fall
+                    # back, not insert None into the NOT NULL columns below and
+                    # abort the whole run (discarding every collected batch).
+                    "theme_title": query.get("theme_title") or query["theme"],
+                    "product_line": query.get("product_line") or "company",
+                    "channel": query.get("channel") or "web",
                     "title": result_match.group(1), "url": "", "snippet_lines": [],
                 }
             continue

@@ -60,7 +60,7 @@ def job_state(job_dir: str):
             d = json.loads(payload)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(d, dict):
+        if isinstance(d, dict) and d.get(key):
             try:
                 modified = candidate.stat().st_mtime
             except OSError:

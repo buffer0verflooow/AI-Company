@@ -20,6 +20,7 @@ try:
         locked_append_text,
         locked_atomic_write_text,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_connection,
     )
@@ -28,6 +29,7 @@ except ImportError:  # direct script execution
         locked_append_text,
         locked_atomic_write_text,
         read_text_limited,
+        read_text_limited_nofollow,
         scrub_environment,
         sqlite_connection,
     )
@@ -417,13 +419,19 @@ def execute_job(job_dir: Path) -> dict[str, Any]:
         write_progress(job_dir, "failed", percent=100, detail="artifact scan failed")
         return payload
     usage = worker_usage(job_dir)
-    missing = [name for name in expected if not (job_dir / name).is_file()]
+    # A planted symlink must count as missing: is_file() follows it, and the
+    # result.json read below would otherwise follow it too (company_operator
+    # reads its worker result.json with O_NOFOLLOW for the same reason).
+    missing = [
+        name for name in expected
+        if (job_dir / name).is_symlink() or not (job_dir / name).is_file()
+    ]
     content = proc.stdout.strip()[-12000:]
     error = proc.stderr.strip()[-4000:]
     worker_result: dict[str, Any] = {}
     if request["route"] == "company" and not missing:
         try:
-            value = json.loads(read_text_limited(job_dir / "result.json", max_bytes=2 * 1024 * 1024))
+            value = json.loads(read_text_limited_nofollow(job_dir / "result.json", max_bytes=2 * 1024 * 1024))
             if not isinstance(value, dict):
                 raise TypeError("result.json must contain an object")
             worker_result = value

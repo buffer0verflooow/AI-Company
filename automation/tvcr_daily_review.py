@@ -15,7 +15,12 @@ from typing import Any
 
 try:
     from . import pricing
-    from ._safe_io import atomic_write_text, read_text_limited, scrub_environment
+    from ._safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        scrub_environment,
+    )
     from .operations_control import (
         DEFAULT_TIMEZONE,
         PROPOSAL_ID_RE,
@@ -35,7 +40,12 @@ try:
     )
 except ImportError:
     import pricing  # type: ignore[no-redef]
-    from _safe_io import atomic_write_text, read_text_limited, scrub_environment
+    from _safe_io import (
+        atomic_write_text,
+        read_text_limited,
+        read_text_limited_nofollow,
+        scrub_environment,
+    )
     from operations_control import (
         DEFAULT_TIMEZONE,
         PROPOSAL_ID_RE,
@@ -481,12 +491,15 @@ def run_daily_review(config: dict[str, Any], review_day: date, *, invoke_agent: 
         update_review(db_path, review_id, status="failed", error=error, report_path=str(report_path))
         return {"review_id": review_id, "status": "failed", "error": error, "runs": len(runs), "sync": sync}
     try:
-        proposal_payload = json.loads(read_text_limited(proposals_path, max_bytes=2_000_000))
+        # proposals.json / tvcr-report.md are written by the isolated agent;
+        # read them with O_NOFOLLOW so a planted symlink cannot make the review
+        # follow it out of the review directory.
+        proposal_payload = json.loads(read_text_limited_nofollow(proposals_path, max_bytes=2_000_000))
         if not isinstance(proposal_payload, dict):
             raise TypeError("proposals root must be an object")
         validation_errors = validate_outputs(
             evidence,
-            read_text_limited(report_path, max_bytes=2_000_000),
+            read_text_limited_nofollow(report_path, max_bytes=2_000_000),
             proposal_payload,
             proposal_ids=known_proposal_ids(db_path),
         )

@@ -44,9 +44,12 @@ except ImportError:  # direct script execution
     from _safe_io import scrub_environment
 
 try:
-    from .swarm_hermes_executor import build_prompt
+    from .swarm_hermes_executor import MAX_STDIN_BYTES, build_prompt
 except ImportError:  # direct script execution
-    from swarm_hermes_executor import build_prompt
+    from swarm_hermes_executor import (  # type: ignore[no-redef]
+        MAX_STDIN_BYTES,
+        build_prompt,
+    )
 
 DEFAULT_BASE_URL = "https://zenmux.ai/api/v1"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
@@ -674,7 +677,20 @@ def _run_command_backend(payload: dict[str, Any], task: dict[str, Any]) -> dict[
 
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
+        raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+    except OSError as exc:
+        print(json.dumps(_payload_error(f"stdin read failed: {exc}"), ensure_ascii=False))
+        return 0
+    if len(raw) > MAX_STDIN_BYTES:
+        # Bound the external executor payload so a runaway writer cannot buffer
+        # the whole pipe in memory (mirrors content_hermes_executor).
+        print(json.dumps(
+            _payload_error(f"stdin payload exceeds {MAX_STDIN_BYTES} bytes"),
+            ensure_ascii=False,
+        ))
+        return 0
+    try:
+        payload = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 -- invalid executor input -> clean JSON failure
         print(json.dumps(_payload_error(f"invalid executor input: {exc}"), ensure_ascii=False))
         return 0

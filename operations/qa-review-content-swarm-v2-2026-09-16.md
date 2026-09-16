@@ -50,7 +50,24 @@
 5. **批 1 归档代码与本次同名函数冲突风险**:归档 `~/workspace/swarm-progress/archive-gray1/` 中的安全线分支含同名 `v2_gray_config/v2_swarm_command` 等;若日后落库需人工合并(交付方已申报,确认属实)。
 6. 本环境无 `ruff`,未跑 lint(交付方申报);公司测试全绿。
 
-## 6. 复跑命令
+## 6. 启用记录(2026-09-16,用户授权「一步到位配好 1–3」)
+
+| 项 | 落点 | 值 / 证据 |
+|---|---|---|
+| 脱敏盐 | `~/.company-env`(600)+ `~/.bashrc` 挂载 | `SWARM_CLIENT_SALT`(32B hex;发布侧 fail-closed 前置) |
+| 执行身份 | `swarm_v2.db: agent_profiles` | `content-writer-1`(role `content-writer`)/ `content-judge-1`(role `qa-reviewer`,两者不同 ⇒ 过自判闸) |
+| v2 开关 | `swarm_v2.db: switches`(审计落库) | `scheduler_policy=market`、`pool_resident=on`、`company_routing=on` |
+| 公司侧灰度 | `automation/router_config.json`(提交 `269a0ef`) | `enabled=true`、`run_types=["content"]`、`ratio_pct=10`、agent/judge 已绑定 |
+
+行为面实测(启用后):40 个互不相同的内容任务 **命中 5 次 ≈ 12.5%**(reason ∈ {`ratio_hit`,`ratio_miss`});安全线任务(`run_type=vuln`)⇒ `run_type_not_gray` **不命中**(首发面严格限于内容线)。
+
+**遗留(启用相关)**
+1. `SWARM_CLIENT_SALT` 目前在 `~/.company-env`(登录 shell 挂载)⇒ **cron/systemd 直起的公司路由不会继承**;真跑前须确认 launcher 显式带上,否则表现为「命中却总回退」。
+2. worker 尚未常驻(最后一步);当前命中任务安全回退原路径,**不丢任务**。
+3. push 受阻:SSH 443 `ssh.github.com` 一度 banner exchange 超时(网络侧);恢复后已重试。
+4. 质检探针两处「现场配置件必须默认关」的断言已改为 **fixture 化**(启用后仍可复跑:28 PASS / 0 FAIL)。
+
+## 7. 复跑命令
 
 ```bash
 python3 ~/workspace/qa-gray2/probe_gray2.py        # 28 PASS / 0 FAIL

@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Emit mandatory isolation instructions for the daily auto-fix Cron job.
 
+**已退役(2026-09-17,D-24)**:调用本脚本的 cron `company-daily-auto-fix` 已删除 ——
+那条回路每天用外部 agent CLI(dsh headless)自动改公司代码并自动提交,违反
+「蜂群/公司任务执行面自给、不外包外部 agent」的口径(实测最近一次运行还因 80 次
+工具调用耗尽而空跑)。本脚本保留作 **worktree 隔离实现参考**,不再由任何 cron 调用;
+其中原先给 agent 的 dsh 运行指引已一并移除,避免这条外包入口在仓库里留痕。
+
 The actual repair remains agent-driven, but this deterministic preflight makes
 the dirty-worktree boundary explicit and creates a disposable worktree from
 the current HEAD.  It prevents the recurring prompt's broad "commit all
@@ -183,8 +189,7 @@ def main() -> int:
     else:
         print("4. After tests pass, report the isolated commit SHA; merge only automation-scoped files if the base HEAD is unchanged.")
     print("5. Remove the disposable worktree after handing off the commit or a clear failure report (git worktree remove --force <path> from the main checkout).")
-    print("6. dsh sandbox: run dsh with DSH_PERMISSION_MODE=danger-full-access. Headless mode has no approval channel, so git add/commit (which write the gitdir at /home/pwn/workspace/company/.git, outside the worktree) otherwise fail with an unresolvable sandbox escalation error.")
-    print("7. The worktree is a sparse checkout: only automation/ (plus root-level files) exists. Run tests as `python3 -m pytest automation/tests -q` from the worktree root. Do not expect projects/, wiki/ or research/ to be present.")
+    print("6. The worktree is a sparse checkout: only automation/ (plus root-level files) exists. Run tests as `python3 -m pytest automation/tests -q` from the worktree root. Do not expect projects/, wiki/ or research/ to be present.")
     print("=== END SAFETY OVERRIDE ===")
     return 0
 

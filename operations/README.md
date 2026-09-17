@@ -63,7 +63,7 @@ company_router.py ──分类(纯正则/关键词)──▶ ┌─ security →
                                    operating_experiments(planned→running→…)
                                               │  主 Agent（人触发的对话）落实
                                               ▼
-                                   company_operator(⏸️暂停) / company_auto_fix_guard(每日自修复)
+                                   company_operator(⏸️暂停) / company_auto_fix_guard(已退役, 不再是每日回路)
 ```
 
 协作的骨架是**事件驱动的确定性流水线**：Hook 触发路由，路由派发 Worker，Notifier 回传，Digest 汇报，TVCR 评估，人审批，实验落地。模型只在"叶子节点"被调用去完成一次具体认知任务，其输出**从不被直接信任**——一律经确定性校验（缺文件即失败、`result.json` schema 校验、`validate_outputs` 拦截"价值=0"类记账谬误、安全线 no-findings 抑制、财务须附 SHA256 证据）。
@@ -90,7 +90,7 @@ company_router.py ──分类(纯正则/关键词)──▶ ┌─ security →
 | `company_operator.py` | **3/5** | 自治经营执行 | 全系统唯一主动回路：多源机会发现 + 固定优先级打分(`P0=100…`)+ 龄期加权 + 轮询公平 + 风险门；执行委派 Hermes Worker。**但当前整体暂停** |
 | `company_daily_digest.py` | **1/5** | 日报生成 | 纯 SQL 聚合 → 模板拼字符串，零模型。确定性正确，但毫无"智能" |
 | `company_result_notifier.py` | **1/5** | 结果通知 | 轮询/自愈/退避/死信/outbox，1,146 行硬核可靠性工程，但无任何模型决策 |
-| `company_auto_fix_guard.py` | **1/5（守卫）/ 3（整条自修复回路）** | 自动修复 | 守卫本身是确定性 worktree 隔离预检；真正修 bug 的是每日 agent（git log 见 8 次 auto-fix 提交），回路层面算模型驱动自修复 |
+| `company_auto_fix_guard.py` | **1/5（守卫）/ 已退役** | 自动修复（遗留） | 守卫本身是确定性 worktree 隔离预检。**2026-09-17 起退役**：调用它的 cron `company-daily-auto-fix` 已删除——那条回路每天用外部 agent CLI（dsh）自动改公司代码并自动提交，违反「执行面自给、不外包外部 agent」口径，且末次运行因 80 次工具调用耗尽而空跑。脚本保留作 worktree 隔离参考，不再由任何 cron 调用 |
 | `finance_ledger.py` | **1/5** | 财务记账 | 证据化记账、预测/实收隔离、未定价显式保留。**故意零智能**，这是正确的——账不该"聪明" |
 | `operations_control.py` | **2/5** | 运营控制/治理状态机 | Run 同步(读原生日志)、结果回填、提案导入、实验生命周期、`apply_user_decision` 用正则解析"批准/拒绝"。编排确定，智能外包给 TVCR Agent |
 | **TVCR 提案治理** | **4/5（分析）/ 3（闭环）** | 经营治理 | 独立 Agent 对 T/V/C/R 真推理并产结构化提案，且有确定性校验拦截记账谬误——分析确有智能。但**审批 100% 人肉、近 6 次复盘 2 次 failed(≈33%)、提案积压**，闭环被拖到 3 |

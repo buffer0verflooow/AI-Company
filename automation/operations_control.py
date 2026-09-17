@@ -1908,7 +1908,8 @@ def _runner_pid_alive(pid: Any, run_id: str) -> bool:
         cmdline = Path(f"/proc/{pid_int}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
     except OSError:
         return False
-    return run_id in cmdline and ("content_hermes_executor.py" in cmdline or "swarm_runner.py" in cmdline)
+    # D-25: v1 执行面(swarm_runner.py)已退役删除 —— 只认内容线的执行器进程。
+    return run_id in cmdline and "content_hermes_executor.py" in cmdline
 
 
 def reap_stale_runs(

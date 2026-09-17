@@ -1391,6 +1391,17 @@ V1_SECURITY_LINE_DISABLED = (
     "~/workspace/swarm-progress/archive-gray1/gray1-wip.patch"
 )
 
+#: D-25(2026-09-17):v1 **执行面**整体退役 —— 蜂群 `scripts/swarm_runner.py` /
+#: `scripts/agent_worker.py`、公司 `swarm_hermes_executor.py`(opencode/hermes
+#: chat)、`swarm_native_executor.py` 与 `router_config.executor` 键均已删除。
+#: 命中 `dispatch_swarm` 的请求从此 fail-closed 拒绝:v1 没有执行器了,
+#: 接单也只会挂死。要真跑,走 v2 市场 + `swarmctl worker --agent … [--agent-runtime]`。
+V1_EXECUTION_SURFACE_RETIRED = (
+    "v1 执行面已退役(D-25):swarm_runner.py / agent_worker.py / "
+    "swarm_hermes_executor.py / swarm_native_executor.py 均已删除;"
+    "蜂群任务改走 v2 市场 + `swarmctl worker --agent … --judge-by …`"
+)
+
 
 def _v1_swarm_db_unavailable(config: dict[str, Any]) -> str | None:
     """Return a loud reason when the v1 swarm DB is a tombstone/unusable.
@@ -1677,103 +1688,17 @@ def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> d
     return _parse_json_output(proc.stdout)
 
 
-def submit_security(config: dict[str, Any], session_id: str, platform: str, message: str, decision: RouteDecision, product_line: str = "security-exploration") -> dict[str, Any]:
-    # D-16.2: v1 安全线入口护栏 —— 墓碑/不可用 ⇒ 明确报错,不留 sqlite 裸错。
-    unavailable = _v1_swarm_db_unavailable(config)
-    if unavailable:
-        raise RuntimeError(f"submit_security 拒绝执行:{unavailable}")
-    metadata = json.dumps(
-        {
-            "company_product_line": product_line,
-            "company_session_id": session_id,
-            "company_platform": platform,
-            "router_version": 1,
-            "authorization_marker_present": not decision.authorization_required,
-        },
-        ensure_ascii=False,
-    )
-    args = [
-        "task", "submit",
-        "--source", "company-router",
-        "--task", message,
-        "--intent", decision.intent,
-        "--target-type", decision.target_type,
-        "--profile", decision.profile,
-        "--name", f"company-{decision.intent}-{session_id[-8:] or 'session'}",
-        "--metadata", metadata,
-    ]
-    if decision.target:
-        args.extend(["--target", decision.target])
-    return swarm_command(config, *args)
-
-
-def runner_role_counts(intent: str) -> str:
-    return {
-        "recon": "scanner=2,analyst=1,reporter=1",
-        "exploit": "analyst=1,exploiter=1,reporter=1",
-        "report": "reporter=1",
-        "analyze": "analyst=1,reporter=1",
-        # 蜂群研究路由 (2026-08-12): research 产品线使用独立 researcher 角色
-        "research": "researcher=2,reporter=1",
-    }.get(intent, "analyst=1,reporter=1")
-
-
-def build_runner_cmd(config: dict[str, Any], run_id: str, intent: str) -> list:
-    """构造 swarm runner 启动命令 (纯函数, 可测)。
-
-    2026-08-10 教训: swarm_runner.py 从仓库根目录移到 scripts/ 后,
-    此处引用未同步, 导致 dispatch_swarm 全部失败 (can't open file)。
-    该函数由集成测试覆盖路径有效性, 防止重构回归。
-    """
-    return [
-        sys.executable,
-        str(Path(config["swarm_repo"]) / "scripts" / "swarm_runner.py"),
-        "--db", config["swarm_db"],
-        "--run-id", run_id,
-        "--executor-command", config["executor"],
-        "--role-counts", runner_role_counts(intent),
-        "--max-rounds", "30",
-        "--idle-rounds", "2",
-        "--json",
-    ]
-
-
-def launch_runner(config: dict[str, Any], run_id: str, intent: str) -> int:
-    # D-16.2: v1 runner 同样前置墓碑检测(直接调用 launch_runner 时也拒绝)。
-    unavailable = _v1_swarm_db_unavailable(config)
-    if unavailable:
-        raise RuntimeError(f"launch_runner 拒绝执行:{unavailable}")
-    # The run id is interpolated into the runner log path below; reject ids
-    # that could carry a path separator / ".." / symlink component (mirrors
-    # the content_job_path guard) so a corrupt row or backend payload cannot
-    # make the log write escape log_dir.
-    value = str(run_id or "")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
-        raise ValueError(f"invalid swarm run id: {value!r}")
-    log_dir = Path(config["log_dir"])
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"swarm-{run_id}.log"
-    cmd = build_runner_cmd(config, run_id, intent)
-    runner_env, _dropped = scrub_environment()
-    runner_env["COMPANY_ROUTER_BYPASS"] = "1"
-    runner_env["HERMES_SESSION_SOURCE"] = "tool"
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=config["swarm_repo"],
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=runner_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+# ── v1 外部执行面退役 (D-25) ──────────────────────────────────────────
+# 本块原有 `submit_security` / `runner_role_counts` / `build_runner_cmd` /
+# `launch_runner` 四个函数,是把公司任务交给 v1 蜂群(line)执行面的完整接线:
+# submit_security 写 v1 库 → build_runner_cmd 拼出 `swarm_runner.py
+# --executor-command <外部 agent 执行器>` → launch_runner 起进程。
+# 该执行面(蜂群 scripts/swarm_runner.py、scripts/agent_worker.py、公司
+# swarm_hermes_executor.py(opencode/hermes chat)、swarm_native_executor.py)
+# 已于 2026-09-17 按「执行面自给、不外包外部 agent」口径整体删除;
+# 命中 dispatch_swarm 的请求现在由下面的分支 fail-closed 拒绝并说明。
+# 真实执行面 = v2 市场 + `swarmctl worker --agent … --judge-by … [--agent-runtime]`。
+# ────────────────────────────────────────────────────────────────────
 
 
 def content_job_path(config: dict[str, Any], run_id: str) -> Path:
@@ -2778,24 +2703,15 @@ def _handle_hook(
                     RouteDecision(**{**asdict(decision), "action": "main_agent", "reason": "active run limit reached"}),
                     status_updates=updates + ["- 已达到本会话并发蜂群上限，新任务暂未提交。"],
                 )}
-            try:
-                run = submit_security(
-                    config, session_id, platform, message, decision,
-                    product_line="research" if decision.route == "research" else "security-exploration",
-                )
-                fields: dict[str, Any] = {
-                    "run_id": str(run.get("run_id") or ""),
-                    "request_id": str(run.get("request_id") or ""),
-                    "status": "submitted",
-                    "last_heartbeat": utc_now(),
-                }
-                if config.get("auto_run_security", True) and fields["run_id"]:
-                    fields["runner_pid"] = launch_runner(config, fields["run_id"], decision.intent)
-                    fields["status"] = "running"
-                state.update(event_id, **fields)
-            except Exception as exc:  # noqa: BLE001 -- one failed auto-submit must not abort the sweep
-                state.update(event_id, status="failed", error=str(exc))
-                updates.append(f"- 自动提交失败：{exc}")
+            # D-25(2026-09-17): v1 执行面已整体退役(runner / executor 文件已删),
+            # 这里再也没有可起的进程 —— 不再写一条永远不会被执行的 submitted 行,
+            # 直接 fail-closed 交回主 Agent,并把"为什么"讲清楚。
+            state.update(event_id, status="failed", error=V1_EXECUTION_SURFACE_RETIRED)
+            return {"context": build_context(
+                RouteDecision(**{**asdict(decision), "action": "main_agent",
+                                 "reason": "v1 execution surface retired"}),
+                status_updates=updates + [f"- {V1_EXECUTION_SURFACE_RETIRED}"],
+            )}
     elif decision.action in {"dispatch_article", "dispatch_video", "dispatch_company"}:
         enabled_key = {
             "dispatch_article": "auto_run_article",

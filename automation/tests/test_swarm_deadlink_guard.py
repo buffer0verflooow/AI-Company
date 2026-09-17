@@ -24,11 +24,8 @@ from automation import knowledge_promotion_gateway as gateway
 from automation import swarm_health_check as health
 from automation import swarm_kb_to_obsidian as bridge
 from automation.company_router import (
-    V1_SECURITY_LINE_DISABLED,
     RouteDecision,
     _v1_swarm_db_unavailable,
-    launch_runner,
-    submit_security,
 )
 from automation.swarm_db_guard import (
     EMPTY_KB_NOTE,
@@ -242,24 +239,6 @@ class SecurityLineGuardTests(unittest.TestCase):
             _make_v1_shaped_db(db)
             self.assertIsNone(_v1_swarm_db_unavailable({"swarm_db": str(db)}))
 
-    def test_submit_security_refuses_tombstone(self):
-        with tempfile.TemporaryDirectory() as td:
-            tombstone = Path(td) / "swarm_knowledge.db"
-            tombstone.mkdir()
-            config = {"swarm_db": str(tombstone), "swarm_repo": td}
-            with self.assertRaises(RuntimeError) as ctx:
-                submit_security(config, "s1", "test", "扫描 example.com", self._decision())
-            self.assertIn(V1_SECURITY_LINE_DISABLED, str(ctx.exception))
-
-    def test_launch_runner_refuses_tombstone(self):
-        with tempfile.TemporaryDirectory() as td:
-            tombstone = Path(td) / "swarm_knowledge.db"
-            tombstone.mkdir()
-            config = {"swarm_db": str(tombstone), "swarm_repo": td, "log_dir": str(Path(td) / "logs")}
-            with self.assertRaises(RuntimeError) as ctx:
-                launch_runner(config, "run-1", "analyze")
-            self.assertIn(V1_SECURITY_LINE_DISABLED, str(ctx.exception))
-
 
 class HealthCheckTests(unittest.TestCase):
     REAL_REPO = Path("/home/pwn/workspace/research/swarm-knowledge")
@@ -288,7 +267,6 @@ class HealthCheckTests(unittest.TestCase):
             "swarm_repo": str(self.REAL_REPO),
             "swarm_db": str(v1_db),
             "swarm_v2_db": str(v2_db),
-            "executor": "/home/pwn/workspace/company/automation/swarm_native_executor.py",
         }
 
     def test_ready_v2_is_zero_anomalies(self):

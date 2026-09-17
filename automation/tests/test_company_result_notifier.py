@@ -307,21 +307,9 @@ class NotifierTests(unittest.TestCase):
             self.assertIn("no heartbeat", row["error"])
             state.close()
 
-    def test_live_runner_refreshes_heartbeat_and_is_not_flagged(self):
-        with tempfile.TemporaryDirectory() as td:
-            db_path, event_id = self._setup_event(td)
-            config = self._config(td, db_path)
-            config["max_runner_restarts"] = 0
-            config["heartbeat_timeout_minutes"] = 0
-            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "running"}), \
-                 patch("automation.company_result_notifier.runner_is_alive", return_value=True):
-                summary = process_once(config)
-            self.assertEqual(summary["suspected_dead"], 0)
-            state = RouterState(db_path)
-            row = state.db.execute("SELECT status,last_heartbeat FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
-            self.assertEqual(row["status"], "running")
-            self.assertTrue(row["last_heartbeat"])
-            state.close()
+    # D-25: v1 执行面退役后不存在可探活的 runner,原
+    # test_live_runner_refreshes_heartbeat_and_is_not_flagged 已随之删除。
+
     def test_failed_cron_delivery_is_recovered_by_job_name_once(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

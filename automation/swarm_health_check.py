@@ -75,7 +75,7 @@ def main() -> int:
     # non-string value) must be reported the same way: the health check itself
     # is the thing being checked, so it never dies with a raw KeyError/TypeError.
     missing = [
-        key for key in ("swarm_repo", "executor", "swarm_v2_db")
+        key for key in ("swarm_repo", "swarm_v2_db")
         if not isinstance(config.get(key), str) or not config[key].strip()
     ]
     if missing:
@@ -111,13 +111,12 @@ def main() -> int:
     else:
         _ok("v1 库位已停用", f"{v1_db} 墓碑/缺席;读类已 repoint 到 swarm_v2.db")
 
-    executor = Path(config["executor"])
-    _ok("executor 存在", str(executor)) if executor.is_file() else _fail(
-        "executor 存在", f"缺失: {executor} (worker 执行器)")
-
-    safe_io = executor.parent / "_safe_io.py"
+    # D-25: `router_config.executor`(→ swarm_native_executor.py)已随 v1 执行面退役
+    # 删除,不再是必需配置键;v2 执行面 = 蜂群内建运行时,其可用性由上面的
+    # `swarmctl.py --help`(worker 子命令)代表。
+    safe_io = Path(__file__).resolve().parent / "_safe_io.py"
     _ok("_safe_io.py 存在", str(safe_io)) if safe_io.is_file() else _fail(
-        "_safe_io.py 存在", f"缺失: {safe_io} (executor 环境清理依赖)")
+        "_safe_io.py 存在", f"缺失: {safe_io} (执行器环境清理依赖)")
 
     # 2. v2 活库存在 + schema 指纹为 v2
     db_path = Path(config["swarm_v2_db"])

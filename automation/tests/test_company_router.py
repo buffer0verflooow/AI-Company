@@ -20,7 +20,6 @@ from automation.company_router import (
     parse_hook_stdin,
     refresh_session_runs,
     select_company_result,
-    submit_security,
 )
 from automation.operations_control import (
     business_period,
@@ -700,32 +699,7 @@ class HookTests(unittest.TestCase):
 
 
 class SwarmIntegrationTests(unittest.TestCase):
-    def test_submit_uses_real_swarm_client_contract(self):
-        swarm_repo = Path("/home/pwn/workspace/research/swarm-knowledge")
-        with tempfile.TemporaryDirectory() as td:
-            db_path = Path(td) / "swarm.db"
-            import sys
-            sys.path.insert(0, str(swarm_repo))
-            try:
-                from src import SwarmDB
-                db = SwarmDB(str(db_path))
-                self.assertTrue(db.init())
-                db.close()
-            finally:
-                sys.path.remove(str(swarm_repo))
 
-            config = {"swarm_repo": str(swarm_repo), "swarm_db": str(db_path)}
-            message = "分析本机 APK 逆向报告中的认证逻辑"
-            decision = classify_message(message)
-            result = submit_security(config, "integration-session", "test", message, decision)
-            self.assertTrue(result["run_id"])
-            self.assertGreaterEqual(len(result["seeded_tasks"]), 1)
-
-            conn = sqlite3.connect(db_path)
-            stored = conn.execute("SELECT intent, config FROM swarm_runs WHERE run_id=?", (result["run_id"],)).fetchone()
-            self.assertEqual(stored[0], "analyze")
-            self.assertIn("security-exploration", stored[1])
-            conn.close()
 
     def test_latest_corrective_result_wins_over_reporter_diff(self):
         result = {

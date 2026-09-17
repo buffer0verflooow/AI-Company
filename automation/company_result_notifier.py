@@ -30,9 +30,9 @@ try:
         DEFAULT_CONFIG,
         RouteDecision,
         RouterState,
+        V1_EXECUTION_SURFACE_RETIRED,
         content_job_path,
         launch_content_job,
-        launch_runner,
         load_config,
         resolve_session_origin,
         select_company_result,
@@ -71,9 +71,9 @@ except ImportError:  # Direct execution from automation/.
         DEFAULT_CONFIG,
         RouteDecision,
         RouterState,
+        V1_EXECUTION_SURFACE_RETIRED,
         content_job_path,
         launch_content_job,
-        launch_runner,
         load_config,
         resolve_session_origin,
         select_company_result,
@@ -265,16 +265,6 @@ def mirror_tvcr_message(config: dict[str, Any], origin: dict[str, str], message:
     except Exception as exc:
         LOGGER.warning("mirror_tvcr_message failed: %s", exc, exc_info=True)
         return False
-
-
-def runner_is_alive(pid: int | None, run_id: str) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
-    except OSError:
-        return False
-    return "swarm_runner.py" in cmdline and run_id in cmdline
 
 
 def content_runner_is_alive(pid: int | None, run_id: str) -> bool:
@@ -1037,20 +1027,19 @@ def process_once(
                 state.update(event_id, status=status)
             if status in {"submitted", "running"}:
                 summary["running"] += 1
-                alive = runner_is_alive(row["runner_pid"], run_id)
+                # D-25: v1 执行面已退役 —— `swarm_runner.py` 已删除,没有可探活的
+                # v1 runner 进程;残留的 v1 行一律视为已死(下面的 stale 分支因此
+                # 只走"耗升级预算 → suspected_dead",不会再重启任何东西)。
+                alive = False
                 _beat_heartbeat(state, event_id, alive)
                 stale = _age_minutes(str(row["created_at"] or "")) >= _float_config(config, "stale_run_minutes", 15)
                 restarts = _safe_counter(row["runner_restarts"])
                 max_restarts = _int_config(config, "max_runner_restarts", 2)
                 if stale and not alive and restarts < max_restarts:
                     try:
-                        raw_decision = json.loads(row["decision_json"])
-                        if not isinstance(raw_decision, dict):
-                            raise TypeError("decision_json root must be an object")
-                        decision = RouteDecision(**raw_decision)
-                        pid = launch_runner(config, run_id, decision.intent)
-                        state.update(event_id, runner_pid=pid, runner_restarts=restarts + 1, last_heartbeat=utc_now(), error="")
-                        summary["restarted"] += 1
+                        # D-25: v1 执行面已退役 —— 重启入口本身就是死路,直接抛,
+                        # 让下面既有的 except 分支消耗重启预算并升级为 suspected_dead。
+                        raise RuntimeError(V1_EXECUTION_SURFACE_RETIRED)
                     except Exception as exc:  # noqa: BLE001 -- runner recovery failure must not abort the sweep
                         # A failing relaunch (bad run id, deleted job, broken
                         # runner path) must also consume the restart budget —

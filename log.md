@@ -127,3 +127,11 @@ AI 自动追加。记录每次操作的时间线。
 - 新建页面: [[projects/ai-edu-series/TRACKING]]
 - 更新页面: [[index]], [[Home]]
 - 摘要: 建立公司级项目追踪系统
+
+## [2026-09-18] 残骸清 + 安全线接线 | v1 死链两条清除
+
+- **W1-a 残骸清(两条 v1 残骸)**
+  - `automation/capture_from_obsidian.py` 的 `CAPTURE_PY` 死引用(**D-16.1 漏网**):v1 `swarm-knowledge/scripts/capture.py` 已随 D-26 整包退役物理删除, 而 D-16.1 只 repoint 了库位 `SWARM_DB`。v2 侧无等价知识写入入口 (`knowledge_loop.capture_run_outcome` 只沉淀 run 终态, 不接受原始笔记 content/title/source/tags, 语义不同构, 不发明写入语义) ⇒ 写类桥**响亮停用**: 默认 `CAPTURE_PY=None` 时 `main()` 明确失败 + rc=3, 删除 rc=0 静默路径, 不触库。
+  - `automation/router_config.json` 的 `swarm_db` 废键(**D-16.2 保留键**, 值为 v1 墓碑库位)已删除。读者兼容已核实: `company_router.swarm_command` 改 `.get` 兜底至 `swarm_v2_db`; `_v1_swarm_db_unavailable` 缺键返回明确原因; `swarm_health_check` 空串兜底; `swarm_db_guard` 不读该键。
+- **口径**: 安全线 v2 分支为**按新 head 重写**, 非合并归档补丁 —— 归档补丁 `~/workspace/swarm-progress/archive-gray1/gray1-wip.patch` 在 394ad1c 上四个文件 `git apply --check` 全失败(同区域已被 D-16/D-25 改写), 只作语义参考。
+- **未做**: 未打开 `dispatch_security`/`dispatch_research`(仍 false)、未注册 v2 身份、未发真实 run/未 publish/未起 worker、未写任何库、未改蜂群仓库、未改 `swarm_v2_gray.run_types`。

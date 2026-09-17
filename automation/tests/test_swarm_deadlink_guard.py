@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from automation import capture_from_obsidian as capture
@@ -26,6 +28,8 @@ from automation import swarm_kb_to_obsidian as bridge
 from automation.company_router import (
     RouteDecision,
     _v1_swarm_db_unavailable,
+    swarm_command,
+    v2_swarm_command,
 )
 from automation.swarm_db_guard import (
     EMPTY_KB_NOTE,
@@ -214,6 +218,73 @@ class CaptureFromObsidianTests(unittest.TestCase):
                     patch.object(sys, "argv", ["capture_from_obsidian.py", "--dry-run"]):
                 capture.main()  # returns None on a successful dry run
             self.assertTrue(db.is_file())
+
+
+class CaptureFromObsidianRetiredTests(unittest.TestCase):
+    """D-27/W1-a: no v2 write port ⇒ the bridge must fail loudly, never rc=0."""
+
+    def _run(self, *argv):
+        with tempfile.TemporaryDirectory() as vault_td:
+            err = io.StringIO()
+            with patch.object(capture, "OBSIDIAN_VAULT", Path(vault_td)), \
+                    patch.object(sys, "argv", ["capture_from_obsidian.py", *argv]), \
+                    contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    capture.main()
+        return ctx.exception.code, err.getvalue()
+
+    def test_default_run_fails_loudly_nonzero(self):
+        code, err = self._run()
+        self.assertNotEqual(code, 0)
+        self.assertIn("D-26", err)
+        self.assertIn("v2 知识写入路径未接线", err)
+        self.assertIn("C-5", err)
+
+    def test_dry_run_also_fails_loudly_nonzero(self):
+        # dry-run is not an escape hatch: the write capability is retired, so
+        # there is no rc=0 "silent success" preview path either.
+        code, err = self._run("--dry-run")
+        self.assertNotEqual(code, 0)
+        self.assertIn("D-26", err)
+
+    def test_default_capture_script_is_retired_not_a_v1_path(self):
+        self.assertIsNone(capture.CAPTURE_PY)
+        source = Path(capture.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('scripts" / "capture.py', source)
+
+
+class RouterConfigDeprecatedKeyTests(unittest.TestCase):
+    """D-27/W1-a: ``router_config.swarm_db`` removed; readers must not crash."""
+
+    CONFIG_PATH = Path(__file__).resolve().parent.parent / "router_config.json"
+
+    def test_repository_config_has_no_swarm_db_key(self):
+        config = json.loads(self.CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("swarm_db", config)
+        self.assertTrue(config.get("swarm_v2_db"))
+
+    def test_swarm_command_tolerates_missing_v1_key(self):
+        config = {"swarm_repo": "/repo", "swarm_v2_db": "/repo/swarm_v2.db"}
+        proc = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+        with patch("automation.company_router.subprocess.run", return_value=proc) as run:
+            out = swarm_command(config, "task", "result", "--run-id", "r1")
+        self.assertEqual(out, {"ok": True})
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--db") + 1], "/repo/swarm_v2.db")
+
+    def test_v2_command_uses_v2_db_without_v1_key(self):
+        config = {"swarm_repo": "/repo", "swarm_v2_db": "/repo/swarm_v2.db"}
+        proc = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+        with patch("automation.company_router.subprocess.run", return_value=proc) as run:
+            out = v2_swarm_command(config, "market", "list")
+        self.assertEqual(out, {"ok": True})
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--db") + 1], "/repo/swarm_v2.db")
+
+    def test_v1_db_guard_reports_missing_key_without_crashing(self):
+        reason = _v1_swarm_db_unavailable({})
+        self.assertIsNotNone(reason)
+        self.assertIn("未配置", reason)
 
 
 class SecurityLineGuardTests(unittest.TestCase):

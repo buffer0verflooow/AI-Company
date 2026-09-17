@@ -50,8 +50,18 @@ OBSIDIAN_VAULT = Path(os.environ.get(
     "OBSIDIAN_VAULT_PATH",
     str(Path.home() / "workspace" / "company"),
 ))
-CAPTURE_PY = (
-    Path.home() / "workspace" / "research" / "swarm-knowledge" / "scripts" / "capture.py"
+#: 2026-09-18 (D-26/D-27): v1 捕获脚本 `swarm-knowledge/scripts/capture.py` 已随 v1
+#: 逻辑库整包退役**物理删除**。**没有**可 repoint 的 v2 等价写入入口:
+#: `src.swarm_v2.knowledge_loop.capture_run_outcome` 是 **run 终态沉淀**
+#: (task_id/run_id/agent/conclusion),不接受原始笔记的
+#: content/title/source/tags —— 语义不同构,不得据以发明 KB 写入语义(D-16.1)。
+#: 故本写类桥**响亮停用**:默认 None ⇒ `main()` 明确失败 + 非 0,绝不保留
+#: rc=0 的静默成功路径。保留该名字仅作为历史单测夹具的注入点(生产恒为 None)。
+CAPTURE_PY: Path | None = None
+#: 停用文案(唯一来源;README/C-5 与 main() 输出共用)。
+V1_CAPTURE_RETIRED = (
+    "v1 捕获脚本已随 D-26 退役;v2 知识写入路径未接线"
+    "(见 CAPABILITY-AUDIT-2026-09-16 C-5)"
 )
 # 2026-09-16 (D-16.1): v1 库位是墓碑目录。归档 v1 与 v2 的 knowledge_entries
 # 列集/DLL/索引**逐字同构**(见交付报告 §4),所以写类允许 repoint 到 v2 活库;
@@ -250,6 +260,11 @@ def capture_note(path: Path, dry_run: bool) -> str | None:
         print(f"    content: {body[:100]}...")
         return None
 
+    # D-26/D-27: 写类能力已响亮停用;默认 None(生产)。这里显式失败,绝不
+    # 退回 "子进程跑一个名为 None 的脚本" 这种静默/怪异路径。
+    if CAPTURE_PY is None or not Path(CAPTURE_PY).is_file():
+        return f"error:{V1_CAPTURE_RETIRED}"
+
     cmd = [
         sys.executable, "-c", CAPTURE_BOOTSTRAP, str(CAPTURE_PY), str(SWARM_DB),
         agent, source, tags, intent, title,
@@ -292,9 +307,12 @@ def main():
     if not vault.is_dir():
         print(f"ERROR: vault not found: {vault}")
         sys.exit(1)
-    if not CAPTURE_PY.is_file():
-        print(f"ERROR: capture.py not found at {CAPTURE_PY}")
-        sys.exit(1)
+    if CAPTURE_PY is None or not Path(CAPTURE_PY).is_file():
+        # D-26/D-27/D-16.1: 写类桥没有 v2 等价入口(见 CAPTURE_PY 注释),
+        # 故**响亮停用**——明确失败 + 非 0,不留 rc=0 的静默成功路径。
+        # 生产 CAPTURE_PY 恒为 None;单测注入临时脚本以覆盖历史写路径断言。
+        print(f"ERROR: {V1_CAPTURE_RETIRED}", file=sys.stderr)
+        sys.exit(3)
     # 2026-09-16 (D-16.1): 写类目标 repoint 到 v2 活库(列集与归档 v1 同构)。
     # 缺库 / 非 v2 schema 一律硬失败, 避免整轮 unchanged 把桥停摆误报为全部最新。
     try:

@@ -1371,10 +1371,13 @@ def _parse_json_output(output: str) -> dict[str, Any]:
 
 
 def swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> dict[str, Any]:
+    # 2026-09-18 (W1-a/D-27): ``router_config.swarm_db``(v1 墓碑库位)已删除,
+    # 不再直接索引该键(缺键会 KeyError)。v1 执行/逻辑库面已退役,这里退化到
+    # v2 活库位,保持"缺键不崩"。
     cmd = [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
-        "--db", config["swarm_db"],
+        "--db", config.get("swarm_db") or config.get("swarm_v2_db", ""),
         *args,
         "--json",
     ]
@@ -1406,9 +1409,10 @@ V1_EXECUTION_SURFACE_RETIRED = (
 def _v1_swarm_db_unavailable(config: dict[str, Any]) -> str | None:
     """Return a loud reason when the v1 swarm DB is a tombstone/unusable.
 
-    ``router_config.json:swarm_db`` 的键值按 D-16.2 不动,但该路径自 M0.2 起
-    是墓碑目录。安全线 v1 入口在提交/启动前显式拒绝,替代现在会冒出的
-    sqlite 裸错(``unable to open database file``)。
+    2026-09-18 (W1-a/D-27): ``router_config.json:swarm_db`` 键已作为纯废键删除,
+    故这里的 ``.get`` 缺键分支就是常态(返回明确原因,不抛 KeyError)。该 v1 库位
+    自 M0.2 起是墓碑目录。安全线 v1 入口在提交/启动前显式拒绝,替代 sqlite 裸错
+    (``unable to open database file``)。
     """
     raw = config.get("swarm_db")
     if not isinstance(raw, str) or not raw.strip():

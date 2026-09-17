@@ -6,7 +6,6 @@
   "dispatch_research": false,
   "authorized_targets": [],
   "swarm_repo": "/home/pwn/workspace/research/swarm-knowledge",
-  "swarm_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_knowledge.db",
   "swarm_v2_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_v2.db",
   "swarm_v2_gray": {
     "enabled": true,
@@ -14,7 +13,7 @@
       "content"
     ],
     "task_types": [],
-    "ratio_pct": 10,
+    "ratio_pct": 100,
     "client_source": "company-router"
   },
   "swarm_v2_agent": "content-writer-1",

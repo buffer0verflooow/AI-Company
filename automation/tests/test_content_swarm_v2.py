@@ -211,22 +211,28 @@ class GrayHitTests(unittest.TestCase):
             self.assertEqual(row["status"], "running")
             state.close()
 
-    def test_worker_cmd_uses_stdin_contract_and_distinct_identity(self):
+    def test_worker_cmd_uses_builtin_runtime_and_distinct_identity(self):
         with tempfile.TemporaryDirectory() as td:
             config = _config(td, gray=_hit_gray(),
                              agent="content-worker", judge="content-judge")
-            cmd = build_v2_content_worker_cmd(config)
+            run_id = "company-content-abcdef123456"
+            cmd = build_v2_content_worker_cmd(config, run_id)
             self.assertEqual(cmd[2], "worker")
             self.assertEqual(cmd[cmd.index("--db") + 1], config["swarm_v2_db"])
             self.assertEqual(cmd[cmd.index("--agent") + 1], "content-worker")
             self.assertEqual(cmd[cmd.index("--judge-by") + 1], "content-judge")
-            executor = cmd[cmd.index("--executor-command") + 1]
-            self.assertIn("--stdin-json", executor)
-            self.assertIn(config["content_executor"], executor)
+            # D-22 执行面自给:蜂群内建 agent_runtime(write 档),不外包外部 agent CLI
+            self.assertIn("--agent-runtime", cmd)
+            self.assertEqual(cmd[cmd.index("--permission") + 1], "write")
+            self.assertNotIn("--executor-command", cmd)
+            self.assertNotIn(config["content_executor"], cmd)
+            # path jail 根 = 本 run 产物目录(默认根是蜂群仓库,不可用于公司任务)
+            self.assertEqual(cmd[cmd.index("--repo-root") + 1],
+                             str(Path(config["content_job_dir"]) / run_id))
             self.assertNotIn("--role-counts", cmd)
 
-    def test_published_focus_is_accepted_by_the_stdin_contract(self):
-        """The router's focus_params must feed the executor's stdin mapping."""
+    def test_published_focus_carries_runtime_brief_and_declared_deliverables(self):
+        """focus_params 必须带内建运行时的自包含任务书 + 声明式产物清单。"""
         with tempfile.TemporaryDirectory() as td:
             config = _config(td, gray=_hit_gray(),
                              agent="content-worker", judge="content-judge")
@@ -237,16 +243,21 @@ class GrayHitTests(unittest.TestCase):
                 submit_content_v2(config, decision=decision, message=ARTICLE_MESSAGE,
                                   session_id="sess-1", platform="cli", gray=gray)
             publish = v2cli.call_args_list[1].args
-            focus = publish[publish.index("--focus") + 1]
-            task_id, request = che.stdin_request_from_payload({
-                "task": {"task_id": "t-1", "focus_params": json.loads(focus)},
-                "context": focus,
-            })
-            self.assertEqual(task_id, "t-1")
-            self.assertEqual(request["route"], "article")
-            self.assertEqual(request["message"], ARTICLE_MESSAGE)
-            self.assertEqual(request["session_id"], "sess-1")
-            self.assertEqual(request["platform"], "cli")
+            focus = json.loads(publish[publish.index("--focus") + 1])
+            self.assertEqual(focus["content_route"], "article")
+            self.assertEqual(focus["company_task"], ARTICLE_MESSAGE)
+            self.assertEqual(focus["company_session_id"], "sess-1")
+            self.assertEqual(focus["company_platform"], "cli")
+            # 规范正文随任务下发(path jail 根 = 产物目录,运行时读不到公司仓库)
+            brief = focus["runtime_brief"]
+            self.assertIn(ARTICLE_MESSAGE, brief)
+            self.assertIn("draft.md", brief)
+            self.assertIn("article-quality-constraints.md", brief)
+            # 声明式产物清单 ⇒ 判定器按声明核验;必须是 jail 内相对路径
+            files = focus["content_verify"]["files"]
+            self.assertEqual(files, ["draft.md", "draft-humanized.md", "qa-report.md"])
+            for name in files:
+                self.assertFalse(os.path.isabs(name))
 
 
 class PairedGateTests(unittest.TestCase):

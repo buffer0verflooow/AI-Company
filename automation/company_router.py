@@ -1848,6 +1848,88 @@ def _v2_content_intent(decision: RouteDecision) -> str:
     return intent if intent in _V2_RUN_INTENTS else "custom"
 
 
+#: 内容子线 → 强制交付清单(声明式产物;content 判定器按 `content_verify.files` 核验)
+_V2_CONTENT_DELIVERABLES: dict[str, list[str]] = {
+    "article": ["draft.md", "draft-humanized.md", "qa-report.md"],
+    "company": ["task-report.md", "result.json"],
+    "video": ["video-script.md", "storyboard.md", "production-plan.md"],
+}
+#: 随任务下发的公司规范(内建运行时 path jail 根 = 产物目录 ⇒ 读不到公司仓库)
+_V2_CONTENT_SPECS: dict[str, list[str]] = {
+    "article": ["operations/business-lines/article-production.md",
+                "marketing/article-quality-constraints.md"],
+    "company": ["Home.md", "operations/agent-roster.md"],
+    "video": ["operations/business-lines/video-production.md",
+              "strategy/video-production-strategy.md"],
+}
+#: 单份规范内联上限(超出截断并如实标注)
+_V2_SPEC_EXCERPT_CHARS = 4000
+
+
+def _v2_spec_excerpts(route: str) -> list[tuple[str, str]]:
+    """读该内容子线的规范正文(节选);缺/读不到 ⇒ 明确标注,不假装已下发。"""
+    root = HERE.parent
+    out: list[tuple[str, str]] = []
+    for rel in _V2_CONTENT_SPECS.get(route, []):
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            out.append((rel, "(规范文件不可读;按通用质量要求执行并在 answer 中说明)"))
+            continue
+        if len(text) > _V2_SPEC_EXCERPT_CHARS:
+            text = text[:_V2_SPEC_EXCERPT_CHARS] + "\n…（节选，超出部分略）"
+        out.append((rel, text))
+    return out
+
+
+def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) -> str:
+    """公司侧拼给蜂群**内建 agent 运行时**的自包含任务书(D-22;F14 执行面自给)。
+
+    为什么规范要内联:内建运行时的 path jail 根 = `--repo-root`(= 本任务产物目录),
+    它读不到公司仓库里的规范/素材 ⇒ 规范正文必须随任务下发,否则"换执行面"等于把
+    内容质量要求整段丢掉。产物清单同样随任务声明,供 content 判定器按声明核验。
+    """
+    route = str(getattr(decision, "route", "") or "")
+    deliverables = _V2_CONTENT_DELIVERABLES.get(route, ["draft.md"])
+    lines = [
+        "你是公司内容产线的执行体，由蜂群内建 agent 运行时承载。直接完成任务，不要只写计划。",
+        "",
+        f"用户任务：{message}",
+        f"内容子线：{route or 'unknown'}",
+        f"产物目录：{job_dir}（只能在此目录内读写）",
+        "",
+        "可用工具：fs.list / fs.read / fs.write / fs.edit（路径须相对产物目录）。",
+        "产物目录初始为空；公司仓库文件不在你的可见范围内（本节已内联全部必需规范），",
+        "不要尝试列出/读取公司仓库路径，直接开始写文件；先落产物骨架再迭代打磨。",
+        "无网络、无 shell 写操作、无外部 CLI —— 需要外部资料而实现不了时，如实说明并标注「未获取」，不得臆造。",
+        "",
+        "强制交付（按顺序，全部落在产物目录内）：",
+    ]
+    for idx, name in enumerate(deliverables, 1):
+        lines.append(f"  {idx}) {job_dir / name}")
+    lines.append("  若任务明确要求排版/封面，在产物目录内一并产出对应文件（如 draft-formatted.md）并复核。")
+    lines += [
+        "",
+        "交付方式（硬规则）：",
+        "- 必须用 fs.write 把产物写进产物目录；**只给 answer 不算完成** —— 判定器只认文件写入的变更摘要。",
+        "- 你的**第一次输出必须是 fs.write 工具调用**；全部强制产物写完之前，不要输出 answer。",
+        "- 第一步就直接落文件（先骨架后补全），每写完一个产物再写下一个；不要反复探查目录。",
+        '- 例：{"tool_call": {"tool": "fs.write", "args": {"path": "draft.md", "content": "……"}}}',
+        "- answer 只用于收尾：产物绝对路径 + 质量门结论 + 仍需人工决定的事项。",
+    ]
+    lines += ["", "必须遵循的公司规范（原文随任务下发）："]
+    for rel, text in _v2_spec_excerpts(route):
+        lines += [f"--- {rel} ---", text, ""]
+    lines += [
+        "边界：",
+        "- 只写产物目录内的文件；不修改公司仓库其它任何文件；",
+        "- 不执行公众号推送/草稿箱写入/公开发布等外部动作；",
+        "- 不编造链接、数据、测试或已完成动作；无法核验的内容明确标注；",
+        "- 最终 answer 给出产物绝对路径、质量门结论与仍需人工决定的事项。",
+    ]
+    return "\n".join(lines)
+
+
 def submit_content_v2(
     config: dict[str, Any],
     *,
@@ -1871,14 +1953,22 @@ def submit_content_v2(
     run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
     intent = _v2_content_intent(decision)
     target = str(getattr(decision, "target", "") or "company-internal")
+    route = str(getattr(decision, "route", "") or "")
+    job_dir = content_job_path(config, run_id)
     focus = json.dumps(
         {
-            "content_route": str(getattr(decision, "route", "")),
+            "content_route": route,
             "task_intent": intent,
             "company_task": message,
             "company_session_id": session_id,
             "company_platform": platform,
             "client_source": cfg["client_source"],
+            # 内建运行时的任务书(D-22):规范正文随任务下发 —— path jail 根 =
+            # 产物目录,运行时读不到公司仓库里的规范文件。
+            "runtime_brief": build_runtime_brief(decision, message, job_dir),
+            # 声明式产物清单 ⇒ content 判定器按声明核验(空声明只要求"有过写动作")
+            "content_verify": {"files": list(
+                _V2_CONTENT_DELIVERABLES.get(route, []))},
         },
         ensure_ascii=False, sort_keys=True)
     by = cfg["agent"]
@@ -1921,20 +2011,18 @@ def submit_content_v2(
     }
 
 
-def build_v2_content_worker_cmd(config: dict[str, Any]) -> list:
+def build_v2_content_worker_cmd(config: dict[str, Any], run_id: str) -> list:
     """Build the v2 content worker command (pure; testable).
 
-    The executor is the content executor in its v2 stdin contract mode.  The v2
-    worker is market-wide (no v1 ``--role-counts`` semantics), so identity comes
-    from ``swarm_v2_agent``/``swarm_v2_judge``; ``--max-tasks 1`` makes one
-    dispatch correspond to one claimed task instead of leaving a market-wide
-    content worker resident.
+    执行面自给(D-22/F14):worker 用蜂群**内建 agent_runtime**(write 档)执行任务,
+    不再把执行外包给外部 agent CLI(``content_hermes_executor.py`` 内部会起
+    ``hermes chat``,而 content 判定器只认内建运行时的 ``agent_trace`` 写行)。
+    ``--repo-root`` = 本 run 的产物目录 ⇒ 产物落 ``content-jobs/<run_id>/``,且
+    path jail 限定在该目录内(内建运行时默认根 = 蜂群仓库,不可用于公司任务)。
+    身份取自 ``swarm_v2_agent``/``swarm_v2_judge``;``--max-tasks 1`` = 一次派发一个任务。
     """
     cfg = v2_gray_config(config)
-    executor_command = "{} {} --stdin-json".format(
-        shlex.quote(str(sys.executable)),
-        shlex.quote(str(config["content_executor"])),
-    )
+    job_dir = content_job_path(config, run_id)
     return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -1942,7 +2030,12 @@ def build_v2_content_worker_cmd(config: dict[str, Any]) -> list:
         "--db", config["swarm_v2_db"],
         "--agent", cfg["agent"],
         "--judge-by", cfg["judge"],
-        "--executor-command", executor_command,
+        "--agent-runtime",
+        "--permission", "write",
+        "--repo-root", str(job_dir),
+        # 轮数取硬顶:内容产出多文件(初稿/去AI味/QA),默认 8 轮实测写不完
+        "--max-turns", "12",
+        "--max-tokens-budget", str(cfg["token_budget"]),
         "--poll-interval", str(cfg["poll_interval"]),
         "--max-tasks", "1",
     ]
@@ -1953,10 +2046,12 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
     value = str(run_id or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
         raise ValueError(f"invalid swarm v2 content run id: {value!r}")
+    job_dir = content_job_path(config, run_id)
+    job_dir.mkdir(parents=True, exist_ok=True)      # 内建运行时在产物目录内写文件
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-content-{value}.log"
-    cmd = build_v2_content_worker_cmd(config)
+    cmd = build_v2_content_worker_cmd(config, run_id)
     worker_env, _dropped = scrub_environment()
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
@@ -1964,7 +2059,7 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=config["swarm_repo"],
+            cwd=str(job_dir),
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=subprocess.STDOUT,

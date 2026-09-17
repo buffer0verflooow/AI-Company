@@ -1455,6 +1455,22 @@ _V2_RUN_INTENTS = frozenset({
     "recon", "exploit", "analyze", "defend", "report", "research", "custom",
 })
 
+#: 安全线 / research 线灰度身份(**新增可配键**;D-28)。活库当前**没有** vuln 线
+#: 身份(content-writer-1/dev-executor-1 等 4 个身份均非 vuln),故缺省留空 ⇒
+#: 灰度前置不满足 ⇒ 不命中,回落 fail-closed。**不写死身份名。**
+_V2_SECURITY_AGENT_KEY = "swarm_v2_security_agent"
+_V2_SECURITY_JUDGE_KEY = "swarm_v2_security_judge"
+#: 安全线产物目录(config 可配;缺省 = content-jobs 的兄弟目录 security-jobs)。
+_V2_SECURITY_JOB_DIR_KEY = "swarm_v2_security_job_dir"
+
+
+def _v2_security_identities(config: dict[str, Any]) -> tuple[str, str]:
+    """Return (agent, judge) for the security/research line; "" when unset."""
+    agent = str(config.get(_V2_SECURITY_AGENT_KEY) or "").strip()
+    judge = str(config.get(_V2_SECURITY_JUDGE_KEY) or "").strip()
+    return agent, judge
+
+
 
 def _v2_gray_int(value: Any, default: int) -> int:
     try:
@@ -1575,14 +1591,24 @@ def _v2_gray_eval(config: dict[str, Any], *, run_type: str, task_type: str,
     return decision
 
 
-def v2_gray_decision(config: dict[str, Any], decision: RouteDecision, message: str) -> dict[str, Any]:
+def v2_gray_decision(config: dict[str, Any], decision: RouteDecision, message: str,
+                     *, agent: str | None = None, judge: str | None = None) -> dict[str, Any]:
     """Decide whether a company task should enter the v2 market.
 
     ``enabled=False`` returns immediately without importing v2 code or calling
     any CLI.  Every unmet precondition or evaluation error yields ``hit=False``
     plus a stable reason so the caller can record the fallback.  Never raises.
+
+    ``agent``/``judge`` 覆盖 ``swarm_v2_agent``/``swarm_v2_judge``:安全线 /
+    research 线用**专用身份键**(``_v2_security_identities``),缺省留空 ⇒ 视为
+    灰度前置不满足(``v2_agent_not_configured`` / ``v2_judge_not_configured`` /
+    ``v2_self_judge_forbidden``)⇒ 不命中回退。内容线不传 ⇒ 行为逐字不变。
     """
     cfg = v2_gray_config(config)
+    if agent is not None:
+        cfg["agent"] = str(agent).strip()
+    if judge is not None:
+        cfg["judge"] = str(judge).strip()
     result: dict[str, Any] = {
         "hit": False,
         "enabled": cfg["enabled"],
@@ -1981,6 +2007,203 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-content-{value}.log"
     cmd = build_v2_content_worker_cmd(config, run_id)
+    worker_env, _dropped = scrub_environment()
+    worker_env["COMPANY_ROUTER_BYPASS"] = "1"
+    worker_env["HERMES_SESSION_SOURCE"] = "tool"
+    log_fh = log_path.open("a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(job_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=worker_env,
+        )
+    except BaseException:
+        log_fh.close()
+        raise
+    log_fh.close()
+    return proc.pid
+
+
+# ── 安全线 / research 线 v2 派发 (D-28;按新 head 重写,非合并归档补丁) ──────
+#
+# 与内容线(`submit_content_v2` / `launch_v2_content_worker`)同构,差异:
+#   * run_type 由 `_V2_RUN_TYPE_BY_ROUTE` 取(security→vuln / research→ops);
+#     task_type 由 `_V2_TASK_TYPE_BY_INTENT` 取。
+#   * 身份取安全线专用配置键(缺省留空 ⇒ 灰度不命中,见 `_v2_security_identities`)。
+#   * focus_params **显式**声明 vuln 判定面口径(`vuln_verify`):vuln 判定器
+#     `p5-exec-verify` 读 `focus_params.exec_criteria`(声明式 argv+expect_exit
+#     真跑);本批**不产出 exec_criteria**(留待真实任务书),故声明走 M1.5
+#     **绑定记录**口径 —— 不声明 argv、不执行、判定结论由外部提交。
+#     **绝不**硬编码 `{"argv": [...], "expect_exit": 0}` 之类假判据。
+# 异常一律上抛,由 `dispatch_swarm` 记录回退原因并继续 fail-closed(不丢任务)。
+
+
+def _v2_security_run_intent(decision: RouteDecision, task_type: str) -> str:
+    """v2 `run create --intent` 取值。
+
+    需求书写作「``--intent <v2 task_type>``」;但 `run_create.INTENTS` 不接受
+    `scan`(recon→scan)。故:task_type ∈ 闭集时直接用,否则退回公司 intent
+    (∈ 闭集),再否则 custom —— 始终不越 v2 闭集。
+    """
+    if task_type in _V2_RUN_INTENTS:
+        return task_type
+    intent = str(getattr(decision, "intent", "") or "")
+    return intent if intent in _V2_RUN_INTENTS else "custom"
+
+
+def _v2_security_job_root(config: dict[str, Any]) -> Path:
+    configured = str(config.get(_V2_SECURITY_JOB_DIR_KEY) or "").strip()
+    if configured:
+        return Path(configured)
+    content_dir = str(config.get("content_job_dir") or "").strip()
+    if content_dir:
+        return Path(content_dir).parent / "security-jobs"
+    return HERE.parent / "operations" / "runtime" / "security-jobs"
+
+
+def security_job_path(config: dict[str, Any], run_id: str) -> Path:
+    """Path-jail a security run id under the security job root (mirrors content)."""
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid security run id: {value!r}")
+    root = _v2_security_job_root(config).resolve()
+    candidate = root / value
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"security run escapes job root: {value!r}") from exc
+    if candidate.is_symlink():
+        raise ValueError(f"security run directory may not be a symlink: {value!r}")
+    return candidate
+
+
+def submit_security_v2(
+    config: dict[str, Any],
+    *,
+    decision: RouteDecision,
+    message: str,
+    session_id: str,
+    platform: str,
+    gray: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish one security/research task into the v2 market (gray hit only).
+
+    Writes a v2 run (`v2 run create`) then publishes the task (`market
+    publish`).  Any non-zero CLI exit raises; the caller records the fallback
+    reason and continues down the fail-closed v1 path, so a failed v2 submit
+    never drops the task.  Identity comes from the security-line config keys;
+    the vuln judge face is declared explicitly via ``focus_params.vuln_verify``
+    (binding-record mode — no ``exec_criteria`` is fabricated here).
+    """
+    cfg = v2_gray_config(config)
+    agent, _judge = _v2_security_identities(config)
+    route = str(getattr(decision, "route", "") or "")
+    run_type = _V2_RUN_TYPE_BY_ROUTE.get(route, "")
+    if run_type not in {"vuln", "ops"}:
+        raise ValueError(f"security/research v2 requires vuln|ops route; got {route!r}")
+    task_type = _V2_TASK_TYPE_BY_INTENT.get(
+        str(getattr(decision, "intent", "") or ""), "custom")
+    intent = _v2_security_run_intent(decision, task_type)
+    run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
+    target = str(getattr(decision, "target", "") or "company-internal")
+    focus = json.dumps(
+        {
+            "company_route": route,
+            "task_intent": intent,
+            "company_task": message,
+            "company_session_id": session_id,
+            "company_platform": platform,
+            "client_source": cfg["client_source"],
+            # 见上:本批走绑定记录口径,不声明 exec_criteria(无 argv / 无真跑)。
+            "vuln_verify": {
+                "mode": "binding-record",
+                "provider": "p5-exec-verify",
+                "note": (
+                    "vuln 判定器读 focus_params.exec_criteria;本批未声明 "
+                    "(留待后续批次按真实任务书产出)⇒ 不执行、回落 M1.5 绑定记录"
+                ),
+            },
+        },
+        ensure_ascii=False, sort_keys=True)
+    v2_swarm_command(
+        config, "v2", "run", "create",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--intent", intent,
+        "--target-type", "unknown",
+        "--target", target,
+        "--token-budget", str(cfg["token_budget"]),
+        "--by", agent,
+    )
+    publication = v2_swarm_command(
+        config, "market", "publish",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--task-type", task_type,
+        "--publisher", "client",
+        "--est", str(cfg["est_tokens"]),
+        "--base", str(cfg["base_priority"]),
+        "--by", agent,
+        "--client-source", cfg["client_source"],
+        "--focus", focus,
+        "--task-id", run_id,
+    )
+    task_id = str(publication.get("task_id") or run_id)
+    return {
+        "run_id": run_id,
+        "request_id": task_id,
+        "status": "submitted",
+        "_v2_dispatch": "v2",
+        "_v2_run_type": run_type,
+        "_v2_task_type": task_type,
+        "_v2_task_id": task_id,
+    }
+
+
+def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
+    """Build the v2 security/research worker command (pure; testable).
+
+    Mirrors ``build_v2_content_worker_cmd``: 蜂群**内建 agent_runtime**(write 档),
+    **不走**外部 `--executor-command`(该档已随 D-25 退役,v2 侧起即
+    `ExecutorWorkerError`)。`--repo-root` = 本 run 的产物目录(内建运行时 path
+    jail 根)。身份取安全线专用配置键;`--max-tasks 1` = 一次派发一个任务。
+    """
+    cfg = v2_gray_config(config)
+    agent, judge = _v2_security_identities(config)
+    job_dir = security_job_path(config, run_id)
+    return [
+        sys.executable,
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
+        "worker",
+        "--db", config["swarm_v2_db"],
+        "--agent", agent,
+        "--judge-by", judge,
+        "--agent-runtime",
+        "--permission", "write",
+        "--repo-root", str(job_dir),
+        "--max-turns", "12",
+        "--max-tokens-budget", str(cfg["token_budget"]),
+        "--poll-interval", str(cfg["poll_interval"]),
+        "--max-tasks", "1",
+    ]
+
+
+def launch_v2_security_worker(config: dict[str, Any], run_id: str) -> int:
+    """Launch the v2 security/research worker detached (mirrors content)."""
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid swarm v2 security run id: {value!r}")
+    job_dir = security_job_path(config, run_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(config["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"swarm-v2-security-{value}.log"
+    cmd = build_v2_security_worker_cmd(config, run_id)
     worker_env, _dropped = scrub_environment()
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
@@ -2707,15 +2930,58 @@ def _handle_hook(
                     RouteDecision(**{**asdict(decision), "action": "main_agent", "reason": "active run limit reached"}),
                     status_updates=updates + ["- 已达到本会话并发蜂群上限，新任务暂未提交。"],
                 )}
-            # D-25(2026-09-17): v1 执行面已整体退役(runner / executor 文件已删),
-            # 这里再也没有可起的进程 —— 不再写一条永远不会被执行的 submitted 行,
-            # 直接 fail-closed 交回主 Agent,并把"为什么"讲清楚。
-            state.update(event_id, status="failed", error=V1_EXECUTION_SURFACE_RETIRED)
-            return {"context": build_context(
-                RouteDecision(**{**asdict(decision), "action": "main_agent",
-                                 "reason": "v1 execution surface retired"}),
-                status_updates=updates + [f"- {V1_EXECUTION_SURFACE_RETIRED}"],
-            )}
+            # v2 灰度接入(D-28;安全线 / research 线):身份取安全线**专用**
+            # 配置键 —— 活库无 vuln 线身份 ⇒ 缺省留空 ⇒ `v2_gray_decision`
+            # 视为前置不满足 ⇒ 不命中,原样 fail-closed。`swarm_v2_gray.run_types`
+            # 当前只有 content ⇒ 本分支在生产**不可达**(见交付报告)。
+            sec_agent, sec_judge = _v2_security_identities(config)
+            gray = v2_gray_decision(
+                config, decision, message, agent=sec_agent, judge=sec_judge)
+            fallback_reason = ""
+            if gray["hit"]:
+                try:
+                    v2_run = submit_security_v2(
+                        config,
+                        decision=decision,
+                        message=message,
+                        session_id=session_id,
+                        platform=platform,
+                        gray=gray,
+                    )
+                    run_id = str(v2_run.get("run_id") or "")
+                    pid = launch_v2_security_worker(config, run_id)
+                    run = {"run_id": run_id, "status": "running"}
+                    state.update(event_id, run_id=run_id,
+                                 request_id=str(v2_run.get("request_id") or ""),
+                                 runner_pid=pid, status="running",
+                                 last_heartbeat=utc_now())
+                    updates.append(
+                        f"- v2 灰度命中：{decision.route} 任务已发布至蜂群 v2 市场"
+                        f"（run_id={run_id}）。"
+                    )
+                except Exception as exc:  # noqa: BLE001 -- v2 must never drop the task
+                    fallback_reason = (
+                        f"v2 {decision.route} submit failed: {type(exc).__name__}: {exc}")
+                    LOGGER.warning(
+                        "company_router %s v2 fallback: %s", decision.route, fallback_reason)
+            elif gray["enabled"]:
+                fallback_reason = str(gray.get("reason") or "v2_gray_not_selected")
+                LOGGER.info(
+                    "company_router %s v2 not selected: %s", decision.route, fallback_reason)
+
+            if run is None:
+                # D-25(2026-09-17): v1 执行面已整体退役(runner / executor 文件已删),
+                # 这里再也没有可起的进程 —— 不再写一条永远不会被执行的 submitted 行,
+                # 直接 fail-closed 交回主 Agent,并把"为什么"讲清楚。
+                state.update(event_id, status="failed", error=V1_EXECUTION_SURFACE_RETIRED)
+                return {"context": build_context(
+                    RouteDecision(**{**asdict(decision), "action": "main_agent",
+                                     "reason": "v1 execution surface retired"}),
+                    status_updates=updates + (
+                        [f"- v2 {decision.route} 灰度回退：{fallback_reason}"]
+                        if fallback_reason else []
+                    ) + [f"- {V1_EXECUTION_SURFACE_RETIRED}"],
+                )}
     elif decision.action in {"dispatch_article", "dispatch_video", "dispatch_company"}:
         enabled_key = {
             "dispatch_article": "auto_run_article",

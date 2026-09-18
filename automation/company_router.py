@@ -2257,6 +2257,87 @@ def security_required_capabilities(
     return merged or None
 
 
+# ── W7-b:安全线 worker 启动档位(单一来源)+ 能力/档位对齐 + exec 开关门 ──────
+#
+# 用户批准的 batchW7 派工书 §2:安全线任务书声明的 required_capabilities 需要
+# 命令面/MCP 面(⇒ exec 档),而公司侧安全线 worker 长期以 `--permission write`
+# 启动(W6 §6-4 登记),两者不一致会让 worker 零 token 拒跑。裁定:
+#   ① 安全线启动档位升为 exec(内容线一字不动);
+#   ② 任务书生成器在**发布前**用同一张能力→档位映射校验对齐,不一致 ⇒ 显式
+#      拒绝(不静默发布后被 worker 拒跑);
+#   ③ `agent_runtime_exec` 开关=0 ⇒ exec 档启动在**起进程前**拒绝(三重门之②,
+#      幂等文案含恢复路径);内容线/read-only/write 路径不受影响。
+#: 安全线 worker 启动档位(**单一来源**;内容线仍是 write,不得混用)
+_V2_SECURITY_WORKER_PERMISSION = "exec"
+#: 档位偏序(与 swarm 侧 `agent_runtime._PERMISSION_ORDER` 同口径,跨仓对拍)
+_V2_PERMISSION_ORDER = {"read-only": 0, "write": 1, "exec": 2, "dev": 3}
+#: 能力 → 所需最低档位(**单一来源** = swarm 侧 `agent_runtime.CAPABILITY_PERMISSION`)
+_V2_CAPABILITY_PERMISSION = {"command": "exec", "mcp": "exec"}
+#: exec 档开关(与 swarm 侧 `agent_runtime.EXEC_SWITCH` 同名同义,跨仓对拍锁定)
+_V2_EXEC_SWITCH = "agent_runtime_exec"
+#: 开关关闭时的恢复路径(幂等文案展示;实际写库仍走 swarmctl,不在此处改库)
+_V2_EXEC_SWITCH_RECOVERY = (
+    "swarmctl switch on agent_runtime_exec --by <who> --reason <why>")
+
+
+def capability_permission_gap(capabilities: Any, permission: str) -> list[str]:
+    """声明的能力未被该档位覆盖 ⇒ 返回缺失能力列表(空 = 全覆盖)。
+
+    非法档位/闭集外能力一律 ValueError(不猜);未声明能力 ⇒ 空列表(向后兼容)。
+    """
+    if permission not in _V2_PERMISSION_ORDER:
+        raise ValueError(
+            f"权限档位 ∈ {sorted(_V2_PERMISSION_ORDER)};实得 {permission!r}")
+    missing: list[str] = []
+    for cap in capabilities or []:
+        need = _V2_CAPABILITY_PERMISSION.get(cap)
+        if need is None:
+            raise ValueError(f"required_capabilities 含闭集外能力 {cap!r}")
+        if _V2_PERMISSION_ORDER[permission] < _V2_PERMISSION_ORDER[need]:
+            missing.append(cap)
+    return sorted(set(missing))
+
+
+def security_worker_permission_gap(capabilities: Any,
+                                   permission: str | None = None) -> list[str]:
+    """安全线任务书声明的能力相对**安全线启动档位**的缺口(发布前校验口)。"""
+    return capability_permission_gap(
+        capabilities, permission if permission is not None
+        else _V2_SECURITY_WORKER_PERMISSION)
+
+
+def security_exec_switch_enabled(config: dict[str, Any]) -> bool:
+    """安全线 exec 档开关是否打开(swarm `agent_runtime_exec`)。
+
+    读**蜂群单一来源**(`swarmctl switch list --json`);缺行/未知 ⇒ False(视为关,
+    fail-closed)。查询本身失败 ⇒ 异常上抛,由调用方 fail-closed(绝不静默放行)。
+    """
+    out = swarm_command(config, "switch", "list")
+    for row in out.get("switches") or []:
+        if isinstance(row, dict) and row.get("name") == _V2_EXEC_SWITCH:
+            return int(row.get("enabled") or 0) == 1
+    return False
+
+
+def require_security_exec_switch(config: dict[str, Any]) -> None:
+    """exec 档启动门(F14.2.3 三重门之②)。
+
+    安全线启动档位 ≥ exec 时,`agent_runtime_exec` 开关必须=1;否则在**起任何
+    进程/建任何目录之前**拒绝(幂等:重复调用同一配置得到同一拒绝,零副作用),
+    文案含恢复路径。档位低于 exec(如内容线 write)直接放行,行为逐字不变。
+    """
+    if _V2_PERMISSION_ORDER[_V2_SECURITY_WORKER_PERMISSION] \
+            < _V2_PERMISSION_ORDER["exec"]:
+        return
+    if security_exec_switch_enabled(config):
+        return
+    raise RuntimeError(
+        f"安全线 worker 以 `{_V2_SECURITY_WORKER_PERMISSION}` 档启动,但开关 "
+        f"`{_V2_EXEC_SWITCH}`=0(F14.2.3 三重门之②;默认 0)⇒ 拒绝启动(零进程/零"
+        f"写入);恢复路径:`{_V2_EXEC_SWITCH_RECOVERY}`"
+        f"(--db {config.get('swarm_v2_db', '')})")
+
+
 # ── W5-b-1:exec-criteria 任务书的硬性交付要求(交付物必须落盘) ─────────────
 #
 # 用户裁定(2026-09-18):交付物必须落盘,判据按产物文件校验。声明了判据却
@@ -2358,6 +2439,16 @@ def submit_security_v2(
     # W6/G3:任务书要求命令面/MCP 面 ⇒ 必须同时声明 required_capabilities(闭集,
     # 发布前校验);随 focus_params 下发,由 v2 worker 执行前确定性校验档位覆盖。
     capabilities = security_required_capabilities(message, task_book)
+    # W7-b:发布前把任务书声明的能力与**安全线启动档位**对齐;不一致 ⇒ 显式拒绝
+    # (不静默发布:否则 worker 认领后因档位不覆盖而零 token 拒跑)。启动档位是
+    # 单一来源常量,改它必须同步能力→档位映射,否则本闸当场拒。
+    _gap = security_worker_permission_gap(capabilities)
+    if _gap:
+        _needed = sorted({_V2_CAPABILITY_PERMISSION[c] for c in _gap})
+        raise ValueError(
+            f"required_capabilities {_gap} 需要 {_needed} 档,但安全线 worker "
+            f"启动档位 = {_V2_SECURITY_WORKER_PERMISSION};发布前拒绝(把启动档位"
+            f"对齐到 {_needed})")
     declared_brief = None
     if isinstance(task_book, dict) and task_book.get("runtime_brief"):
         declared_brief = str(task_book["runtime_brief"])
@@ -2443,10 +2534,14 @@ def submit_security_v2(
 def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
     """Build the v2 security/research worker command (pure; testable).
 
-    Mirrors ``build_v2_content_worker_cmd``: 蜂群**内建 agent_runtime**(write 档),
+    Mirrors ``build_v2_content_worker_cmd``: 蜂群**内建 agent_runtime**,
     **不走**外部 `--executor-command`(该档已随 D-25 退役,v2 侧起即
     `ExecutorWorkerError`)。`--repo-root` = 本 run 的产物目录(内建运行时 path
     jail 根)。身份取安全线专用配置键;`--max-tasks 1` = 一次派发一个任务。
+
+    W7-b:启动档位 = `_V2_SECURITY_WORKER_PERMISSION`(**exec**)—— 安全线任务书
+    声明的命令面/MCP 面能力(`required_capabilities`)只有在 exec 档才被覆盖;
+    内容线 `build_v2_content_worker_cmd` 仍是 write,两线不得混用。
     """
     cfg = v2_gray_config(config)
     agent, judge = _v2_security_identities(config)
@@ -2459,7 +2554,7 @@ def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
         "--agent", agent,
         "--judge-by", judge,
         "--agent-runtime",
-        "--permission", "write",
+        "--permission", _V2_SECURITY_WORKER_PERMISSION,
         "--repo-root", str(job_dir),
         "--max-turns", "12",
         "--max-tokens-budget", str(cfg["token_budget"]),
@@ -2469,10 +2564,16 @@ def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
 
 
 def launch_v2_security_worker(config: dict[str, Any], run_id: str) -> int:
-    """Launch the v2 security/research worker detached (mirrors content)."""
+    """Launch the v2 security/research worker detached (mirrors content).
+
+    W7-b:起进程**之前**先过 exec 开关门(三重门之②):`agent_runtime_exec`=0 ⇒
+    拒绝启动,零进程/零目录/零写入(恢复路径见 :func:`require_security_exec_switch`;
+    内容线 `launch_v2_content_worker` 不受影响)。
+    """
     value = str(run_id or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
         raise ValueError(f"invalid swarm v2 security run id: {value!r}")
+    require_security_exec_switch(config)          # 零副作用:拒绝先于 mkdir/Popen
     job_dir = security_job_path(config, run_id)
     job_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(config["log_dir"])

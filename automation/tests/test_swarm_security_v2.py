@@ -388,7 +388,8 @@ class WorkerCmdTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--judge-by") + 1], "sec-judge-1")
             # D-22/D-25: built-in runtime, never the retired external executor
             self.assertIn("--agent-runtime", cmd)
-            self.assertEqual(cmd[cmd.index("--permission") + 1], "write")
+            # W7-b:安全线启动档位升 exec(命令面/MCP 面能力需 exec;内容线仍 write)
+            self.assertEqual(cmd[cmd.index("--permission") + 1], "exec")
             self.assertNotIn("--executor-command", cmd)
             self.assertNotIn(config["content_executor"], cmd)
             self.assertNotIn("--role-counts", cmd)

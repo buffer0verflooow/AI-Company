@@ -2201,6 +2201,62 @@ def security_exec_criteria(
     return validate_security_exec_criteria(book.get("exec_criteria"))
 
 
+# ── W6/G3:安全线任务书的能力声明(required_capabilities) ──────────────────
+#
+# 事实(2026-09-18):`write` 档工具面只有 fs.*;要求"跑命令/用 MCP 工具"的任务
+# 在 `write` 档 worker 上会 12 轮空转后判负,发布方无从得知档位能力边界。
+# 裁定:任务书要求命令面/MCP 面 ⇒ **必须同时声明** `required_capabilities`
+# (闭集),随 `focus_params` 下发;v2 worker 认领后执行前确定性校验,不覆盖 ⇒
+# 零 token 拒跑并写明该用哪个档位。闭集单一来源 = swarm 侧
+# `agent_runtime.CAPABILITIES`(发布前形状预检 + 回归跨仓对拍锁定)。
+#: 能力闭集(与 swarm 侧 `agent_runtime.CAPABILITIES` 对拍)
+_V2_CAPABILITIES = frozenset({"command", "mcp"})
+#: 任务书正文提及这些工具名 ⇒ 必须派生对应能力(命令面 / MCP 面)
+_V2_CAPABILITY_TOOL_HINTS = (
+    ("sh.run", "command"),
+    ("mcp.call", "mcp"),
+    ("mcp.list", "mcp"),
+)
+
+
+def validate_security_required_capabilities(raw: Any) -> list[str]:
+    """严格校验任务书声明的能力;非法/闭集外 ⇒ ValueError(发布前 fail-closed)。
+
+    闭集外的能力无法被 worker 的档位映射校验(不猜),故发布前即拒,绝不静默
+    丢弃(丢弃 = 发布方以为已声明,worker 却不知道 ⇒ 又回到撞墙)。
+    """
+    if not isinstance(raw, list) or not raw \
+            or not all(isinstance(x, str) and x for x in raw):
+        raise ValueError("required_capabilities 须为非空字符串数组")
+    unknown = sorted(set(raw) - _V2_CAPABILITIES)
+    if unknown:
+        raise ValueError(
+            f"required_capabilities 含闭集外能力 {unknown}"
+            f"(闭集 = {sorted(_V2_CAPABILITIES)})")
+    return list(dict.fromkeys(raw))
+
+
+def security_required_capabilities(
+        message: str,
+        task_book: dict[str, Any] | None = None) -> list[str] | None:
+    """取任务书要求的能力;无 ⇒ None(向后兼容,不发 `required_capabilities`)。
+
+    来源(合并去重):① 显式声明 `required_capabilities`(显式 task_book 或正文
+    fenced JSON;闭集校验);② 任务书正文提及命令面/MCP 面工具名(`sh.run` /
+    `mcp.call` / `mcp.list`)⇒ 派生对应能力 —— "要求用工具"即"必须声明能力"。
+    """
+    book = dict(task_book) if isinstance(task_book, dict) else {}
+    for k, v in security_declared_task_book(message).items():
+        book.setdefault(k, v)
+    declared = None
+    if "required_capabilities" in book:
+        declared = validate_security_required_capabilities(book.get("required_capabilities"))
+    text = str(book.get("runtime_brief") or message or "")
+    derived = [cap for token, cap in _V2_CAPABILITY_TOOL_HINTS if token in text]
+    merged = list(dict.fromkeys((declared or []) + derived))
+    return merged or None
+
+
 # ── W5-b-1:exec-criteria 任务书的硬性交付要求(交付物必须落盘) ─────────────
 #
 # 用户裁定(2026-09-18):交付物必须落盘,判据按产物文件校验。声明了判据却
@@ -2278,7 +2334,11 @@ def submit_security_v2(
     the vuln judge face is declared explicitly via ``focus_params.vuln_verify``:
     ``mode="exec-criteria"`` + ``focus_params.exec_criteria`` when the task book
     declares criteria (W3-b), otherwise the verbatim M1.5 ``binding-record``
-    fallback.  No ``argv``/``expect_exit`` is ever fabricated here.
+    fallback.  No ``argv``/``expect_exit`` is ever fabricated here.  When the
+    task book asks for the command/MCP tool face (W6/G3), the corresponding
+    ``focus_params.required_capabilities`` is declared so the v2 worker can
+    deterministically refuse zero-token instead of spinning on a tier it cannot
+    cover.
     """
     cfg = v2_gray_config(config)
     agent, _judge = _v2_security_identities(config)
@@ -2295,6 +2355,9 @@ def submit_security_v2(
     # 逐字保持 M1.5 binding-record(不执行、判定结论由外部提交)。声明了坏判据
     # 由 security_exec_criteria 直接上抛 ⇒ 调用方 fail-closed(不静默降级)。
     criteria = security_exec_criteria(message, task_book)
+    # W6/G3:任务书要求命令面/MCP 面 ⇒ 必须同时声明 required_capabilities(闭集,
+    # 发布前校验);随 focus_params 下发,由 v2 worker 执行前确定性校验档位覆盖。
+    capabilities = security_required_capabilities(message, task_book)
     declared_brief = None
     if isinstance(task_book, dict) and task_book.get("runtime_brief"):
         declared_brief = str(task_book["runtime_brief"])
@@ -2312,6 +2375,9 @@ def submit_security_v2(
     if declared_brief:
         # 内建运行时 path jail 根 = 产物目录;任务书正文随任务下发(自包含)。
         focus_body["runtime_brief"] = declared_brief
+    if capabilities:
+        # 未声明 ⇒ 不发该键(向后兼容:既有任务 focus 形状逐字不变)
+        focus_body["required_capabilities"] = capabilities
     if criteria is not None:
         focus_body["exec_criteria"] = criteria
         # W5-b-1:声明了判据 ⇒ 任务书正文必须写死"交付物必须落盘"硬要求,并给出

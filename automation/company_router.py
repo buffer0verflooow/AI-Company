@@ -2037,8 +2037,9 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
 #   * 身份取安全线专用配置键(缺省留空 ⇒ 灰度不命中,见 `_v2_security_identities`)。
 #   * focus_params **显式**声明 vuln 判定面口径(`vuln_verify`):vuln 判定器
 #     `p5-exec-verify` 读 `focus_params.exec_criteria`(声明式 argv+expect_exit
-#     真跑);本批**不产出 exec_criteria**(留待真实任务书),故声明走 M1.5
-#     **绑定记录**口径 —— 不声明 argv、不执行、判定结论由外部提交。
+#     真跑);W3-b 起**任务书声明判据**时走 `mode="exec-criteria"` 并原样携带
+#     `focus_params.exec_criteria`;任务书**未声明**判据 ⇒ 逐字保持 M1.5
+#     **绑定记录**口径(不声明 argv、不执行、判定结论由外部提交)。
 #     **绝不**硬编码 `{"argv": [...], "expect_exit": 0}` 之类假判据。
 # 异常一律上抛,由 `dispatch_swarm` 记录回退原因并继续 fail-closed(不丢任务)。
 
@@ -2082,6 +2083,124 @@ def security_job_path(config: dict[str, Any], run_id: str) -> Path:
     return candidate
 
 
+# ── 安全线声明式判据(W3-b;exec-criteria 口径) ────────────────────────────
+#
+# 判据来源 = **任务书声明**,不是代码生成:公司侧只做"发布前形状预检"并原样
+# 透传,执行期仍由 v2 判定器 `exec_verify` 按白名单/path jail 复核(双重门)。
+# **绝不在代码里硬编码 `{"argv": [...], "expect_exit": 0}`** —— 那种判据必然
+# 自证通过,等于把判定变成走过场(红旗)。
+#
+# 判据生成规则(写任务书的人照此声明;离线任务只用产物自身可核验的断言):
+#   1. 断言"产物里确实有某个声明事实"   → grep -F -q '<fact>' <artifact>
+#      (用 -F 字面匹配:`.` 在正则里匹配任意字符,`grep -q com.waze` 会被产物里
+#       的 `com/waze` 误命中;W3 排练实测踩到过这个坑,负例因此一度假通过。)
+#   2. 断言"产物与声明指纹一致"          → sha256sum <artifact>(对拍声明值)
+#   3. 断言"两份产物逐字节一致"          → cmp <artifact-a> <artifact-b>
+#   4. 断言"产物非空/行数符合声明"        → wc -l <artifact>(对拍声明值)
+#   反例(不可判定,禁止写进任务书):"跑一遍某工具再下结论"、"人工确认无误"、
+#   "结果看起来正确" —— 这些没有可核验的 argv+expect_exit,写成判据即红旗。
+#   示例(APK 离线静态分析,产物 report.md 内写包名与结论行):
+#     [{"argv": ["grep", "-F", "-q", "package=com.example.app", "report.md"],
+#       "expect_exit": 0},
+#      {"argv": ["grep", "-F", "-q", "offline-analysis=done", "report.md"],
+#       "expect_exit": 0}]
+#   负例纪律:判据必须能**红** —— 把产物改坏一个字节(如包名改一位)后同一
+#   判据须转 fail ⇒ 判定 rejected。做不到这一点的判据是走过场,不得声明。
+#
+#: 判据命令白名单(发布前预检;单一来源 = swarm 侧
+#: `src/swarm_v2/exec_verify.WHITELIST`,由回归测试跨仓对拍锁定,不新增命令面)。
+_V2_EXEC_WHITELIST = frozenset({
+    "cat", "grep", "diff", "cmp", "sha256sum", "wc", "head", "tail",
+    "sort", "uniq", "stat", "file", "ls", "sleep",
+})
+#: 判据参数字符集(与 exec_verify._ARG_RE 同口径;无空格/引号/shell 元字符)
+_V2_EXEC_ARG_RE = re.compile(r"[A-Za-z0-9._/=@,:+%-]{1,256}")
+#: 单判据硬超时(秒;与 exec_verify.HARD_TIMEOUT_SECONDS 一致)
+_V2_EXEC_HARD_TIMEOUT = 60
+#: 任务书里的机器可读声明:```json { ... } ```(只认带 exec_criteria/runtime_brief 的块)
+_V2_TASK_BOOK_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.S)
+
+
+def security_declared_task_book(message: str) -> dict[str, Any]:
+    """从安全线任务书正文里解析可选的机器可读声明(```json 代码块)。
+
+    只接受**对象**且至少含 `exec_criteria`/`runtime_brief` 之一;坏 JSON / 非对象
+    / 无关块一律跳过(视为未声明 ⇒ 回落 binding-record,**不猜**)。自然语言正文
+    里的裸 `exec_criteria` 字样不会被当作声明(必须走 fenced JSON),避免误触发。
+    """
+    text = str(message or "")
+    for block in _V2_TASK_BOOK_FENCE_RE.findall(text):
+        try:
+            data = json.loads(block)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and ("exec_criteria" in data
+                                       or "runtime_brief" in data):
+            return data
+    return {}
+
+
+def validate_security_exec_criteria(raw: Any) -> list[dict[str, Any]]:
+    """严格校验任务书声明的 `exec_criteria`;不合法 ⇒ ValueError(不静默降级)。
+
+    形状与 v2 `exec_verify.parse_criteria` 同口径:`[{"argv": [...非空字符串...],
+    "expect_exit": 0..255, "timeout": 正整数}]`,argv[0] ∈ 白名单、禁绝对路径与
+    `..`、参数 ≤256 且字符集白名单内。声明了**坏**判据 = 任务书缺陷,发布前即拒
+    (绝不"改成 binding-record 假装没声明",也绝不编造 argv 让判定能过)。
+    """
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("exec_criteria 须为非空数组(每个判据 = per-task argv)")
+    criteria: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"exec_criteria[{i}] 须为对象({{argv, expect_exit?, timeout?}})")
+        extra = set(item) - {"argv", "expect_exit", "timeout"}
+        if extra:
+            raise ValueError(f"exec_criteria[{i}] 含未声明键 {sorted(extra)}")
+        argv = item.get("argv")
+        if (not isinstance(argv, list) or not argv
+                or not all(isinstance(a, str) for a in argv)):
+            raise ValueError(f"exec_criteria[{i}].argv 须为非空字符串数组")
+        if argv[0] not in _V2_EXEC_WHITELIST:
+            raise ValueError(
+                f"exec_criteria[{i}].argv[0]={argv[0]!r} 不在判定器白名单 "
+                f"{sorted(_V2_EXEC_WHITELIST)}")
+        for a in argv:
+            if len(a) > 256:
+                raise ValueError(f"exec_criteria[{i}] 参数超长(>256): {a!r}")
+            if not _V2_EXEC_ARG_RE.fullmatch(a):
+                raise ValueError(f"exec_criteria[{i}] 参数含白名单外字符: {a!r}")
+            if a.startswith("/"):
+                raise ValueError(f"exec_criteria[{i}] 禁绝对路径: {a!r}")
+            if ".." in a:
+                raise ValueError(f"exec_criteria[{i}] 禁路径越界(..): {a!r}")
+        expect = item.get("expect_exit", 0)
+        if isinstance(expect, bool) or not isinstance(expect, int) or not 0 <= expect <= 255:
+            raise ValueError(f"exec_criteria[{i}].expect_exit 须为 0..255 整数: {expect!r}")
+        timeout = item.get("timeout", 30)
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise ValueError(f"exec_criteria[{i}].timeout 须为正整数秒: {timeout!r}")
+        criteria.append({"argv": list(argv), "expect_exit": expect,
+                         "timeout": min(timeout, _V2_EXEC_HARD_TIMEOUT)})
+    return criteria
+
+
+def security_exec_criteria(
+        message: str,
+        task_book: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
+    """取任务书声明的判据;未声明 ⇒ None(回落 binding-record)。
+
+    显式 `task_book` 参数优先于正文 fenced JSON(供编程调用/测试);两者都无
+    `exec_criteria` 键 ⇒ None。有键但不合法 ⇒ 直接上抛(发布前 fail-closed)。
+    """
+    book = dict(task_book) if isinstance(task_book, dict) else {}
+    for k, v in security_declared_task_book(message).items():
+        book.setdefault(k, v)
+    if "exec_criteria" not in book:
+        return None
+    return validate_security_exec_criteria(book.get("exec_criteria"))
+
+
 def submit_security_v2(
     config: dict[str, Any],
     *,
@@ -2090,6 +2209,7 @@ def submit_security_v2(
     session_id: str,
     platform: str,
     gray: dict[str, Any],
+    task_book: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish one security/research task into the v2 market (gray hit only).
 
@@ -2097,8 +2217,10 @@ def submit_security_v2(
     publish`).  Any non-zero CLI exit raises; the caller records the fallback
     reason and continues down the fail-closed v1 path, so a failed v2 submit
     never drops the task.  Identity comes from the security-line config keys;
-    the vuln judge face is declared explicitly via ``focus_params.vuln_verify``
-    (binding-record mode — no ``exec_criteria`` is fabricated here).
+    the vuln judge face is declared explicitly via ``focus_params.vuln_verify``:
+    ``mode="exec-criteria"`` + ``focus_params.exec_criteria`` when the task book
+    declares criteria (W3-b), otherwise the verbatim M1.5 ``binding-record``
+    fallback.  No ``argv``/``expect_exit`` is ever fabricated here.
     """
     cfg = v2_gray_config(config)
     agent, _judge = _v2_security_identities(config)
@@ -2111,25 +2233,46 @@ def submit_security_v2(
     intent = _v2_security_run_intent(decision, task_type)
     run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
     target = str(getattr(decision, "target", "") or "company-internal")
-    focus = json.dumps(
-        {
-            "company_route": route,
-            "task_intent": intent,
-            "company_task": message,
-            "company_session_id": session_id,
-            "company_platform": platform,
-            "client_source": cfg["client_source"],
-            # 见上:本批走绑定记录口径,不声明 exec_criteria(无 argv / 无真跑)。
-            "vuln_verify": {
-                "mode": "binding-record",
-                "provider": "p5-exec-verify",
-                "note": (
-                    "vuln 判定器读 focus_params.exec_criteria;本批未声明 "
-                    "(留待后续批次按真实任务书产出)⇒ 不执行、回落 M1.5 绑定记录"
-                ),
-            },
-        },
-        ensure_ascii=False, sort_keys=True)
+    # 判据来自任务书声明(显式 task_book 或正文 fenced JSON);缺 ⇒ None ⇒
+    # 逐字保持 M1.5 binding-record(不执行、判定结论由外部提交)。声明了坏判据
+    # 由 security_exec_criteria 直接上抛 ⇒ 调用方 fail-closed(不静默降级)。
+    criteria = security_exec_criteria(message, task_book)
+    declared_brief = None
+    if isinstance(task_book, dict) and task_book.get("runtime_brief"):
+        declared_brief = str(task_book["runtime_brief"])
+    else:
+        declared_brief = security_declared_task_book(message).get("runtime_brief")
+        declared_brief = str(declared_brief) if declared_brief else None
+    focus_body: dict[str, Any] = {
+        "company_route": route,
+        "task_intent": intent,
+        "company_task": message,
+        "company_session_id": session_id,
+        "company_platform": platform,
+        "client_source": cfg["client_source"],
+    }
+    if declared_brief:
+        # 内建运行时 path jail 根 = 产物目录;任务书正文随任务下发(自包含)。
+        focus_body["runtime_brief"] = declared_brief
+    if criteria is not None:
+        focus_body["exec_criteria"] = criteria
+        focus_body["vuln_verify"] = {
+            "mode": "exec-criteria",
+            "provider": "p5-exec-verify",
+            "note": ("任务书声明判据 ⇒ 判定器按 exec_verify 白名单在产物根内真跑;"
+                     "任一 fail/timeout/refused ⇒ rejected 或不判定"),
+        }
+    else:
+        # 见上:未声明判据 ⇒ 逐字保持现状(binding-record,无 argv / 无真跑)。
+        focus_body["vuln_verify"] = {
+            "mode": "binding-record",
+            "provider": "p5-exec-verify",
+            "note": (
+                "vuln 判定器读 focus_params.exec_criteria;任务书未声明 "
+                "⇒ 不执行、回落 M1.5 绑定记录"
+            ),
+        }
+    focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,

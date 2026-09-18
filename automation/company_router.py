@@ -2201,6 +2201,64 @@ def security_exec_criteria(
     return validate_security_exec_criteria(book.get("exec_criteria"))
 
 
+# ── W5-b-1:exec-criteria 任务书的硬性交付要求(交付物必须落盘) ─────────────
+#
+# 用户裁定(2026-09-18):交付物必须落盘,判据按产物文件校验。声明了判据却
+# 不要求产出被判据校验的文件,等于把判定变成走过场 ⇒ 任务书正文**必须写死**
+# 这条要求,并给出"判据 ↔ 产物"示例对应。
+_V2_SECURITY_DELIVERABLE_RULE = (
+    "交付物必须用 fs.write 落盘到工作目录（判据按产物文件校验；"
+    "只给 answer、不落盘 ⇒ 判负）。"
+)
+#: 判据 ↔ 产物示例(写任务书的人照此声明并产出对应文件)
+_V2_SECURITY_CRITERIA_EXAMPLE = (
+    '例：判据 ["grep","-F","<事实>","<产物文件>"] ⇒ 任务书必须要求用 '
+    "fs.write 产出 <产物文件>"
+)
+
+
+def security_criteria_artifacts(criteria: list[dict[str, Any]]) -> list[str]:
+    """从声明判据里提取被判据引用的产物文件(生成任务书要求用;不改判据)。
+
+    只读命令(exec_verify 白名单)对产物文件断言;路径型参数即被判据校验的产物。
+    仅用于把"必须产出哪些文件"写进任务书,不新增/不改写判据,也不参与校验。
+    """
+    out: list[str] = []
+    for c in criteria:
+        for a in (c.get("argv") or [])[1:]:
+            if not a or a.startswith("-") or "=" in a or a.startswith("/"):
+                continue
+            if "." not in a:
+                continue            # 无扩展名更像模式/选项值,不当作产物文件
+            if a not in out:
+                out.append(a)
+    return out
+
+
+def build_security_exec_deliverable_requirement(
+        criteria: list[dict[str, Any]]) -> str:
+    """生成安全线 exec-criteria 任务书的**硬性交付要求**正文(W5-b-1)。
+
+    用户裁定:交付物必须落盘、判据按产物文件校验;本函数把它写死进任务书,并
+    逐条给出"判据引用 `<产物文件>` ⇒ 必须用 fs.write 产出 `<产物文件>`"的对应。
+    """
+    artifacts = security_criteria_artifacts(criteria)
+    lines = [
+        "交付要求（硬规则；判定器 p5-exec-verify 按产物文件真跑声明判据）：",
+        f"- {_V2_SECURITY_DELIVERABLE_RULE}",
+        "- 判据 ↔ 产物对应：逐条判据引用的文件参数即必须产出的产物文件：",
+    ]
+    if artifacts:
+        for name in artifacts:
+            lines.append(
+                f"  - 判据引用 `{name}` ⇒ 任务书必须要求用 fs.write 产出 `{name}`")
+    else:
+        lines.append("  - 判据未含可直接识别的产物文件名；逐条判据的文件参数"
+                     "即产物文件，须用 fs.write 产出。")
+    lines.append(f"  - {_V2_SECURITY_CRITERIA_EXAMPLE}")
+    return "\n".join(lines)
+
+
 def submit_security_v2(
     config: dict[str, Any],
     *,
@@ -2256,11 +2314,19 @@ def submit_security_v2(
         focus_body["runtime_brief"] = declared_brief
     if criteria is not None:
         focus_body["exec_criteria"] = criteria
+        # W5-b-1:声明了判据 ⇒ 任务书正文必须写死"交付物必须落盘"硬要求,并给出
+        # 判据 ↔ 产物示例对应。用户已裁定声明式 runtime_brief 逐字保留(不改写用户
+        # 正文),故要求另随 `deliverable_requirement` 下发;未声明正文时用它作正文。
+        _requirement = build_security_exec_deliverable_requirement(criteria)
+        focus_body["deliverable_requirement"] = _requirement
+        if not declared_brief:
+            focus_body["runtime_brief"] = _requirement
         focus_body["vuln_verify"] = {
             "mode": "exec-criteria",
             "provider": "p5-exec-verify",
             "note": ("任务书声明判据 ⇒ 判定器按 exec_verify 白名单在产物根内真跑;"
-                     "任一 fail/timeout/refused ⇒ rejected 或不判定"),
+                     "任一 fail/timeout/refused ⇒ rejected 或不判定;"
+                     "交付物须用 fs.write 落盘(判据按产物文件校验)"),
         }
     else:
         # 见上:未声明判据 ⇒ 逐字保持现状(binding-record,无 argv / 无真跑)。

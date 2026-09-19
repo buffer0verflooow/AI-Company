@@ -943,6 +943,49 @@ def _record_retry_exhaustion(
     return f"terminal: retry exhausted: {error}; fallback={fallback}"
 
 
+def _run_ledger_backfill(config: dict[str, Any], summary: dict[str, int]) -> None:
+    """C-4: 复用本 tick 的 v2 接收路径驱动公司账本回填(幂等;不新起线程)。
+
+    收口信号取自蜂群库内真值(`swarm_runs`/`agent_tasks` 终态),不靠日志。
+    三层门关 ⇒ `swarm_ledger_backfill` 已落"待回填"登记并返回 pending/非零;
+    这里把它计入 summary 并 warning,**绝不静默**。任一异常都不许中止投递 tick。
+    """
+    if not str(config.get("swarm_v2_db") or config.get("swarm_db") or "").strip():
+        return
+    try:
+        try:
+            from . import swarm_ledger_backfill as backfill_mod
+        except ImportError:  # Direct execution from automation/.
+            import swarm_ledger_backfill as backfill_mod  # type: ignore[no-redef]
+
+        days = _positive_limit(config.get("swarm_backfill_lookback_days", 30), 30)
+        processed = {"done": 0, "pending": 0, "unpriced": 0, "skipped": 0, "error": 0}
+        for label, run in (("scan", backfill_mod.process_finalized_runs),
+                           ("replay", backfill_mod.replay_pending)):
+            try:
+                out = run(config, days=days) if label == "scan" else run(config)
+            except Exception as exc:  # noqa: BLE001 -- 回填失败不得中止投递 tick
+                LOGGER.warning("swarm ledger backfill %s failed: %s", label, exc,
+                               exc_info=True)
+                processed["error"] += 1
+                continue
+            for key in processed:
+                processed[key] += int(out.get(key, 0) or 0)
+        summary["backfill_done"] = processed["done"]
+        summary["backfill_pending"] = processed["pending"]
+        summary["backfill_unpriced"] = processed["unpriced"]
+        summary["backfill_skipped"] = processed["skipped"]
+        summary["backfill_error"] = processed["error"]
+        if processed["pending"] or processed["unpriced"] or processed["error"]:
+            LOGGER.warning(
+                "swarm ledger backfill 未收口(待补/未定价/错误): "
+                "done=%s pending=%s unpriced=%s error=%s;已登记待重放",
+                processed["done"], processed["pending"], processed["unpriced"],
+                processed["error"])
+    except Exception as exc:  # noqa: BLE001 -- 模块/DB 不可用不得中止投递 tick
+        LOGGER.warning("swarm ledger backfill skipped: %s", exc, exc_info=True)
+
+
 def process_once(
     config: dict[str, Any],
     *,
@@ -955,6 +998,8 @@ def process_once(
         "failed": 0, "waiting_target": 0, "terminal": 0, "suspected_dead": 0,
         "outbox_enqueued": 0, "outbox_checked": 0,
         "outbox_delivered": 0, "outbox_failed": 0, "outbox_dead_letter": 0,
+        "backfill_done": 0, "backfill_pending": 0, "backfill_unpriced": 0,
+        "backfill_skipped": 0, "backfill_error": 0,
     }
     if not config.get("proactive_delivery", True):
         return summary
@@ -1560,6 +1605,9 @@ def process_once(
             # A locked/unavailable operations DB must not abort the whole
             # one-minute delivery tick; skip this cycle and retry next time.
             LOGGER.warning("tvcr review delivery skipped: %s", exc, exc_info=True)
+    # C-4: 同 tick 驱动 v2 run 收口 ⇒ 公司账本 ⇒ 蜂群回填(幂等;gate 关时
+    # 落待补登记 + warning,绝不 rc=0 静默)。
+    _run_ledger_backfill(config, summary)
     return summary
 
 

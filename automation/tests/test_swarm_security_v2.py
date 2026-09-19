@@ -295,14 +295,19 @@ class DispatchSwarmLifecycleTests(unittest.TestCase):
 
     def test_research_gray_hit_uses_ops_run_type(self):
         with tempfile.TemporaryDirectory() as td:
+            # W11-b:research 路由改走专属提交口(submit_research_v2)与专属身份/launch。
+            # 断言面与迁移前一致(ops run_type / company-ops- run_id / worker 起用本 run);
+            # 仅把桩目标从安全线切到 research 线并补 research 专用身份键。
             config = _config(td, dispatch_research=True,
                              gray=_hit_gray(run_types=["ops"]),
-                             security_agent="sec-exec-1", security_judge="sec-judge-1")
+                             security_agent="sec-exec-1", security_judge="sec-judge-1",
+                             swarm_v2_research_agent="res-exec-1",
+                             swarm_v2_research_judge="res-judge-1")
             with patch("automation.company_router._load_v2_company_router",
                        return_value=None), \
                     patch("automation.company_router.v2_swarm_command",
                           side_effect=[{"run_id": "x"}, {"task_id": "t-ops-1"}]) as v2cli, \
-                    patch("automation.company_router.launch_v2_security_worker",
+                    patch("automation.company_router.launch_v2_research_worker",
                           return_value=555) as v2w:
                 handle_hook(_payload(session="res-hit", message=RESEARCH_MESSAGE), config)
             create = v2cli.call_args_list[0].args

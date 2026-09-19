@@ -333,10 +333,70 @@ def read_json(path: Path) -> Optional[dict[str, Any]]:
 
 
 def _active_worker(status: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """存活口径(W13-b) = `conn_state=='open'` **且** `not stale`。
+
+    缺陷 A:池进程被 SIGTERM 后连接行仍是 open(心跳冻结),旧口径只看
+    `conn_state` 便误判存活。stale-open ⇒ 视为死亡,照常拉起。
+    向后兼容:pool status 未带 `stale` 字段(旧版)时按未 stale 处理。
+    """
     for worker in status.get("workers") or []:
-        if isinstance(worker, dict) and worker.get("conn_state") == "open":
+        if isinstance(worker, dict) and worker.get("conn_state") == "open" \
+                and not worker.get("stale"):
             return worker
     return None
+
+
+def _stale_workers(status: dict[str, Any]) -> list[dict[str, Any]]:
+    """stale-open 连接(= 幽灵连接:进程已死但连接行未收尸)。"""
+    out: list[dict[str, Any]] = []
+    for worker in status.get("workers") or []:
+        if isinstance(worker, dict) and worker.get("conn_state") == "open" \
+                and worker.get("stale"):
+            out.append(worker)
+    return out
+
+
+def _stale_evidence(status: dict[str, Any]) -> list[dict[str, Any]]:
+    """可观测的 stale 证据(heartbeat/返回值/日志逐条带出,不许静默)。"""
+    return [{"agent_id": w.get("agent_id"), "conn_id": w.get("conn_id"),
+             "age_seconds": w.get("conn_age_seconds"), "stale": True}
+            for w in _stale_workers(status)]
+
+
+def reap_stale_connections(config: dict[str, Any], *, runner: Callable = subprocess.run,
+                           timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """`swarmctl conn reap --json`(W13-a 收尸口;调用方负责响亮记录失败)。"""
+    out = _run_swarmctl(
+        config, ["conn", "reap", "--db", _db_of(config), "--json"],
+        runner=runner, timeout=timeout)
+    if not isinstance(out, dict):
+        raise PoolSupervisorError(f"conn reap 返回非预期 JSON: {str(out)[:200]}")
+    return out
+
+
+def _try_reap_stale(config: dict[str, Any], paths: dict[str, Path], deps: "SupervisorDeps",
+                    stale_evidence: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """有 stale 证据才收尸;命令不存在/失败 ⇒ 响亮记录,**绝不阻塞拉起**。
+
+    无 stale 证据时返回 None(既不调用命令、也不写心跳噪声)。
+    """
+    if not stale_evidence:
+        return None
+    try:
+        if deps.reap is not None:
+            out = deps.reap(config)
+        else:
+            out = reap_stale_connections(config, runner=deps.runner)
+        count = out.get("count") if isinstance(out, dict) else None
+        _append_log(paths["supervisor_log"],
+                    f"{deps.now()} conn reap ok: reaped={count}"
+                    f" stale={[e['agent_id'] for e in stale_evidence]}")
+        return {"ok": True, "count": count}
+    except Exception as exc:  # noqa: BLE001 -- 收尸失败不得阻塞拉起,但必须响亮
+        detail = f"{type(exc).__name__}: {exc}"
+        _append_log(paths["supervisor_log"],
+                    f"{deps.now()} conn reap 失败(不阻塞拉起): {detail}")
+        return {"ok": False, "error": detail}
 
 
 def pool_health_snapshot(config: dict[str, Any]) -> dict[str, Any]:
@@ -358,6 +418,8 @@ class SupervisorDeps:
     process_alive: Callable = _process_alive
     find_pool_processes: Callable = find_pool_processes
     now: Callable = utc_now
+    #: W13-b 收尸注入点(config -> dict);None ⇒ 走 `conn reap` 真 CLI。
+    reap: Optional[Callable] = None
     extra: dict = field(default_factory=dict)
 
 
@@ -383,6 +445,7 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
     result: dict[str, Any] = {
         "ok": True, "rc": 0, "launched": False, "alive_before": False,
         "pid": None, "reason": "", "size": size,
+        "stale_evidence": [], "reap": None,
         "snapshot_path": str(paths["snapshot"]),
         "heartbeat_path": str(paths["heartbeat"]),
     }
@@ -408,8 +471,16 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
             status = pool_status(config, size=size, runner=deps.runner)
         _write_json(paths["snapshot"], status)
 
-        # 2. 存活判定:连接态(open) 或 /proc 里活的 `pool run` 进程 或
-        #    pidfile 指向的进程仍活。
+        # 1b. 新鲜度证据(W13-b):stale-open = 幽灵连接;必须可观测、不许静默。
+        stale_evidence = _stale_evidence(status)
+        result["stale_evidence"] = stale_evidence
+        if stale_evidence:
+            _append_log(paths["supervisor_log"],
+                        f"{deps.now()} stale-open connections detected:"
+                        f" {stale_evidence}")
+
+        # 2. 存活判定:新鲜连接态(open 且 not stale) 或 /proc 里活的
+        #    `pool run` 进程 或 pidfile 指向的进程仍活。
         active = _active_worker(status)
         pid_from_file = read_pidfile(paths["pidfile"])
         pid_alive = bool(pid_from_file and deps.process_alive(pid_from_file))
@@ -420,11 +491,14 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
         if alive:
             result["pid"] = pid_from_file or (procs[0] if procs else None)
             result["reason"] = "pool worker already alive: 不重复拉起"
+            result["reap"] = _try_reap_stale(config, paths, deps, stale_evidence)
             _write_json(paths["heartbeat"], {
                 "ts": deps.now(), "pid": result["pid"],
                 "conn": active.get("conn_state") if active else None,
                 "slot": active.get("slot") if active else None,
                 "size": size, "state": "alive",
+                "stale_evidence": stale_evidence,
+                "reap": result["reap"],
                 "env_dropped_count": len(env_dropped),
                 "env_dropped_sample": env_dropped[:5],
             })
@@ -446,12 +520,17 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
             result.update(ok=False, rc=3, reason=reason)
             return result
 
-        # 4. pidfile + heartbeat(时间戳 + pid + conn)
+        # 3b. 拉起成功后收尸 stale-open(失败不阻塞;已在 _try_reap_stale 响亮记录)。
+        result["reap"] = _try_reap_stale(config, paths, deps, stale_evidence)
+
+        # 4. pidfile + heartbeat(时间戳 + pid + conn + stale 证据/收尸结果)
         atomic_write_text(paths["pidfile"], f"{pid}\n")
         _write_json(paths["heartbeat"], {
             "ts": deps.now(), "pid": pid, "conn": None,
             "slot": None, "size": size, "state": "launched",
             "cmd": cmd,
+            "stale_evidence": stale_evidence,
+            "reap": result["reap"],
             "env_dropped_count": len(env_dropped),
             "env_dropped_sample": env_dropped[:5],
         })

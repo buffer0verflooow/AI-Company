@@ -26,9 +26,22 @@ from unittest.mock import patch
 
 from automation import swarm_pool_supervisor as sup
 
-LIVE_V2_DB = Path("/home/pwn/workspace/research/swarm-knowledge/swarm_v2.db")
 SWARM_REPO = "/home/pwn/workspace/research/swarm-knowledge"
+SEED_SCRIPT = Path(SWARM_REPO) / "migrations_v2" / "build_v2.py"
 SCRATCH_ROOT = Path("/home/pwn/workspace/w11-scratch")
+
+
+def _seed_swarm_db(dest: Path) -> None:
+    """用例内建确定性空种子库(W13-c:不再拷活库,生产身份不污染计数断言)。"""
+    if not SEED_SCRIPT.is_file():
+        raise unittest.SkipTest("蜂群建库脚本不在本机")
+    proc = subprocess.run(
+        [sys.executable, str(SEED_SCRIPT), "--db", str(dest)],
+        cwd=SWARM_REPO, capture_output=True, text=True, timeout=240)
+    if proc.returncode != 0 or not dest.is_file():
+        raise RuntimeError(
+            f"种子库构建失败(rc={proc.returncode}):\n"
+            f"{proc.stdout[-800:]}\n{proc.stderr[-800:]}")
 
 
 @contextlib.contextmanager
@@ -240,11 +253,9 @@ class ProvisionIdempotentTests(unittest.TestCase):
             self.assertEqual(runner.provision_calls, 0)
 
     def test_real_swarmctl_provision_twice_does_not_add_rows(self):
-        if not LIVE_V2_DB.is_file():
-            self.skipTest("live swarm_v2.db not present")
         with scratch_dir() as td:
             db = td / "swarm_v2.db"
-            db.write_bytes(LIVE_V2_DB.read_bytes())
+            _seed_swarm_db(db)          # 空种子库:不含任何生产 pool-worker-* 身份
             config = _config(td, swarm_v2_db=str(db))
 
             def count():

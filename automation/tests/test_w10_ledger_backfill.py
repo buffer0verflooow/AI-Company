@@ -8,14 +8,18 @@
   ④ 金额 = tokens × 价格(定点算例逐字对拍);
   ⑤ 缺价格 ⇒ 标"未定价"且不发回填请求(不编数、零账本/零审计);
 外加一条:既有 v2 结果接收路径(`company_result_notifier.process_once`)真的驱动 C-4。
+
+W13-c 去活库耦合:不再拷贝活库(`swarm_v2.db` 含 D-46 生产 `ops_backfill`/身份),
+改为在用例内用 `migrations_v2/build_v2.py` 建**确定性空种子库**,一切断言打在副本上
+(计数断言是收紧:活库生产写入不再污染,而非放宽)。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +30,7 @@ from automation import swarm_ledger_backfill as sbf
 from automation.company_result_notifier import process_once
 
 SWARM_REPO = Path("/home/pwn/workspace/research/swarm-knowledge")
-LIVE_SWARM_DB = SWARM_REPO / "swarm_v2.db"
+SEED_SCRIPT = SWARM_REPO / "migrations_v2" / "build_v2.py"
 TASK_ID = "t-w10-c4"
 RUN_ID = "r-w10-c4"
 
@@ -40,17 +44,18 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _copy_swarm_db(td: str) -> Path:
-    if not LIVE_SWARM_DB.is_file():
-        raise unittest.SkipTest("蜂群活库不在本机")
+def _seed_swarm_db(td: str) -> Path:
+    """用例内建确定性空种子库(不拷贝活库;生产数据不再进断言)。"""
+    if not SEED_SCRIPT.is_file():
+        raise unittest.SkipTest("蜂群建库脚本不在本机")
     dst = Path(td) / "swarm_v2.db"
-    shutil.copy2(LIVE_SWARM_DB, dst)
-    wal = Path(str(LIVE_SWARM_DB) + "-wal")
-    if wal.is_file() and wal.stat().st_size:
-        shutil.copy2(wal, Path(str(dst) + "-wal"))
-    for sidecar in (Path(str(dst) + "-shm"),):
-        if sidecar.exists():
-            sidecar.unlink()
+    proc = subprocess.run(
+        [sys.executable, str(SEED_SCRIPT), "--db", str(dst)],
+        cwd=str(SWARM_REPO), capture_output=True, text=True, timeout=240)
+    if proc.returncode != 0 or not dst.is_file():
+        raise RuntimeError(
+            f"种子库构建失败(rc={proc.returncode}):\n"
+            f"{proc.stdout[-800:]}\n{proc.stderr[-800:]}")
     return dst
 
 
@@ -144,12 +149,12 @@ def _b_settlements(swarm_db: Path) -> list[tuple]:
 
 class W10LedgerBackfillTests(unittest.TestCase):
     def setUp(self):
-        if not LIVE_SWARM_DB.is_file():
-            self.skipTest("蜂群活库不在本机")
+        if not SEED_SCRIPT.is_file():
+            self.skipTest("蜂群建库脚本不在本机")
 
     def test_1_switch_on_writes_ledger_and_backfill_audit(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True)
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db)
@@ -182,7 +187,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_2_switch_off_is_loud_and_replayable_exactly_once(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=False)
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db)
@@ -218,7 +223,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_3_idempotent_three_runs(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True)
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db)
@@ -235,7 +240,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_4_amount_is_tokens_times_price_exact(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True, token_cost=1_000_000)
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db)
@@ -255,7 +260,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_5_missing_price_is_unpriced_never_fabricated(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True, provider="NoPriceProv")
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db, with_price=False)
@@ -274,7 +279,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_6_notifier_tick_drives_backfill(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True)
             ledger_db = Path(td) / "finance_ledger.db"
             _make_ledger(ledger_db)
@@ -287,7 +292,7 @@ class W10LedgerBackfillTests(unittest.TestCase):
 
     def test_7_operator_model_fallback_is_traceable(self):
         with tempfile.TemporaryDirectory() as td:
-            swarm_db = _copy_swarm_db(td)
+            swarm_db = _seed_swarm_db(td)
             _seed_swarm(swarm_db, switch_on=True)
             con = sqlite3.connect(swarm_db)
             con.execute("UPDATE agent_tasks SET model_profile_id=NULL WHERE task_id=?",

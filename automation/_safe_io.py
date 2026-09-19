@@ -51,10 +51,13 @@ URL_CREDENTIAL_RE = re.compile(r"://[^/@\s]+@")
 LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "POOL_WORKER_ENV_EXACT",
+    "POOL_WORKER_ENV_PREFIXES",
     "atomic_write_text",
     "file_lock",
     "locked_append_text",
     "locked_atomic_write_text",
+    "pool_worker_environment",
     "quote_identifier",
     "read_text_limited",
     "read_text_limited_nofollow",
@@ -115,6 +118,56 @@ def scrub_environment(
             continue
         env[str(key)] = str(value)
     return env, sorted(dropped)
+
+
+#: 池 worker 拉起环境白名单(deny-by-default;W12,用户 2026-09-19 裁定
+#: "常驻池 worker 拉起环境收敛")。
+#:
+#: 精确键 = 进程定位/运行/临时目录所需的最小面(值不做任何默认填充:环境里
+#: 没有就不出现)。
+POOL_WORKER_ENV_EXACT = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "TMPDIR", "TEMP", "TMP", "PYTHONUNBUFFERED", "PYTHONPATH",
+    "VIRTUAL_ENV",
+})
+
+#: 前缀 = provider 配置/客户端盐(`SWARM_`)、provider 配置(`DEEPSEEK_`)、
+#: 令牌键(`AUTH`,历史口径)、公司路由 bypass(`COMPANY_ROUTER_`)、出网代理
+#: (含凭据的代理 URL 由第 1 层黑名单按值剔除)。**故意不含**
+#: `HERMES_`/`AWS_`/`GITHUB_`/`GH_`/`*_TOKEN`(除 `AUTH`)/`*_SECRET`
+#: 这类通用面。
+POOL_WORKER_ENV_PREFIXES = (
+    "SWARM_", "DEEPSEEK_", "AUTH", "COMPANY_ROUTER_",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "https_proxy", "http_proxy", "no_proxy",
+)
+
+
+def _pool_worker_env_allowed(key: str) -> bool:
+    if key in POOL_WORKER_ENV_EXACT:
+        return True
+    return any(key.startswith(prefix) for prefix in POOL_WORKER_ENV_PREFIXES)
+
+
+def pool_worker_environment(
+    base: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """池 worker 拉起环境:白名单(deny-by-default)+ 记录被剔键名。
+
+    两层顺序(W12):先 :func:`scrub_environment`(既有黑名单:密钥类键名 +
+    含凭据 URL 值),再按本白名单收窄。因此"白名单前缀内的密钥"(如
+    ``SWARM_API_SECRET`` / ``DEEPSEEK_TOKEN_X``)仍被第 1 层剔除;第 2 层
+    只做收窄,**永不回填**。
+
+    返回 ``(env, dropped)``。``dropped`` 只含键名(排序去重),绝不记值;
+    某个可选键在 ``base`` 中不存在时结果里也不出现(不注入默认值)。
+    """
+
+    scrubbed, dropped = scrub_environment(base)
+    env = {key: value for key, value in scrubbed.items()
+           if _pool_worker_env_allowed(key)}
+    dropped.extend(key for key in scrubbed if not _pool_worker_env_allowed(key))
+    return env, sorted(set(dropped))
 
 
 def read_text_limited(

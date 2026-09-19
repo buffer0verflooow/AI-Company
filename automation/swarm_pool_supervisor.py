@@ -41,9 +41,9 @@ except ImportError:  # pragma: no cover - Windows is not the deployment platform
     fcntl = None  # type: ignore[assignment]
 
 try:
-    from ._safe_io import atomic_write_text
+    from ._safe_io import atomic_write_text, pool_worker_environment
 except ImportError:  # direct execution from automation/
-    from _safe_io import atomic_write_text  # type: ignore[no-redef]
+    from _safe_io import atomic_write_text, pool_worker_environment  # type: ignore[no-redef]
 
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
 HERE = Path(__file__).resolve().parent
@@ -274,8 +274,15 @@ def build_pool_run_cmd(config: dict[str, Any], *, size: int, interval: float) ->
     ]
 
 
-def default_launch(cmd: list, *, log_path: Path, cwd: Path, env: dict) -> int:
-    """Detached 起常驻进程;stdout/stderr 落 log_path(失败上抛,绝不假装成功)。"""
+def default_launch(cmd: list, *, log_path: Path, cwd: Path,
+                   env: Optional[dict] = None) -> int:
+    """Detached 起常驻进程;stdout/stderr 落 log_path(失败上抛,绝不假装成功)。
+
+    ``env`` 缺省 = :func:`_safe_io.pool_worker_environment` 白名单结果
+    (W12 收敛:不再继承 ``os.environ``;环境里没有的键不会注入默认值)。
+    """
+    if env is None:
+        env, _ = pool_worker_environment()
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = log_path.open("a", encoding="utf-8")
@@ -386,6 +393,14 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
         result["reason"] = "pool supervisor lock busy: 另一实例正在保活"
         return result
     try:
+        # 0. 拉起环境收敛(W12):先黑名单再白名单;被剔键名可观测(只记键名)。
+        worker_env, env_dropped = pool_worker_environment()
+        result["env_dropped_count"] = len(env_dropped)
+        result["env_dropped_sample"] = env_dropped[:5]
+        _append_log(paths["supervisor_log"],
+                    f"{deps.now()} pool worker env whitelist: "
+                    f"dropped={len(env_dropped)} sample={env_dropped[:5]}")
+
         # 1. 供给池身份(幂等):全部已注册 ⇒ 跳过,不重复建身份。
         status = pool_status(config, size=size, runner=deps.runner)
         if not all(bool(w.get("registered")) for w in status.get("workers") or []):
@@ -410,6 +425,8 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
                 "conn": active.get("conn_state") if active else None,
                 "slot": active.get("slot") if active else None,
                 "size": size, "state": "alive",
+                "env_dropped_count": len(env_dropped),
+                "env_dropped_sample": env_dropped[:5],
             })
             return result
 
@@ -417,7 +434,7 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
         cmd = build_pool_run_cmd(config, size=size, interval=interval)
         try:
             pid = deps.launch(cmd, log_path=paths["run_log"],
-                              cwd=repo, env=dict(os.environ))
+                              cwd=repo, env=worker_env)
         except Exception as exc:  # noqa: BLE001 -- 拉起失败必须响亮
             reason = f"pool 拉起失败: {type(exc).__name__}: {exc}"
             _append_log(paths["supervisor_log"], f"{deps.now()} {reason}")
@@ -435,6 +452,8 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
             "ts": deps.now(), "pid": pid, "conn": None,
             "slot": None, "size": size, "state": "launched",
             "cmd": cmd,
+            "env_dropped_count": len(env_dropped),
+            "env_dropped_sample": env_dropped[:5],
         })
         result.update(launched=True, pid=pid, reason="pool worker launched")
         _append_log(paths["supervisor_log"],

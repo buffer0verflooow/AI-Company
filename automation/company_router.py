@@ -1707,6 +1707,8 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
 
     分档起点(`_V2_BUDGET_TIERS`):<2KB→12 轮、2–8KB→18 轮、8–24KB→24 轮、
     >24KB→24 轮;判据 ≥4 条 **或** 声明 `mcp` 能力 ⇒ 上一档。
+    **dev 线例外**(W16-①):多轮工序 ⇒ `max_turns = max(分档值, 40)`,下限 40
+    = `_V2_HARD_MAX_TURNS["dev"]`(W14 行为保持,不许被简报压低)。
     **下夹** `token_budget ≥ max_turns × 15000`;**上夹** `≤ swarm_v2_budget_cap`。
     轮数上夹 = 蜂群该档硬顶(`_V2_HARD_MAX_TURNS`,跨仓对拍锁定)。
 
@@ -1745,8 +1747,20 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
     if brief:
         why.append("声明 runtime_brief")
 
-    max_turns = min(_V2_BUDGET_TIERS[tier_idx][1], hard_cap)
-    if max_turns < _V2_BUDGET_TIERS[tier_idx][1]:
+    tier_turns = _V2_BUDGET_TIERS[tier_idx][1]
+    if permission == "dev":
+        # W16-①:dev 是"改文件→跑测试→看失败→再改"的多轮工序,W14 交付时固定
+        # `--max-turns 40`;W15 的分档把 dev 也按简报压低到 12/18/24(回归)。
+        # 轮数下限 = dev 档硬顶(单一来源 `_V2_HARD_MAX_TURNS["dev"]`),不得压低;
+        # token 预算仍走下夹并经 `swarm_v2_budget_cap` 上夹。
+        dev_floor = _V2_HARD_MAX_TURNS["dev"]
+        max_turns = max(tier_turns, dev_floor)
+        why.append(f"dev 是多轮工序,轮数下限 {dev_floor}(W14 行为保持)")
+    else:
+        max_turns = tier_turns
+    if max_turns > hard_cap:
+        max_turns = hard_cap
+    if max_turns < tier_turns:
         why.append(f"{permission} 档硬顶 {hard_cap} 上夹")
     token_budget = _V2_BUDGET_TIERS[tier_idx][2]
 
@@ -1831,6 +1845,82 @@ def _v2_plan_argv(plan: dict[str, Any]) -> tuple[str, str, str]:
     """(token_budget, est_tokens, max_turns) 的字符串形;三处同一来源。"""
     return (str(int(plan["token_budget"])), str(int(plan["est_tokens"])),
             str(int(plan["max_turns"])))
+
+
+# ── W16-③:日顶预检(v2 run create 之前;不留悬挂 run)────────────────────────
+#
+# 缺陷(实测 2026-09-19):`company-ops-a69154536706` = status=running、0 task,
+# 审计只有 `run_create` + `budget_cap(reason=daily_top)` —— `v2 run create` 成功、
+# `market publish` 被 NFR1 日顶拒发,留下一个永远不会被认领的幽灵 run。
+# 修法:在造 run **之前**做只读预检。读数 = **蜂群单一来源**
+# (`src.swarm_v2.budget`,不在公司侧抄一份 500000);拿不到 ⇒ 响亮降级
+# (不预检,但绝不当 0、绝不放宽真实日顶闸 —— 真实闸仍由 market publish 兜底)。
+_V2_DAILY_TOP_DEGRADED = (
+    "v2 日顶预检降级:读不到蜂群 budget 单一来源或 v2 库 ⇒ 本次不预检"
+    "(绝不把日顶当 0;真实日顶闸仍由 market publish 兜底)")
+
+
+def _v2_swarm_budget_modules(
+        config: dict[str, Any]) -> tuple[tuple[Any, Any] | None, str | None]:
+    """按 `swarm_repo` 导入蜂群单一来源 ``(budget, verdicts)``。
+
+    失败 ⇒ ``(None, reason)``(调用方响亮降级,不静默)。``sys.path`` 只在必要时
+    临时插入,导入后即还原。
+    """
+    repo = str(config.get("swarm_repo") or "").strip()
+    if not repo:
+        return None, "swarm_repo 未配置"
+    inserted = repo not in sys.path
+    if inserted:
+        sys.path.insert(0, repo)
+    try:
+        from src.swarm_v2 import budget as swarm_budget
+        from src.swarm_v2 import verdicts as swarm_verdicts
+    except Exception as exc:  # noqa: BLE001 - 降级路径须响亮但不崩
+        return None, f"{type(exc).__name__}: {exc}"
+    finally:
+        if inserted and repo in sys.path:
+            sys.path.remove(repo)
+    return (swarm_budget, swarm_verdicts), None
+
+
+def _v2_daily_top_precheck(config: dict[str, Any], *, est: int,
+                           run_id: str = "") -> None:
+    """只读预检:本日已承诺 + 本次 escrow 超 NFR1 日顶 ⇒ 造 run 之前响亮拒绝。
+
+    通过(或读数不可得而响亮降级)⇒ 返回 None;超顶 ⇒ RuntimeError。**不写库**。
+    日顶值/escrow 公式全部来自蜂群模块(单一来源),计费日 = UTC 日历日。
+    """
+    mods, why = _v2_swarm_budget_modules(config)
+    if mods is None:
+        LOGGER.warning("%s(来源不可得:%s)", _V2_DAILY_TOP_DEGRADED, why)
+        return
+    swarm_budget, swarm_verdicts = mods
+    db = str(config.get("swarm_v2_db") or "").strip()
+    if not db or not Path(db).exists():
+        LOGGER.warning("%s(v2 库不可读:%s)", _V2_DAILY_TOP_DEGRADED,
+                       db or "(未配置)")
+        return
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        con = sqlite3.connect(sqlite_uri(Path(db), mode="ro"), uri=True, timeout=1.0)
+        try:
+            consumption = swarm_budget.daily_consumption(con, day)
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        LOGGER.warning("%s(读数失败:%s: %s)", _V2_DAILY_TOP_DEGRADED,
+                       type(exc).__name__, exc)
+        return
+    escrow = int(swarm_verdicts.escrow_for(int(est)))
+    limit = int(swarm_budget.DAILY_TOP_TOKENS)
+    used = int(consumption["total"])
+    if used + escrow > limit:
+        raise RuntimeError(
+            f"NFR1 日顶预检拒发(在 v2 run create 之前;零悬挂 run):"
+            f"今日已承诺 {used} + 本次 escrow {escrow} > 日顶 {limit}"
+            f"(重置口径 = UTC 日历日 {day};run_id={run_id or '(未分配)'};"
+            f"未创建 run,无需清理)")
 
 
 def _v2_route_key(client_source: str, message: str) -> str:
@@ -2246,6 +2336,7 @@ def submit_content_v2(
         },
         ensure_ascii=False, sort_keys=True)
     by = cfg["agent"]
+    _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -2856,6 +2947,7 @@ def submit_security_v2(
         }
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
+    _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -3078,6 +3170,7 @@ def submit_research_v2(
         }
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
+    _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -3212,8 +3305,9 @@ _V2_DEV_REPO_KEY = "swarm_v2_dev_repo"
 _V2_DEV_ROUTE_ENABLED_KEY = "dev_route_enabled"
 #: dev 线 worker 启动档位(**单一来源**;内容线 write / 安全线 exec 不得混用)
 _V2_DEV_WORKER_PERMISSION = "dev"
-#: dev 档轮数硬顶(与 swarm 侧 `agent_runtime.HARD_MAX_TURNS_DEV` 同值,跨仓对拍)
-_V2_DEV_MAX_TURNS = 40
+#: dev 档轮数硬顶(W16 起 = dev 轮数下限的**单一来源**;与 swarm 侧
+#: `agent_runtime.HARD_MAX_TURNS_BY_PERMISSION["dev"]` 同值,跨仓对拍)
+_V2_DEV_MAX_TURNS = _V2_HARD_MAX_TURNS["dev"]
 
 #: dev 线闸未开时的**开闸命令原文**(公司侧闸 = router_config.dispatch_dev;
 #: 同时把 dev 并入灰度 run_types;本批不执行、不改活配置 —— 需主代理裁决)。
@@ -3395,6 +3489,7 @@ def submit_dev_v2(
     # 不是可抄的常量;执行体只需知道要跑什么命令、要写哪些文件。
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
+    _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,

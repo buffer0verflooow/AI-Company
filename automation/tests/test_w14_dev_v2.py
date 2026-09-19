@@ -121,11 +121,28 @@ def _event_row(config):
 
 
 class ShippedConfigTests(unittest.TestCase):
-    """出厂配置:dev 三键 + 默认关(安全缺省)。"""
+    """出厂配置:dev 三键 + D-50 后的安全不变式(不是"任意值都过")。"""
 
     def test_shipped_config_dev_keys_and_safe_defaults(self):
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        self.assertIs(cfg["dispatch_dev"], False)
+        # W16-②:D-50 把出厂 `dispatch_dev` 置 true 是**政策变更**(dev 线开闸),
+        # 不再是缺陷。断言改为"安全不变式":允许为 True,但开闸必须同时满足
+        #   ① 无默认仓库(`swarm_v2_dev_repo == ""`)⇒ 每次派发必须显式给仓库;
+        #   ② 分类器不自动命中 dev(`dev_route_enabled is False`);
+        #   ③ dev 身份已配且非空(否则发布必被拒)。
+        # 任一条被破坏 ⇒ 本断言红(非"改前 assertIs(False)"的放宽)。
+        self.assertIn(cfg["dispatch_dev"], (True, False),
+                      "dispatch_dev 必须是显式布尔")
+        if cfg["dispatch_dev"] is True:
+            self.assertEqual(cfg["swarm_v2_dev_repo"], "",
+                             "开闸不得留默认仓库(每次派发必须显式 --dev-repo)")
+            self.assertIs(cfg["dev_route_enabled"], False,
+                          "开闸不得让分类器自动命中 dev")
+            self.assertTrue(str(cfg["swarm_v2_dev_agent"] or "").strip(),
+                            "开闸必须配置非空 swarm_v2_dev_agent")
+            self.assertTrue(str(cfg["swarm_v2_dev_judge"] or "").strip(),
+                            "开闸必须配置非空 swarm_v2_dev_judge")
+        # 既有断言逐字保留(dev 三键 + 灰度闭集)
         self.assertIs(cfg["dev_route_enabled"], False)
         self.assertEqual(cfg["swarm_v2_dev_agent"], "dev-executor-1")
         self.assertEqual(cfg["swarm_v2_dev_judge"], "dev-verifier-1")

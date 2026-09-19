@@ -200,6 +200,32 @@ def main() -> int:
         finally:
             db.close()
 
+    # 4. C-7 公司侧 v2 治理只读读数(判定/声誉/预算/审计)。任一类取不到 ⇒
+    #    人类面显式写"不可用(<原因>)",绝不静默省略或填 0 冒充;读数失败也
+    #    不得让健康检查崩溃或改变既有断点判定(信息项,不计入 failed)。
+    governance = None
+    try:
+        try:
+            from .swarm_governance_readout import (
+                build_readout,
+                format_human,
+                persist_snapshot,
+            )
+        except ImportError:  # direct execution from automation/
+            from swarm_governance_readout import (  # type: ignore[no-redef]
+                build_readout,
+                format_human,
+                persist_snapshot,
+            )
+        governance = build_readout(config)
+        if config.get("state_db") or config.get("swarm_governance_snapshot_dir"):
+            try:
+                governance["snapshot_path"] = str(persist_snapshot(governance, config=config))
+            except OSError as exc:
+                governance["snapshot_error"] = str(exc)
+    except Exception as exc:  # noqa: BLE001 -- 治理读数不得拖垮健康检查
+        governance = {"error": f"{exc.__class__.__name__}: {exc}"}
+
     # 输出
     failed = [c for c in CHECKS if not c["ok"]]
     if "--json" in sys.argv:
@@ -207,12 +233,19 @@ def main() -> int:
             "healthy": not failed,
             "checks": CHECKS,
             "failed_count": len(failed),
+            "governance": governance,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }, ensure_ascii=False, indent=1))
     else:
         for c in CHECKS:
             mark = "✅" if c["ok"] else "❌"
             print(f"{mark} {c['check']}: {c['detail']}")
+        if isinstance(governance, dict) and "categories" in governance:
+            for line in format_human(governance):
+                print(line)
+        else:
+            reason = (governance or {}).get("error") if isinstance(governance, dict) else governance
+            print(f"治理读数: 不可用({reason or '未知原因'})")
         print(f"\n{'✅ 蜂群接入健康' if not failed else f'❌ {len(failed)} 项异常'}")
     return 1 if failed else 0
 

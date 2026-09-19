@@ -41,9 +41,11 @@ except ImportError:  # pragma: no cover - Windows is not the deployment platform
     fcntl = None  # type: ignore[assignment]
 
 try:
-    from ._safe_io import atomic_write_text, pool_worker_environment
+    from ._safe_io import (atomic_write_text, pool_worker_environment,
+                           resolve_worker_proxy)
 except ImportError:  # direct execution from automation/
-    from _safe_io import atomic_write_text, pool_worker_environment  # type: ignore[no-redef]
+    from _safe_io import (atomic_write_text, pool_worker_environment,  # type: ignore[no-redef]
+                          resolve_worker_proxy)
 
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
 HERE = Path(__file__).resolve().parent
@@ -282,7 +284,7 @@ def default_launch(cmd: list, *, log_path: Path, cwd: Path,
     (W12 收敛:不再继承 ``os.environ``;环境里没有的键不会注入默认值)。
     """
     if env is None:
-        env, _ = pool_worker_environment()
+        env, _ = pool_worker_environment(proxy_url=resolve_worker_proxy())
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = log_path.open("a", encoding="utf-8")
@@ -456,8 +458,10 @@ def supervise(config: dict[str, Any], *, size: Optional[int] = None,
         result["reason"] = "pool supervisor lock busy: 另一实例正在保活"
         return result
     try:
-        # 0. 拉起环境收敛(W12):先黑名单再白名单;被剔键名可观测(只记键名)。
-        worker_env, env_dropped = pool_worker_environment()
+        # 0. 拉起环境收敛(W12)+ 代理注入(W15-b):先黑名单 → 再按配置注入
+        #    代理 → 再白名单;被剔键名可观测(只记键名)。
+        worker_env, env_dropped = pool_worker_environment(
+            proxy_url=resolve_worker_proxy(config))
         result["env_dropped_count"] = len(env_dropped)
         result["env_dropped_sample"] = env_dropped[:5]
         _append_log(paths["supervisor_log"],

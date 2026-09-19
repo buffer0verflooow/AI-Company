@@ -50,9 +50,24 @@ SECRET_ENV_EXTRA = {
 URL_CREDENTIAL_RE = re.compile(r"://[^/@\s]+@")
 LOGGER = logging.getLogger(__name__)
 
+#: W15-b:worker 出网代理注入(配置驱动,不写死地址)。
+#: 配置键 → 环境变量回退;`router_config.json` 里配 `swarm_worker_proxy`
+#: (W15 起 = `http://127.0.0.1:7890`),也可用 `SWARM_WORKER_PROXY` 覆盖。
+WORKER_PROXY_CONFIG_KEY = "swarm_worker_proxy"
+WORKER_PROXY_ENV_KEY = "SWARM_WORKER_PROXY"
+#: 注入的三个代理键(值 = 同一个 proxy_url,绝不注入假值/占位值)。
+PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+#: 本地回环永远不走代理(模型/CLI 可能连本机服务,如 MCP/agent 通道)。
+WORKER_NO_PROXY = "127.0.0.1,localhost,::1"
+
 __all__ = [
     "POOL_WORKER_ENV_EXACT",
     "POOL_WORKER_ENV_PREFIXES",
+    "PROXY_ENV_KEYS",
+    "WORKER_NO_PROXY",
+    "WORKER_PROXY_CONFIG_KEY",
+    "WORKER_PROXY_ENV_KEY",
+    "apply_worker_proxy",
     "atomic_write_text",
     "file_lock",
     "locked_append_text",
@@ -61,6 +76,7 @@ __all__ = [
     "quote_identifier",
     "read_text_limited",
     "read_text_limited_nofollow",
+    "resolve_worker_proxy",
     "scrub_environment",
     "sqlite_connection",
     "sqlite_uri",
@@ -120,6 +136,48 @@ def scrub_environment(
     return env, sorted(dropped)
 
 
+def resolve_worker_proxy(config: Mapping[str, object] | None = None) -> str:
+    """Resolve the worker outbound proxy (config first, env fallback).
+
+    Reads ``swarm_worker_proxy`` from *config*; when that is absent/empty it
+    falls back to ``$SWARM_WORKER_PROXY``.  Unconfigured ⇒ ``""`` — the caller
+    injects nothing and reports a drop, it must **not** fabricate a proxy.
+    """
+    value = ""
+    if config is not None:
+        try:
+            value = str(config.get(WORKER_PROXY_CONFIG_KEY) or "").strip()
+        except AttributeError:  # non-mapping config object ⇒ fall through to env
+            value = ""
+    if not value:
+        value = str(os.environ.get(WORKER_PROXY_ENV_KEY) or "").strip()
+    return value
+
+
+def apply_worker_proxy(env: Mapping[str, str], proxy_url: str) -> dict[str, str]:
+    """Inject the worker proxy into *env* (three keys + ``NO_PROXY``).
+
+    Empty *proxy_url* ⇒ *env* returned unchanged (no fabricated value).  A
+    proxy URL carrying credentials (``scheme://user:pass@host``) is a
+    misconfiguration and is **refused loudly** — it is never injected, and the
+    caller fails closed instead of silently running the worker on a different
+    network path than the operator asked for.
+    """
+    proxy = str(proxy_url or "").strip()
+    if not proxy:
+        return dict(env)
+    if URL_CREDENTIAL_RE.search(proxy):
+        raise ValueError(
+            f"{WORKER_PROXY_CONFIG_KEY}/{WORKER_PROXY_ENV_KEY} 含凭据"
+            "(scheme://user:pass@host)⇒ 拒绝注入(绝不把凭据放进 worker 环境);"
+            "请改为无凭据代理地址或改用代理侧认证")
+    out = dict(env)
+    for key in PROXY_ENV_KEYS:
+        out[key] = proxy
+    out["NO_PROXY"] = WORKER_NO_PROXY
+    return out
+
+
 #: 池 worker 拉起环境白名单(deny-by-default;W12,用户 2026-09-19 裁定
 #: "常驻池 worker 拉起环境收敛")。
 #:
@@ -136,10 +194,13 @@ POOL_WORKER_ENV_EXACT = frozenset({
 #: (含凭据的代理 URL 由第 1 层黑名单按值剔除)。**故意不含**
 #: `HERMES_`/`AWS_`/`GITHUB_`/`GH_`/`*_TOKEN`(除 `AUTH`)/`*_SECRET`
 #: 这类通用面。
+#:
+#: W15-b:加入 `ALL_PROXY`(与 HTTPS_PROXY/HTTP_PROXY/NO_PROXY 同一代理面),
+#: 否则 `apply_worker_proxy` 在"先注入再取白名单"的顺序下会把 ALL_PROXY 收窄掉。
 POOL_WORKER_ENV_PREFIXES = (
     "SWARM_", "DEEPSEEK_", "AUTH", "COMPANY_ROUTER_",
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "https_proxy", "http_proxy", "no_proxy",
+    "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+    "https_proxy", "http_proxy", "all_proxy", "no_proxy",
 )
 
 
@@ -151,19 +212,25 @@ def _pool_worker_env_allowed(key: str) -> bool:
 
 def pool_worker_environment(
     base: Mapping[str, str] | None = None,
+    *,
+    proxy_url: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """池 worker 拉起环境:白名单(deny-by-default)+ 记录被剔键名。
 
-    两层顺序(W12):先 :func:`scrub_environment`(既有黑名单:密钥类键名 +
-    含凭据 URL 值),再按本白名单收窄。因此"白名单前缀内的密钥"(如
-    ``SWARM_API_SECRET`` / ``DEEPSEEK_TOKEN_X``)仍被第 1 层剔除;第 2 层
-    只做收窄,**永不回填**。
+    三层顺序(W15-b 起;W12 原为两层):先 :func:`scrub_environment`(既有
+    黑名单:密钥类键名 + 含凭据 URL 值),再按 *proxy_url* 注入代理
+    (:func:`apply_worker_proxy`;空/None ⇒ 不注入、零副作用),最后按本白名单
+    收窄。因此"白名单前缀内的密钥"(如 ``SWARM_API_SECRET`` /
+    ``DEEPSEEK_TOKEN_X``)仍被第 1 层剔除;第 2 层只注入调用方显式给出的
+    代理;**第 3 层只做收窄,永不回填**。
 
     返回 ``(env, dropped)``。``dropped`` 只含键名(排序去重),绝不记值;
     某个可选键在 ``base`` 中不存在时结果里也不出现(不注入默认值)。
     """
 
     scrubbed, dropped = scrub_environment(base)
+    if proxy_url:
+        scrubbed = apply_worker_proxy(scrubbed, proxy_url)
     env = {key: value for key, value in scrubbed.items()
            if _pool_worker_env_allowed(key)}
     dropped.extend(key for key in scrubbed if not _pool_worker_env_allowed(key))

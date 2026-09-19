@@ -31,21 +31,25 @@ from typing import Any
 
 try:
     from ._safe_io import (
+        apply_worker_proxy,
         file_lock,
         locked_atomic_write_text,
         quote_identifier,
         read_text_limited,
         read_text_limited_nofollow,
+        resolve_worker_proxy,
         scrub_environment,
         sqlite_uri,
     )
 except ImportError:  # direct ``python automation/company_router.py`` invocation
     from _safe_io import (
+        apply_worker_proxy,
         file_lock,
         locked_atomic_write_text,
         quote_identifier,
         read_text_limited,
         read_text_limited_nofollow,
+        resolve_worker_proxy,
         scrub_environment,
         sqlite_uri,
     )
@@ -969,6 +973,7 @@ def _llm_fallback_classify(message: str, config: dict[str, Any], *, timeout: int
         f"用户消息：{message}"
     )
     env, _dropped = scrub_environment()
+    env = apply_worker_proxy(env, resolve_worker_proxy(config))
     env["COMPANY_ROUTER_BYPASS"] = "1"
     env["HERMES_SESSION_SOURCE"] = "tool"
     cmd = [
@@ -1496,6 +1501,40 @@ _V2_RUN_INTENTS = frozenset({
     "recon", "exploit", "analyze", "defend", "report", "research", "custom",
 })
 
+# ── W15-b②:预算/轮数按任务复杂度(纯函数 + 三处同源)────────────────────────
+#
+# 动机(实测,2026-09-19):6.4KB 任务书连跑三单 —— 单 3 = 5 轮吃 104,526 token,
+# 单 1 = 6 轮 67,731 ⇒ ~11.3k–20.9k token/轮;而改前的 `--max-turns 12` ∧
+# `--token-budget 100000` 在 12 轮里必然撞墙(`stop_reason=budget_exceeded`)。
+#
+# 三处同源 = 公司侧发布(`v2 run create --token-budget`)、挂单(`market publish
+# --est`)与拉起 worker(`--max-turns`/`--max-tokens-budget`),全部读同一个
+# `v2_task_plan(...)` 结果;计划随 `focus_params.budget_plan` 落库,拉起侧优先
+# 复用(进程内登记 → 库内 focus_params),取不到才回退到**改前固定口径**
+# (空消息会把任务误判成最小档 ⇒ 不猜,宁可保守)。
+#: run_type → 蜂群权限档位(content=write;安全/research=exec;dev=dev)。
+_V2_PERMISSION_BY_RUN_TYPE = {
+    "content": "write", "vuln": "exec", "ops": "exec", "dev": "dev",
+}
+#: 轮数上夹 = 蜂群该档硬顶(**跨仓对拍锁测试**:test_w15_budget_plan.py 对拍
+#: `src.swarm_v2.agent_runtime.HARD_MAX_TURNS_BY_PERMISSION`,改一处必红)。
+_V2_HARD_MAX_TURNS = {"read-only": 12, "write": 12, "exec": 24, "dev": 40}
+#: 分档起点(复杂度 → (max_turns, 名义 token))。任务书字符数按 UTF-8 字节
+#: 语义的 `len(message)`(公司消息本来就是 str,按字符数计)。
+_V2_BUDGET_TIERS = (
+    (2048, 12, 100000),      # <2KB
+    (8192, 18, 180000),      # 2–8KB
+    (24576, 24, 280000),     # 8–24KB
+    (None, 24, 360000),      # >24KB(24 = exec 档硬顶)
+)
+#: 每轮 token 下限(下夹依据;实测 11.3k/20.9k 每轮 ⇒ 取 15k)。
+_V2_BUDGET_MIN_PER_TURN = 15000
+#: 预算上夹缺省(config `swarm_v2_budget_cap` 可覆盖)。
+_V2_BUDGET_CAP_DEFAULT = 400000
+#: 发布计划进程内登记(run_id → plan);拉起侧优先复用,避免"发布/拉起不同值"。
+_V2_BUDGET_PLANS: dict[str, dict[str, Any]] = {}
+_V2_BUDGET_PLANS_MAX = 512
+
 #: 安全线 / research 线灰度身份(**新增可配键**;D-28)。活库当前**没有** vuln 线
 #: 身份(content-writer-1/dev-executor-1 等 4 个身份均非 vuln),故缺省留空 ⇒
 #: 灰度前置不满足 ⇒ 不命中,回落 fail-closed。**不写死身份名。**
@@ -1607,6 +1646,191 @@ def v2_gray_config(config: dict[str, Any]) -> dict[str, Any]:
         "agent": _text("swarm_v2_agent"),
         "judge": _text("swarm_v2_judge"),
     }
+
+
+def _v2_budget_mode(config: dict[str, Any]) -> str:
+    """`swarm_v2_budget_mode`(缺省 `auto`;未知值 ⇒ 响亮拒绝,不静默当 auto)。"""
+    raw = str(config.get("swarm_v2_budget_mode") or "auto").strip().lower()
+    if raw not in {"auto", "fixed"}:
+        raise ValueError(
+            f"swarm_v2_budget_mode ∈ auto|fixed;实得 {raw!r}"
+            "(未知模式不猜:auto=按复杂度分档,fixed=改前固定口径)")
+    return raw
+
+
+def _v2_budget_cap(config: dict[str, Any]) -> int:
+    cap = _v2_gray_int(config.get("swarm_v2_budget_cap"), _V2_BUDGET_CAP_DEFAULT)
+    if cap <= 0:
+        raise ValueError(
+            f"swarm_v2_budget_cap 须为正整数;实得 {cap!r}(上夹不能是负/零)")
+    return cap
+
+
+def _v2_fixed_budget_plan(config: dict[str, Any], *, run_type: str) -> dict[str, Any]:
+    """改前固定口径(回归锁):轮数 12(dev 40)+ 灰度块的 token_budget/est_tokens。
+
+    显式 `config['max_turns']`/`config['token_budget']` 可覆盖(仍受该档硬顶
+    上夹);**不做** auto 的上下夹,以保证与 W15 之前逐字一致。
+    """
+    cfg = v2_gray_config(config)
+    permission = _V2_PERMISSION_BY_RUN_TYPE.get(run_type)
+    if permission is None:
+        raise ValueError(f"未知 run_type: {run_type!r}(闭集 "
+                         f"{sorted(_V2_PERMISSION_BY_RUN_TYPE)})")
+    preset_turns = _V2_DEV_MAX_TURNS if permission == "dev" else 12
+    max_turns = _v2_gray_int(config.get("max_turns"), preset_turns)
+    hard_cap = _V2_HARD_MAX_TURNS[permission]
+    why = [f"fixed 模式(改前口径):max_turns={max_turns}"]
+    if max_turns < 1:
+        max_turns = 1
+        why.append("max_turns 下限 1")
+    if max_turns > hard_cap:
+        why.append(f"显式 max_turns 超 {permission} 档硬顶 {hard_cap} ⇒ 压到硬顶")
+        max_turns = hard_cap
+    token_budget = _v2_gray_int(config.get("token_budget"), cfg["token_budget"])
+    if token_budget <= 0:
+        raise ValueError(f"token_budget 须为正整数;实得 {token_budget!r}")
+    return {
+        "max_turns": max_turns,
+        "token_budget": token_budget,
+        "est_tokens": cfg["est_tokens"],
+        "why": "; ".join(why),
+    }
+
+
+def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None,
+                 run_type: str) -> dict[str, Any]:
+    """按任务复杂度给出 (max_turns, token_budget, est_tokens, why)(纯函数)。
+
+    复杂度信号(全部来自已有输入,不猜):任务书字符数、`exec_criteria` 条数、
+    `required_capabilities` 是否声明、`runtime_brief` 是否声明。
+
+    分档起点(`_V2_BUDGET_TIERS`):<2KB→12 轮、2–8KB→18 轮、8–24KB→24 轮、
+    >24KB→24 轮;判据 ≥4 条 **或** 声明 `mcp` 能力 ⇒ 上一档。
+    **下夹** `token_budget ≥ max_turns × 15000`;**上夹** `≤ swarm_v2_budget_cap`。
+    轮数上夹 = 蜂群该档硬顶(`_V2_HARD_MAX_TURNS`,跨仓对拍锁定)。
+
+    `swarm_v2_budget_mode="fixed"` ⇒ 走 :func:`_v2_fixed_budget_plan`(与改前
+    逐字一致);任何未配置/非法输入都必须响亮失败,不静默降级。
+    """
+    mode = _v2_budget_mode(config)
+    if mode == "fixed":
+        return _v2_fixed_budget_plan(config, run_type=run_type)
+    cfg = v2_gray_config(config)
+    permission = _V2_PERMISSION_BY_RUN_TYPE.get(run_type)
+    if permission is None:
+        raise ValueError(f"未知 run_type: {run_type!r}(闭集 "
+                         f"{sorted(_V2_PERMISSION_BY_RUN_TYPE)})")
+    cap = _v2_budget_cap(config)
+    hard_cap = _V2_HARD_MAX_TURNS[permission]
+
+    size = len(message or "")
+    tier_idx = len(_V2_BUDGET_TIERS) - 1
+    for idx, (bound, _turns, _budget) in enumerate(_V2_BUDGET_TIERS):
+        if bound is not None and size < bound:
+            tier_idx = idx
+            break
+    why = [f"任务书 {size} 字节 → 档 {tier_idx}({_V2_BUDGET_TIERS[tier_idx][1]} 轮起点)"]
+
+    criteria = security_exec_criteria(message, task_book)
+    capabilities = security_required_capabilities(message, task_book)
+    brief = bool(task_book.get("runtime_brief")) if isinstance(task_book, dict) else False
+    if not brief:
+        brief = bool(security_declared_task_book(message).get("runtime_brief"))
+    escalate = (bool(criteria) and len(criteria) >= 4) \
+        or ("mcp" in set(capabilities or ()))
+    if escalate and tier_idx < len(_V2_BUDGET_TIERS) - 1:
+        tier_idx += 1
+        why.append("判据≥4 条或声明 mcp 能力 ⇒ 上一档")
+    if brief:
+        why.append("声明 runtime_brief")
+
+    max_turns = min(_V2_BUDGET_TIERS[tier_idx][1], hard_cap)
+    if max_turns < _V2_BUDGET_TIERS[tier_idx][1]:
+        why.append(f"{permission} 档硬顶 {hard_cap} 上夹")
+    token_budget = _V2_BUDGET_TIERS[tier_idx][2]
+
+    floor = max_turns * _V2_BUDGET_MIN_PER_TURN
+    if token_budget < floor:
+        why.append(f"下夹 {max_turns}×{_V2_BUDGET_MIN_PER_TURN}={floor}")
+        token_budget = floor
+    if token_budget > cap:
+        why.append(f"上夹 swarm_v2_budget_cap={cap}")
+        token_budget = cap
+    # `est_tokens` = 市场 escrow 驱动项(`market publish --est` ⇒ escrow=ceil(est×1.3),
+    # F1.1/L5#15),保持**配置口径**(缺省 100000)而不是复杂度放大的 token_budget:
+    # 实测 2026-09-19 当日已承诺 187,488,若按 360k 预算发 escrow=468k 会撞
+    # 蜂群硬编码 NFR1 日顶(500k)被拒发。复杂度放大的只是 worker/run 的**硬顶**;
+    # escrow 估计值不动,任务才发得出去(fixed 模式本就同源同一配置值)。
+    est_tokens = cfg["est_tokens"]
+    why.append(f"est=配置口径 {est_tokens}(escrow=ceil(est×1.3),不随复杂度放大)")
+    return {
+        "max_turns": int(max_turns),
+        "token_budget": int(token_budget),
+        "est_tokens": int(est_tokens),
+        "why": "; ".join(why),
+    }
+
+
+def _v2_register_budget_plan(run_id: str, plan: dict[str, Any]) -> None:
+    """登记发布计划(进程内);超上限丢最旧,避免长驻进程无界增长。"""
+    if len(_V2_BUDGET_PLANS) >= _V2_BUDGET_PLANS_MAX:
+        for stale in list(_V2_BUDGET_PLANS)[:len(_V2_BUDGET_PLANS)
+                                          - _V2_BUDGET_PLANS_MAX + 1]:
+            _V2_BUDGET_PLANS.pop(stale, None)
+    _V2_BUDGET_PLANS[run_id] = dict(plan)
+
+
+def _v2_plan_from_focus_params(config: dict[str, Any],
+                               run_id: str) -> dict[str, Any] | None:
+    """从库内 `agent_tasks.focus_params.budget_plan` 复用计划(取不到 ⇒ None)。
+
+    只读、失败即 None(不猜、不改库);拉起侧因此可跨进程拿到发布侧写下的计划。
+    """
+    db = str(config.get("swarm_v2_db") or "").strip()
+    if not db or not Path(db).exists():
+        return None
+    try:
+        con = sqlite3.connect(sqlite_uri(Path(db), mode="ro"), uri=True, timeout=1.0)
+        try:
+            row = con.execute(
+                "SELECT focus_params FROM agent_tasks WHERE task_id=?", (run_id,)
+            ).fetchone()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        focus = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    plan = focus.get("budget_plan") if isinstance(focus, dict) else None
+    if not isinstance(plan, dict):
+        return None
+    if not {"max_turns", "token_budget", "est_tokens"} <= set(plan):
+        return None
+    return {k: plan[k] for k in ("max_turns", "token_budget", "est_tokens", "why")
+            if k in plan}
+
+
+def v2_worker_plan(config: dict[str, Any], run_id: str, *, run_type: str) -> dict[str, Any]:
+    """拉起侧解析计划:进程内登记 > 库内 focus_params > 改前固定口径(保守回退)。"""
+    plan = _V2_BUDGET_PLANS.get(run_id)
+    if plan:
+        return dict(plan)
+    plan = _v2_plan_from_focus_params(config, run_id)
+    if plan:
+        _v2_register_budget_plan(run_id, plan)
+        return dict(plan)
+    return _v2_fixed_budget_plan(config, run_type=run_type)
+
+
+def _v2_plan_argv(plan: dict[str, Any]) -> tuple[str, str, str]:
+    """(token_budget, est_tokens, max_turns) 的字符串形;三处同一来源。"""
+    return (str(int(plan["token_budget"])), str(int(plan["est_tokens"])),
+            str(int(plan["max_turns"])))
 
 
 def _v2_route_key(client_source: str, message: str) -> str:
@@ -1865,6 +2089,7 @@ def launch_content_job(
 
     log_path = job_dir / "executor.log"
     executor_env, _dropped = scrub_environment()
+    executor_env = apply_worker_proxy(executor_env, resolve_worker_proxy(config))
     executor_env["COMPANY_ROUTER_BYPASS"] = "1"
     executor_env["HERMES_SESSION_SOURCE"] = "tool"
     executor_env["HERMES_WRITE_SAFE_ROOT"] = str(job_dir.resolve())
@@ -1999,6 +2224,8 @@ def submit_content_v2(
     intent = _v2_content_intent(decision)
     target = str(getattr(decision, "target", "") or "company-internal")
     route = str(getattr(decision, "route", "") or "")
+    plan = v2_task_plan(config, message=message, task_book=None, run_type=run_type)
+    _v2_register_budget_plan(run_id, plan)
     job_dir = content_job_path(config, run_id)
     focus = json.dumps(
         {
@@ -2008,6 +2235,8 @@ def submit_content_v2(
             "company_session_id": session_id,
             "company_platform": platform,
             "client_source": cfg["client_source"],
+            # W15-b②:发布侧算出的预算/轮数计划,拉起侧原样复用(单一来源)。
+            "budget_plan": plan,
             # 内建运行时的任务书(D-22):规范正文随任务下发 —— path jail 根 =
             # 产物目录,运行时读不到公司仓库里的规范文件。
             "runtime_brief": build_runtime_brief(decision, message, job_dir),
@@ -2024,7 +2253,7 @@ def submit_content_v2(
         "--intent", intent,
         "--target-type", "unknown",
         "--target", target,
-        "--token-budget", str(cfg["token_budget"]),
+        "--token-budget", _v2_plan_argv(plan)[0],
         "--by", by,
     )
     publication = v2_swarm_command(
@@ -2033,7 +2262,7 @@ def submit_content_v2(
         "--run-type", run_type,
         "--task-type", task_type,
         "--publisher", "client",
-        "--est", str(cfg["est_tokens"]),
+        "--est", _v2_plan_argv(plan)[1],
         "--base", str(cfg["base_priority"]),
         "--by", by,
         "--client-source", cfg["client_source"],
@@ -2056,7 +2285,8 @@ def submit_content_v2(
     }
 
 
-def build_v2_content_worker_cmd(config: dict[str, Any], run_id: str) -> list:
+def build_v2_content_worker_cmd(config: dict[str, Any], run_id: str,
+                                *, plan: dict[str, Any] | None = None) -> list:
     """Build the v2 content worker command (pure; testable).
 
     执行面自给(D-22/F14):worker 用蜂群**内建 agent_runtime**(write 档)执行任务,
@@ -2065,9 +2295,15 @@ def build_v2_content_worker_cmd(config: dict[str, Any], run_id: str) -> list:
     ``--repo-root`` = 本 run 的产物目录 ⇒ 产物落 ``content-jobs/<run_id>/``,且
     path jail 限定在该目录内(内建运行时默认根 = 蜂群仓库,不可用于公司任务)。
     身份取自 ``swarm_v2_agent``/``swarm_v2_judge``;``--max-tasks 1`` = 一次派发一个任务。
+
+    W15-b②:*plan* 缺省 = 改前固定口径(直接调用/无发布计划时逐字不变);
+    拉起侧 :func:`launch_v2_content_worker` 传入发布侧计划 ⇒ 三处同一来源。
     """
     cfg = v2_gray_config(config)
     job_dir = content_job_path(config, run_id)
+    plan = plan if plan is not None else _v2_fixed_budget_plan(
+        config, run_type="content")
+    token_budget, _est, max_turns = _v2_plan_argv(plan)
     return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -2078,9 +2314,9 @@ def build_v2_content_worker_cmd(config: dict[str, Any], run_id: str) -> list:
         "--agent-runtime",
         "--permission", "write",
         "--repo-root", str(job_dir),
-        # 轮数取硬顶:内容产出多文件(初稿/去AI味/QA),默认 8 轮实测写不完
-        "--max-turns", "12",
-        "--max-tokens-budget", str(cfg["token_budget"]),
+        # 轮数/预算 = 发布计划(内容产出多文件;默认 8 轮实测写不完)
+        "--max-turns", max_turns,
+        "--max-tokens-budget", token_budget,
         "--poll-interval", str(cfg["poll_interval"]),
         "--max-tasks", "1",
     ]
@@ -2096,8 +2332,10 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-content-{value}.log"
-    cmd = build_v2_content_worker_cmd(config, run_id)
+    plan = v2_worker_plan(config, run_id, run_type="content")
+    cmd = build_v2_content_worker_cmd(config, run_id, plan=plan)
     worker_env, _dropped = scrub_environment()
+    worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
     log_fh = log_path.open("a", encoding="utf-8")
@@ -2565,6 +2803,11 @@ def submit_security_v2(
             f"required_capabilities {_gap} 需要 {_needed} 档,但安全线 worker "
             f"启动档位 = {_V2_SECURITY_WORKER_PERMISSION};发布前拒绝(把启动档位"
             f"对齐到 {_needed})")
+    # W15-b②:发布侧算一次计划,随 focus_params.budget_plan 下发并登记,
+    # 拉起侧原样复用 ⇒ run create / market publish / worker 三处同一值。
+    plan = v2_task_plan(config, message=message, task_book=task_book,
+                        run_type=run_type)
+    _v2_register_budget_plan(run_id, plan)
     declared_brief = None
     if isinstance(task_book, dict) and task_book.get("runtime_brief"):
         declared_brief = str(task_book["runtime_brief"])
@@ -2611,6 +2854,7 @@ def submit_security_v2(
                 "⇒ 不执行、回落 M1.5 绑定记录"
             ),
         }
+    focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     v2_swarm_command(
         config, "v2", "run", "create",
@@ -2619,7 +2863,7 @@ def submit_security_v2(
         "--intent", intent,
         "--target-type", "unknown",
         "--target", target,
-        "--token-budget", str(cfg["token_budget"]),
+        "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
     )
     publication = v2_swarm_command(
@@ -2628,7 +2872,7 @@ def submit_security_v2(
         "--run-type", run_type,
         "--task-type", task_type,
         "--publisher", "client",
-        "--est", str(cfg["est_tokens"]),
+        "--est", _v2_plan_argv(plan)[1],
         "--base", str(cfg["base_priority"]),
         "--by", agent,
         "--client-source", cfg["client_source"],
@@ -2647,7 +2891,8 @@ def submit_security_v2(
     }
 
 
-def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
+def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str,
+                                 *, plan: dict[str, Any] | None = None) -> list:
     """Build the v2 security/research worker command (pure; testable).
 
     Mirrors ``build_v2_content_worker_cmd``: 蜂群**内建 agent_runtime**,
@@ -2658,10 +2903,16 @@ def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
     W7-b:启动档位 = `_V2_SECURITY_WORKER_PERMISSION`(**exec**)—— 安全线任务书
     声明的命令面/MCP 面能力(`required_capabilities`)只有在 exec 档才被覆盖;
     内容线 `build_v2_content_worker_cmd` 仍是 write,两线不得混用。
+
+    W15-b②:*plan* 缺省 = 改前固定口径(12 轮/灰度 token_budget);拉起侧传入
+    发布计划 ⇒ run create / publish / worker 三处同一来源。
     """
     cfg = v2_gray_config(config)
     agent, judge = _v2_security_identities(config)
     job_dir = security_job_path(config, run_id)
+    plan = plan if plan is not None else _v2_fixed_budget_plan(
+        config, run_type=_V2_RUN_TYPE_BY_ROUTE["security"])
+    token_budget, _est, max_turns = _v2_plan_argv(plan)
     return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -2672,8 +2923,8 @@ def build_v2_security_worker_cmd(config: dict[str, Any], run_id: str) -> list:
         "--agent-runtime",
         "--permission", _V2_SECURITY_WORKER_PERMISSION,
         "--repo-root", str(job_dir),
-        "--max-turns", "12",
-        "--max-tokens-budget", str(cfg["token_budget"]),
+        "--max-turns", max_turns,
+        "--max-tokens-budget", token_budget,
         "--poll-interval", str(cfg["poll_interval"]),
         "--max-tasks", "1",
     ]
@@ -2695,8 +2946,10 @@ def launch_v2_security_worker(config: dict[str, Any], run_id: str) -> int:
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-security-{value}.log"
-    cmd = build_v2_security_worker_cmd(config, run_id)
+    plan = v2_worker_plan(config, run_id, run_type="vuln")
+    cmd = build_v2_security_worker_cmd(config, run_id, plan=plan)
     worker_env, _dropped = scrub_environment()
+    worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
     log_fh = log_path.open("a", encoding="utf-8")
@@ -2779,6 +3032,10 @@ def submit_research_v2(
             f"required_capabilities {_gap} 需要 {_needed} 档,但 research 线 worker "
             f"启动档位 = {_V2_RESEARCH_WORKER_PERMISSION};发布前拒绝(把启动档位"
             f"对齐到 {_needed})")
+    # W15-b②:research 线同样"发布侧算一次计划、拉起侧复用"(与安全线同源函数)。
+    plan = v2_task_plan(config, message=message, task_book=task_book,
+                        run_type=run_type)
+    _v2_register_budget_plan(run_id, plan)
     declared_brief = None
     if isinstance(task_book, dict) and task_book.get("runtime_brief"):
         declared_brief = str(task_book["runtime_brief"])
@@ -2819,6 +3076,7 @@ def submit_research_v2(
                 "⇒ 不执行、回落 M1.5 绑定记录"
             ),
         }
+    focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     v2_swarm_command(
         config, "v2", "run", "create",
@@ -2827,7 +3085,7 @@ def submit_research_v2(
         "--intent", intent,
         "--target-type", "unknown",
         "--target", target,
-        "--token-budget", str(cfg["token_budget"]),
+        "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
     )
     publication = v2_swarm_command(
@@ -2836,7 +3094,7 @@ def submit_research_v2(
         "--run-type", run_type,
         "--task-type", task_type,
         "--publisher", "client",
-        "--est", str(cfg["est_tokens"]),
+        "--est", _v2_plan_argv(plan)[1],
         "--base", str(cfg["base_priority"]),
         "--by", agent,
         "--client-source", cfg["client_source"],
@@ -2855,17 +3113,24 @@ def submit_research_v2(
     }
 
 
-def build_v2_research_worker_cmd(config: dict[str, Any], run_id: str) -> list:
+def build_v2_research_worker_cmd(config: dict[str, Any], run_id: str,
+                                 *, plan: dict[str, Any] | None = None) -> list:
     """Build the v2 research worker command (pure; testable).
 
     与 :func:`build_v2_security_worker_cmd` 同构:蜂群内建 ``agent_runtime``,
     身份取 research 线专用配置键,``--repo-root`` = research 产物目录,
     启动档位 = ``_V2_RESEARCH_WORKER_PERMISSION``。内容线/安全线不共用本函数,
     三条线 argv 互不串档(锁测试锁定)。
+
+    W15-b②:*plan* 缺省 = 改前固定口径(12 轮/灰度 token_budget);拉起侧传入
+    发布计划 ⇒ 三处同一来源。
     """
     cfg = v2_gray_config(config)
     agent, judge = _v2_research_identities(config)
     job_dir = research_job_path(config, run_id)
+    plan = plan if plan is not None else _v2_fixed_budget_plan(
+        config, run_type=_V2_RUN_TYPE_BY_ROUTE["research"])
+    token_budget, _est, max_turns = _v2_plan_argv(plan)
     return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -2876,8 +3141,8 @@ def build_v2_research_worker_cmd(config: dict[str, Any], run_id: str) -> list:
         "--agent-runtime",
         "--permission", _V2_RESEARCH_WORKER_PERMISSION,
         "--repo-root", str(job_dir),
-        "--max-turns", "12",
-        "--max-tokens-budget", str(cfg["token_budget"]),
+        "--max-turns", max_turns,
+        "--max-tokens-budget", token_budget,
         "--poll-interval", str(cfg["poll_interval"]),
         "--max-tasks", "1",
     ]
@@ -2898,8 +3163,10 @@ def launch_v2_research_worker(config: dict[str, Any], run_id: str) -> int:
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-research-{value}.log"
-    cmd = build_v2_research_worker_cmd(config, run_id)
+    plan = v2_worker_plan(config, run_id, run_type="ops")
+    cmd = build_v2_research_worker_cmd(config, run_id, plan=plan)
     worker_env, _dropped = scrub_environment()
+    worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
     log_fh = log_path.open("a", encoding="utf-8")
@@ -3109,6 +3376,9 @@ def submit_dev_v2(
     intent = "custom"
     run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
     target = str(getattr(decision, "target", "") or "company-internal")
+    # W15-b②:dev 线同样走同一计划函数(轮数上夹 = dev 档硬顶 40)。
+    plan = v2_task_plan(config, message=message, task_book=None, run_type=run_type)
+    _v2_register_budget_plan(run_id, plan)
     focus_body: dict[str, Any] = {
         "company_route": route,
         "task_intent": intent,
@@ -3123,6 +3393,7 @@ def submit_dev_v2(
         focus_body["files"] = declared_files
     # 注意:**不写** exec_criteria —— dev 判据的真值 = 沙箱复跑 exit code,
     # 不是可抄的常量;执行体只需知道要跑什么命令、要写哪些文件。
+    focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     v2_swarm_command(
         config, "v2", "run", "create",
@@ -3131,7 +3402,7 @@ def submit_dev_v2(
         "--intent", intent,
         "--target-type", "unknown",
         "--target", target,
-        "--token-budget", str(cfg["token_budget"]),
+        "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
     )
     publication = v2_swarm_command(
@@ -3140,7 +3411,7 @@ def submit_dev_v2(
         "--run-type", run_type,
         "--task-type", task_type,
         "--publisher", "client",
-        "--est", str(cfg["est_tokens"]),
+        "--est", _v2_plan_argv(plan)[1],
         "--base", str(cfg["base_priority"]),
         "--by", agent,
         "--required-role", "dev-executor",
@@ -3161,15 +3432,20 @@ def submit_dev_v2(
 
 
 def build_v2_dev_worker_cmd(config: dict[str, Any], run_id: str, *,
-                            dev_repo: str) -> list:
+                            dev_repo: str,
+                            plan: dict[str, Any] | None = None) -> list:
     """Build the v2 dev worker command (pure; testable).
 
     蜂群内建 `agent_runtime`,`--permission dev`,`--repo-root` = **指定的被测仓库**
-    (不是猜的产物目录;不存在/非目录在调用方已拒),`--max-turns 40` = dev 档硬顶。
+    (不是猜的产物目录;不存在/非目录在调用方已拒)。轮数/预算 W15-b② 起取发布
+    计划;*plan* 缺省 = 改前固定口径(40 轮 / dev 档硬顶 + 灰度 token_budget)。
     """
     cfg = v2_gray_config(config)
     agent, judge = _v2_dev_identities(config)
     repo = str(Path(str(dev_repo)).expanduser().resolve())
+    plan = plan if plan is not None else _v2_fixed_budget_plan(
+        config, run_type=_V2_RUN_TYPE_BY_ROUTE["dev"])
+    token_budget, _est, max_turns = _v2_plan_argv(plan)
     return [
         sys.executable,
         str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
@@ -3180,8 +3456,8 @@ def build_v2_dev_worker_cmd(config: dict[str, Any], run_id: str, *,
         "--agent-runtime",
         "--permission", _V2_DEV_WORKER_PERMISSION,
         "--repo-root", repo,
-        "--max-turns", str(_V2_DEV_MAX_TURNS),
-        "--max-tokens-budget", str(cfg["token_budget"]),
+        "--max-turns", max_turns,
+        "--max-tokens-budget", token_budget,
         "--poll-interval", str(cfg["poll_interval"]),
         "--max-tasks", "1",
     ]
@@ -3211,8 +3487,10 @@ def launch_v2_dev_worker(config: dict[str, Any], run_id: str, *,
     log_dir = Path(config["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"swarm-v2-dev-{value}.log"
-    cmd = build_v2_dev_worker_cmd(config, run_id, dev_repo=str(repo_path))
+    plan = v2_worker_plan(config, run_id, run_type="dev")
+    cmd = build_v2_dev_worker_cmd(config, run_id, dev_repo=str(repo_path), plan=plan)
     worker_env, _dropped = scrub_environment()
+    worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
     log_fh = log_path.open("a", encoding="utf-8")

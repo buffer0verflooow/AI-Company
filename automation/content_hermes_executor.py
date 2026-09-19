@@ -17,19 +17,23 @@ from typing import Any
 
 try:
     from ._safe_io import (
+        apply_worker_proxy,
         locked_append_text,
         locked_atomic_write_text,
         read_text_limited,
         read_text_limited_nofollow,
+        resolve_worker_proxy,
         scrub_environment,
         sqlite_connection,
     )
 except ImportError:  # direct script execution
     from _safe_io import (
+        apply_worker_proxy,
         locked_append_text,
         locked_atomic_write_text,
         read_text_limited,
         read_text_limited_nofollow,
+        resolve_worker_proxy,
         scrub_environment,
         sqlite_connection,
     )
@@ -289,6 +293,22 @@ Pixelle-Video 运行时：{runtime}
     return prompt, expected
 
 
+def _resolve_router_worker_proxy() -> str:
+    """Worker proxy from router_config.json, falling back to the env var.
+
+    The legacy content executor is invoked both by the router (same config) and
+    directly by cron; reading the shipped config keeps the proxy single-sourced
+    instead of hard-coding an address.  An unreadable/malformed config degrades
+    to the env-var fallback (``resolve_worker_proxy`` semantics), never to a
+    fabricated proxy.
+    """
+    try:
+        config = json.loads(read_text_limited(DEFAULT_ROUTER_CONFIG, max_bytes=1024 * 1024))
+    except Exception:  # noqa: BLE001 -- missing config -> env fallback
+        config = None
+    return resolve_worker_proxy(config if isinstance(config, dict) else None)
+
+
 def build_worker_invocation(
     request: dict[str, Any],
     job_dir: Path,
@@ -327,6 +347,7 @@ def build_worker_invocation(
         command.extend(["--skills", "humanizer"])
 
     env, _dropped = scrub_environment()
+    env = apply_worker_proxy(env, _resolve_router_worker_proxy())
     # The router hook is global and runs inside this process too.  These two
     # markers make the ownership boundary explicit even on older Hermes builds
     # that do not persist a session source in the hook envelope.

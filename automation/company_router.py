@@ -543,6 +543,32 @@ def _is_company_execution_request(text: str) -> bool:
     return bool(COMPANY_DIRECTIVE_RE.search(text) or COMPANY_OBJECT_FIRST_RE.search(text))
 
 
+# ── W14-b:dev 路由词表(保守;**仅当 `dev_route_enabled=true` 才生效**)──────
+# 默认关 ⇒ `classify_message` 走原路径,既有分类结果逐字不变(锁测试)。
+# 判定口径 = "开发动作词" ∧ "代码/测试上下文词"(两者齐备才判 dev),避免把
+# "实现公司战略"这类经营动作误判进代码线。
+_DEV_ACTION_TERMS = {
+    "实现", "写代码", "编写代码", "改代码", "修改代码", "重构", "修 bug", "修bug",
+    "修复bug", "修复 bug", "加测试", "添加测试", "补测试", "写测试", "编写测试",
+    "让测试通过", "使测试通过", "跑测试", "运行测试", "单元测试", "implement",
+    "refactor", "fix bug", "add test", "write test", "make test pass",
+}
+_DEV_CONTEXT_TERMS = {
+    "代码", "测试", "函数", "模块", "脚本", "程序", "仓库", "repo", "pytest",
+    "单元测试", "接口", "类", "bug", "编译", "构建", "build", "test",
+}
+
+
+def _is_dev_request(text: str) -> bool:
+    """保守 dev 意图判定(仅 `enable_dev=True` 时被调用)。
+
+    要求"开发动作词 ∧ 代码/测试上下文词"同时命中;单一动作词(如仅"实现")不足以
+    进 dev 线。`dev_route_enabled=false`(出厂缺省)时本函数根本不会被咨询。
+    """
+    return (_contains_any(text, _DEV_ACTION_TERMS)
+            and _contains_any(text, _DEV_CONTEXT_TERMS))
+
+
 def _main_agent_decision(
     reason: str,
     *,
@@ -728,7 +754,8 @@ def _is_internal_target(target_type: str, target: str) -> bool:
     return False
 
 
-def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> RouteDecision:
+def classify_message(message: str, authorized_targets: Iterable[str] = (),
+                     *, enable_dev: bool = False) -> RouteDecision:
     text = " ".join((message or "").split())
     # A hand-edited scalar allowlist must not iterate into characters or raise
     # TypeError out of classification.
@@ -748,13 +775,17 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     lowered = text.lower()
 
     explicit = ""
-    for prefix, route in (
+    explicit_prefixes = [
         ("/research", "research"), ("/security", "security"),
         ("研究：", "research"), ("安全：", "security"),
         ("/article", "article"), ("文章：", "article"),
         ("/video", "video"), ("视频：", "video"),
         ("/company", "company"), ("公司：", "company"),
-    ):
+    ]
+    if enable_dev:
+        # dev 显式前缀只在开关打开时可识别(默认关 ⇒ 参数面/行为逐字不变)
+        explicit_prefixes += [("/dev", "dev"), ("开发：", "dev")]
+    for prefix, route in explicit_prefixes:
         if lowered.startswith(prefix.lower()):
             explicit = route
             break
@@ -808,6 +839,10 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
     elif _is_research_request(text):
         route = "research"
         confidence = 0.84
+    elif enable_dev and _is_dev_request(text):
+        # W14-b:dev 线分类路由(**仅当 dev_route_enabled=true 才被咨询**)。
+        route = "dev"
+        confidence = 0.84
     elif _is_company_execution_request(text):
         route = "company"
         confidence = 0.84
@@ -823,6 +858,7 @@ def classify_message(message: str, authorized_targets: Iterable[str] = ()) -> Ro
             "article": "dispatch_article",
             "video": "dispatch_video",
             "research": "dispatch_swarm",  # 蜂群研究路由 (2026-08-10): 复用蜂群执行链路
+            "dev": "dispatch_swarm",       # W14-b:dev 线复用 dispatch_swarm 分支(专属提交口)
         }.get(route, "main_agent")
         if route == "company" and _is_company_execution_request(text):
             action = "dispatch_company"
@@ -996,7 +1032,9 @@ def classify_with_fallback(
     authorization, external-action approval) still applies.  Any failure,
     ``none`` verdict, or low LLM confidence keeps the original decision.
     """
-    decision = classify_message(message, authorized_targets)
+    decision = classify_message(
+        message, authorized_targets,
+        enable_dev=bool(config.get(_V2_DEV_ROUTE_ENABLED_KEY, False)))
     if not config.get("llm_fallback_enabled", True):
         return decision
 
@@ -1055,7 +1093,9 @@ def classify_with_fallback(
     if route in ("article", "video"):
         return decision
 
-    upgraded = classify_message(prefix + message, authorized_targets)
+    upgraded = classify_message(
+        prefix + message, authorized_targets,
+        enable_dev=bool(config.get(_V2_DEV_ROUTE_ENABLED_KEY, False)))
 
     # Security dispatch gate: if the security product line is disabled,
     # keep the original low-confidence decision even if LLM says security.
@@ -1444,6 +1484,7 @@ V2_GRAY_DEFAULT_POLL_INTERVAL = 5.0
 _V2_RUN_TYPE_BY_ROUTE = {
     "security": "vuln", "research": "ops",
     "article": "content", "video": "content", "company": "content",
+    "dev": "dev",
 }
 #: 公司 intent → v2 task_type(v2 `verdicts.TASK_TYPES`;内容线默认 custom)。
 _V2_TASK_TYPE_BY_INTENT = {
@@ -2880,6 +2921,319 @@ def launch_v2_research_worker(config: dict[str, Any], run_id: str) -> int:
     return proc.pid
 
 
+# ── W14-b:dev 线 v2 提交口(submit_dev_v2)─────────────────────────────────
+#
+# 与 security/research 同构,但有两条硬差异:
+#   * 默认**关**且不接受猜路径:`dispatch_dev=false`;`swarm_v2_dev_repo` 缺省为空
+#     ⇒ 提交/启动**响亮拒绝**(绝不猜默认仓库);
+#   * 启动档位 = dev(蜂群侧三重门:声明 dev ∧ `agent_runtime_exec`=1 ∧ `bwrap`),
+#     轮数按 dev 档**硬顶 40**(不沿用 12)。
+#
+# 触发两条路(默认只走第一条):
+#   ① 显式:`--route dev --dispatch --dev-repo …`(main() 直接调本模块,不过分类器);
+#   ② 分类路由:仅当 `dev_route_enabled=true` 时 `classify_message` 才产出 dev 路由
+#      (默认关 ⇒ 既有分类结果逐字不变,锁测试锁定)。
+#
+# F1 边界(dev 线结论):`test_command`/`files` 是**执行体必须知道**的声明(它要自己
+# 跑命令、要写那些文件),故原样随 `focus_params` 下发、**不是**判据期望值;真值 =
+# 判定器在沙箱内独立复跑的 exit code。因此 dev 线**不下发** `exec_criteria`
+# (`exec_verify.JUDGE_PRIVATE_KEYS` 会在执行体视图里删掉它的期望值,放它只会让
+# 执行体看不到本应看到的命令声明)。
+_V2_DEV_AGENT_KEY = "swarm_v2_dev_agent"
+_V2_DEV_JUDGE_KEY = "swarm_v2_dev_judge"
+_V2_DEV_REPO_KEY = "swarm_v2_dev_repo"
+_V2_DEV_ROUTE_ENABLED_KEY = "dev_route_enabled"
+#: dev 线 worker 启动档位(**单一来源**;内容线 write / 安全线 exec 不得混用)
+_V2_DEV_WORKER_PERMISSION = "dev"
+#: dev 档轮数硬顶(与 swarm 侧 `agent_runtime.HARD_MAX_TURNS_DEV` 同值,跨仓对拍)
+_V2_DEV_MAX_TURNS = 40
+
+#: dev 线闸未开时的**开闸命令原文**(公司侧闸 = router_config.dispatch_dev;
+#: 同时把 dev 并入灰度 run_types;本批不执行、不改活配置 —— 需主代理裁决)。
+DEV_GATE_OPEN_COMMAND = (
+    "python3 -c \"import json,pathlib; "
+    "p=pathlib.Path('automation/router_config.json'); "
+    "c=json.loads(p.read_text(encoding='utf-8')); "
+    "c['dispatch_dev']=True; "
+    "g=c.setdefault('swarm_v2_gray',{}); "
+    "g['run_types']=sorted(set(g.get('run_types',[]))|{'dev'}); "
+    "p.write_text(json.dumps(c,ensure_ascii=False,indent=2)+chr(10),encoding='utf-8')\""
+)
+#: 闸关(= 生产现状)时的响亮拒绝文案:讲清"已接线 v2 + 闸未开 + 开闸命令"。
+DEV_LINE_DISABLED = (
+    "dev 线已接线到蜂群 v2 市场(submit_dev_v2);自动分发闸未开"
+    "(dispatch_dev=false)。开闸命令 = " + DEV_GATE_OPEN_COMMAND +
+    "(另需配置 swarm_v2_dev_repo 指定被测仓库,否则提交会响亮拒绝——绝不猜默认仓库)"
+)
+#: 缺仓库位的响亮拒绝文案(绝不猜默认仓库)。
+DEV_REPO_REQUIRED = (
+    "dev 线拒绝提交:未指定被测仓库(swarm_v2_dev_repo 为空且 --dev-repo 缺省)"
+    "—— dev 线绝不猜默认仓库。指定方式:CLI 加 `--dev-repo <已存在的仓库目录>`,"
+    "或在 router_config.json 设 `swarm_v2_dev_repo`(零提交/零进程)"
+)
+#: 闸开但灰度/身份前置不满足(或提交失败)时的 fail-closed 文案。
+DEV_V2_LINE_UNAVAILABLE = (
+    "dev 线已接线到蜂群 v2 市场(submit_dev_v2);本次未提交"
+    "(灰度/身份前置不满足)⇒ fail-closed 交回主 Agent"
+)
+
+
+def _v2_dev_identities(config: dict[str, Any]) -> tuple[str, str]:
+    """Return (agent, judge) for the dev line; "" when unset."""
+    agent = str(config.get(_V2_DEV_AGENT_KEY) or "").strip()
+    judge = str(config.get(_V2_DEV_JUDGE_KEY) or "").strip()
+    return agent, judge
+
+
+def _normalize_dev_argv(value: Any) -> list[str] | None:
+    """dev `test_command` → argv 数组(缺/空 ⇒ None,不编造)。
+
+    接受 argv 数组,或 JSON 数组字符串,或空白分隔字符串(仅 CLI 便捷输入);
+    **不做** shell 解析:执行/判定侧都是 `argv` 数组 + `shell=False`。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith("["):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"--dev-test-cmd 不是合法 JSON 数组: {exc}") from exc
+        else:
+            value = text.split()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("test_command 须为 argv 数组(或空白分隔/JSON 数组字符串)")
+    argv = [str(item) for item in value if str(item).strip()]
+    return argv or None
+
+
+def _normalize_dev_files(value: Any) -> list[str] | None:
+    """dev `files` → 相对路径数组(缺/空 ⇒ None,不编造)。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith("["):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"--dev-files 不是合法 JSON 数组: {exc}") from exc
+        else:
+            value = [part for part in re.split(r"[,\s]+", text) if part]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("files 须为相对路径数组(或逗号/空白分隔/JSON 数组字符串)")
+    files = [str(item).strip() for item in value if str(item).strip()]
+    return files or None
+
+
+def require_dev_exec_switch(config: dict[str, Any]) -> None:
+    """dev 档启动门(F14.2.3 三重门之②,跨仓复用 `agent_runtime_exec`)。
+
+    dev 档在蜂群侧复用 `agent_runtime_exec` 开关(与 exec 档同一把);本函数读
+    **同一来源**(`security_exec_switch_enabled` → `swarmctl switch list`),只是
+    把拒绝文案改成 dev 口径。缺开关 ⇒ 在起进程/建目录之前拒绝(零副作用)。
+    """
+    if security_exec_switch_enabled(config):
+        return
+    raise RuntimeError(
+        f"dev 线 worker 以 `{_V2_DEV_WORKER_PERMISSION}` 档启动,但开关 "
+        f"`{_V2_EXEC_SWITCH}`=0(F14.2.3 三重门之②;默认 0)⇒ 拒绝启动(零进程/"
+        f"写入);恢复路径:`{_V2_EXEC_SWITCH_RECOVERY}`"
+        f"(--db {config.get('swarm_v2_db', '')})"
+    )
+
+
+def submit_dev_v2(
+    config: dict[str, Any],
+    *,
+    decision: RouteDecision,
+    message: str,
+    session_id: str,
+    platform: str,
+    gray: dict[str, Any],
+    dev_repo: str | None = None,
+    test_command: Any = None,
+    files: Any = None,
+) -> dict[str, Any]:
+    """Publish one dev task into the v2 market (dev-line port, W14-b).
+
+    三道前置门(任一不满足 ⇒ 响亮拒绝,零 CLI 调用/零进程):
+      ① 公司闸 `dispatch_dev=false` ⇒ RuntimeError(含开闸命令);
+      ② 灰度未命中(身份/run_types/ratio 任一不满足)⇒ RuntimeError;
+      ③ 身份/repo 缺失或 repo 不存在 ⇒ RuntimeError/ValueError。
+    `focus_params` **顶层**写 `test_command`(argv 数组)/`files`(相对路径数组);
+    二者可缺(缺 ⇒ 只做产物复算/只做复跑,按 `dev_verify` 既有口径),**缺了不编造**。
+    `task_type` 取 v2 闭集里的 `custom`:dev 工作 = 改代码 + 跑测试,不是
+    scan/analyze/exploit/report 等专用桶;判定口径由 `run_type=dev` 绑定的
+    `dev-trace-verify` 决定,故 `custom` 是语义正确的最小选择。
+    **不下发** `exec_criteria`(见本节 F1 边界说明)。
+    """
+    cfg = v2_gray_config(config)
+    route = str(getattr(decision, "route", "") or "")
+    if route != "dev":
+        raise ValueError(f"submit_dev_v2 requires route='dev'; got {route!r}")
+    # ① 公司闸:未开 ⇒ 响亮拒绝(含"怎么开");先于任何 v2 CLI 调用。
+    if not config.get("dispatch_dev", False):
+        raise RuntimeError(DEV_LINE_DISABLED)
+    # ② 灰度闸:未命中 ⇒ 响亮拒绝(原因逐字带上)。
+    if not gray.get("hit"):
+        reason = str(gray.get("reason") or "v2_gray_not_selected")
+        raise RuntimeError(f"{DEV_V2_LINE_UNAVAILABLE} (v2_gray={reason})")
+    # ③ 身份 + 仓库(专属键;缺省留空 ⇒ 拒绝,不猜)。
+    agent, judge = _v2_dev_identities(config)
+    if not agent or not judge:
+        raise RuntimeError(
+            "dev v2 requires swarm_v2_dev_agent / swarm_v2_dev_judge"
+            "(缺省 = dev-executor-1 / dev-verifier-1;须为已注册身份)")
+    repo_raw = dev_repo if dev_repo is not None else config.get(_V2_DEV_REPO_KEY)
+    repo = str(repo_raw or "").strip()
+    if not repo:
+        raise ValueError(DEV_REPO_REQUIRED)
+    repo_path = Path(repo).expanduser()
+    if not repo_path.is_dir():
+        raise ValueError(
+            f"dev 线拒绝提交:被测仓库不存在或不是目录: {repo_path}"
+            "(--dev-repo/swarm_v2_dev_repo;零提交/零进程)")
+    argv = _normalize_dev_argv(test_command)
+    declared_files = _normalize_dev_files(files)
+
+    run_type = _V2_RUN_TYPE_BY_ROUTE.get(route, "")
+    if run_type != "dev":
+        raise ValueError(f"dev v2 requires run_type='dev'; got {run_type!r}")
+    task_type = "custom"
+    intent = "custom"
+    run_id = f"company-{run_type}-{uuid.uuid4().hex[:12]}"
+    target = str(getattr(decision, "target", "") or "company-internal")
+    focus_body: dict[str, Any] = {
+        "company_route": route,
+        "task_intent": intent,
+        "company_task": message,
+        "company_session_id": session_id,
+        "company_platform": platform,
+        "client_source": cfg["client_source"],
+    }
+    if argv:
+        focus_body["test_command"] = argv
+    if declared_files:
+        focus_body["files"] = declared_files
+    # 注意:**不写** exec_criteria —— dev 判据的真值 = 沙箱复跑 exit code,
+    # 不是可抄的常量;执行体只需知道要跑什么命令、要写哪些文件。
+    focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
+    v2_swarm_command(
+        config, "v2", "run", "create",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--intent", intent,
+        "--target-type", "unknown",
+        "--target", target,
+        "--token-budget", str(cfg["token_budget"]),
+        "--by", agent,
+    )
+    publication = v2_swarm_command(
+        config, "market", "publish",
+        "--run-id", run_id,
+        "--run-type", run_type,
+        "--task-type", task_type,
+        "--publisher", "client",
+        "--est", str(cfg["est_tokens"]),
+        "--base", str(cfg["base_priority"]),
+        "--by", agent,
+        "--required-role", "dev-executor",
+        "--client-source", cfg["client_source"],
+        "--focus", focus,
+        "--task-id", run_id,
+    )
+    task_id = str(publication.get("task_id") or run_id)
+    return {
+        "run_id": run_id,
+        "request_id": task_id,
+        "status": "submitted",
+        "_v2_dispatch": "v2",
+        "_v2_run_type": run_type,
+        "_v2_task_type": task_type,
+        "_v2_task_id": task_id,
+    }
+
+
+def build_v2_dev_worker_cmd(config: dict[str, Any], run_id: str, *,
+                            dev_repo: str) -> list:
+    """Build the v2 dev worker command (pure; testable).
+
+    蜂群内建 `agent_runtime`,`--permission dev`,`--repo-root` = **指定的被测仓库**
+    (不是猜的产物目录;不存在/非目录在调用方已拒),`--max-turns 40` = dev 档硬顶。
+    """
+    cfg = v2_gray_config(config)
+    agent, judge = _v2_dev_identities(config)
+    repo = str(Path(str(dev_repo)).expanduser().resolve())
+    return [
+        sys.executable,
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
+        "worker",
+        "--db", config["swarm_v2_db"],
+        "--agent", agent,
+        "--judge-by", judge,
+        "--agent-runtime",
+        "--permission", _V2_DEV_WORKER_PERMISSION,
+        "--repo-root", repo,
+        "--max-turns", str(_V2_DEV_MAX_TURNS),
+        "--max-tokens-budget", str(cfg["token_budget"]),
+        "--poll-interval", str(cfg["poll_interval"]),
+        "--max-tasks", "1",
+    ]
+
+
+def launch_v2_dev_worker(config: dict[str, Any], run_id: str, *,
+                         dev_repo: str | None = None) -> int:
+    """Launch the v2 dev worker detached (mirrors security/research).
+
+    起进程**之前**依次校验:run_id 形状 → 仓库位非空且为已存在目录 → dev 档开关
+    (`agent_runtime_exec`,复用 `require_dev_exec_switch`)。任一不满足 ⇒ 响亮拒绝,
+    零 mkdir / 零 Popen。
+    """
+    value = str(run_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        raise ValueError(f"invalid swarm v2 dev run id: {value!r}")
+    repo_raw = dev_repo if dev_repo is not None else config.get(_V2_DEV_REPO_KEY)
+    repo = str(repo_raw or "").strip()
+    if not repo:
+        raise ValueError(DEV_REPO_REQUIRED)
+    repo_path = Path(repo).expanduser()
+    if not repo_path.is_dir():
+        raise ValueError(
+            f"dev 线拒绝启动:被测仓库不存在或不是目录: {repo_path}"
+            "(--dev-repo/swarm_v2_dev_repo;零 mkdir/零 Popen)")
+    require_dev_exec_switch(config)          # 零副作用:拒绝先于 mkdir/Popen
+    log_dir = Path(config["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"swarm-v2-dev-{value}.log"
+    cmd = build_v2_dev_worker_cmd(config, run_id, dev_repo=str(repo_path))
+    worker_env, _dropped = scrub_environment()
+    worker_env["COMPANY_ROUTER_BYPASS"] = "1"
+    worker_env["HERMES_SESSION_SOURCE"] = "tool"
+    log_fh = log_path.open("a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(repo_path.resolve()),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=worker_env,
+        )
+    except BaseException:
+        log_fh.close()
+        raise
+    log_fh.close()
+    return proc.pid
+
+
 def select_company_result(result: dict[str, Any]) -> str:
     """Prefer the latest completed worker result over reporter-first ordering.
 
@@ -3557,9 +3911,88 @@ def _handle_hook(
             )}
 
     if decision.action == "dispatch_swarm":
+        # W14-b:dev 路由走专属提交口(submit_dev_v2),与 research/security 并列;
         # W11-b:research 路由迁到 v2 专属提交口(submit_research_v2);security
         # 仍走原提交口(submit_security_v2),行为逐字不变。
-        if decision.route == "research":
+        if decision.route == "dev":
+            enabled = config.get("dispatch_dev", False)
+            if not enabled:
+                state.update(event_id, status="deferred",
+                             error="product line dispatch disabled")
+                return {"context": build_context(
+                    RouteDecision(**{
+                        **asdict(decision), "action": "main_agent",
+                        "reason": "product line dispatch disabled",
+                    }),
+                    status_updates=updates + [
+                        "- dev 自动分发已禁用 (dispatch_dev=false)，已交由主 Agent。"
+                        f" {DEV_LINE_DISABLED}"
+                    ],
+                )}
+            dev_repo = str(config.get(_V2_DEV_REPO_KEY) or "").strip()
+            if not dev_repo or not Path(dev_repo).expanduser().is_dir():
+                # 缺仓库位/仓库不存在 ⇒ **响亮拒绝**(绝不猜默认仓库),零提交零进程
+                state.update(event_id, status="failed", error=DEV_REPO_REQUIRED)
+                return {"context": build_context(
+                    RouteDecision(**{**asdict(decision), "action": "main_agent",
+                                     "reason": "dev repo not configured"}),
+                    status_updates=updates + [f"- {DEV_REPO_REQUIRED}"],
+                )}
+            active = [row for row in state.active_for_session(session_id)
+                      if row["status"] in {"submitted", "running"}]
+            if len(active) >= _int_config(config, "max_active_runs_per_session", 2):
+                state.update(event_id, status="deferred", error="active run limit reached")
+                return {"context": build_context(
+                    RouteDecision(**{**asdict(decision), "action": "main_agent",
+                                     "reason": "active run limit reached"}),
+                    status_updates=updates + ["- 已达到本会话并发蜂群上限，新任务暂未提交。"],
+                )}
+            d_agent, d_judge = _v2_dev_identities(config)
+            gray = v2_gray_decision(
+                config, decision, message, agent=d_agent, judge=d_judge)
+            fallback_reason = ""
+            if gray["hit"]:
+                try:
+                    v2_run = submit_dev_v2(
+                        config,
+                        decision=decision,
+                        message=message,
+                        session_id=session_id,
+                        platform=platform,
+                        gray=gray,
+                        dev_repo=dev_repo,
+                    )
+                    run_id = str(v2_run.get("run_id") or "")
+                    pid = launch_v2_dev_worker(config, run_id, dev_repo=dev_repo)
+                    run = {"run_id": run_id, "status": "running"}
+                    state.update(event_id, run_id=run_id,
+                                 request_id=str(v2_run.get("request_id") or ""),
+                                 runner_pid=pid, status="running",
+                                 last_heartbeat=utc_now())
+                    updates.append(
+                        "- v2 灰度命中：dev 任务已发布至蜂群 v2 市场"
+                        f"（run_id={run_id}）。"
+                    )
+                except Exception as exc:  # noqa: BLE001 -- v2 must never drop the task
+                    fallback_reason = (
+                        f"v2 dev submit failed: {type(exc).__name__}: {exc}")
+                    LOGGER.warning(
+                        "company_router dev v2 fallback: %s", fallback_reason)
+            elif gray["enabled"]:
+                fallback_reason = str(gray.get("reason") or "v2_gray_not_selected")
+                LOGGER.info("company_router dev v2 not selected: %s", fallback_reason)
+
+            if run is None:
+                state.update(event_id, status="failed", error=DEV_V2_LINE_UNAVAILABLE)
+                return {"context": build_context(
+                    RouteDecision(**{**asdict(decision), "action": "main_agent",
+                                     "reason": "dev line moved to v2; run not submitted"}),
+                    status_updates=updates + (
+                        [f"- v2 dev 灰度回退：{fallback_reason}"]
+                        if fallback_reason else []
+                    ) + [f"- {DEV_V2_LINE_UNAVAILABLE}"],
+                )}
+        elif decision.route == "research":
             enabled = config.get("dispatch_research", True)
             if not enabled:
                 # 闸关 = 生产现状:响亮拒绝(保留旧子串便于既有断言,附
@@ -3804,6 +4237,36 @@ def _handle_hook(
     return {"context": build_context(decision, run=run, status_updates=updates)}
 
 
+def dispatch_dev_explicit(
+    config: dict[str, Any],
+    *,
+    message: str,
+    session_id: str,
+    platform: str,
+    dev_repo: str | None = None,
+    test_command: Any = None,
+    files: Any = None,
+) -> dict[str, Any]:
+    """显式 dev 派发(W14-b 触发①;不过分类器,用户测试用这条)。
+
+    构造一条 dev `RouteDecision`,由 `submit_dev_v2` 自证三道门(公司闸/灰度/
+    身份)与仓库位,再由 `launch_v2_dev_worker` 过 dev 档开关门并起进程。任一
+    前置不满足 ⇒ 异常上抛,CLI 捕获后响亮报错(退出码 2),不产生任何提交/进程。
+    显式路径把 `gray` 以 `hit=True` 传入(显式选择 = 100% 命中,与比例灰度无关)。
+    """
+    decision = RouteDecision(
+        route="dev", confidence=1.0, action="dispatch_swarm",
+        reason="explicit --route dev", intent="custom")
+    submitted = submit_dev_v2(
+        config, decision=decision, message=message, session_id=session_id,
+        platform=platform,
+        gray={"hit": True, "enabled": True, "reason": "explicit_route"},
+        dev_repo=dev_repo, test_command=test_command, files=files)
+    run_id = str(submitted.get("run_id") or "")
+    pid = launch_v2_dev_worker(config, run_id, dev_repo=dev_repo)
+    return {**submitted, "runner_pid": pid}
+
+
 def parse_hook_stdin() -> dict[str, Any]:
     # The payload is written by an external process: bound the read so a
     # runaway writer to the hook pipe cannot exhaust memory.
@@ -3827,11 +4290,40 @@ def main() -> int:
     parser.add_argument("--platform", default="cli")
     parser.add_argument("--dispatch", action="store_true", help="Submit eligible security message")
     parser.add_argument("--llm-fallback", action="store_true", help="Allow the low-confidence LLM tie-break")
+    parser.add_argument("--route", default="", choices=["", "dev"],
+                        help="显式路由:dev = 直接走 dev 提交口(不依赖分类器,W14-b 触发①)")
+    parser.add_argument("--dev-repo", default=None,
+                        help="dev 线被测仓库目录(缺省回退 swarm_v2_dev_repo;绝不猜默认仓库)")
+    parser.add_argument("--dev-test-cmd", default=None,
+                        help="dev 线 test_command(argv JSON 数组或空白分隔字符串)")
+    parser.add_argument("--dev-files", default=None,
+                        help="dev 线 files(JSON 数组或逗号/空白分隔的相对路径)")
     args = parser.parse_args()
     config = load_config(Path(args.config))
 
     if args.hook:
         print(json.dumps(handle_hook(parse_hook_stdin(), config), ensure_ascii=False))
+        return 0
+
+    if args.route == "dev":
+        # 显式 dev 派发:不依赖分类器;闸/灰度/身份/仓库/开关任一不满足 ⇒ 响亮拒绝。
+        if not args.dispatch:
+            print(json.dumps({
+                "route": "dev",
+                "action": "dispatch_swarm",
+                "dev_repo": args.dev_repo or config.get(_V2_DEV_REPO_KEY) or "",
+                "dispatch_dev": bool(config.get("dispatch_dev", False)),
+            }, ensure_ascii=False, indent=2))
+            return 0
+        try:
+            out = dispatch_dev_explicit(
+                config, message=args.message, session_id=args.session_id,
+                platform=args.platform, dev_repo=args.dev_repo,
+                test_command=args.dev_test_cmd, files=args.dev_files)
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"dev 显式派发失败: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
 
     if args.llm_fallback:

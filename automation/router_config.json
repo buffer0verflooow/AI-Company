@@ -12,7 +12,8 @@
     "run_types": [
       "content",
       "ops",
-      "vuln"
+      "vuln",
+      "dev"
     ],
     "task_types": [],
     "ratio_pct": 100,
@@ -290,5 +291,10 @@
   "swarm_v2_security_agent": "vuln-exec-1",
   "swarm_v2_security_judge": "vuln-judge-1",
   "swarm_v2_research_agent": "research-exec-1",
-  "swarm_v2_research_judge": "research-judge-1"
+  "swarm_v2_research_judge": "research-judge-1",
+  "dispatch_dev": false,
+  "dev_route_enabled": false,
+  "swarm_v2_dev_agent": "dev-executor-1",
+  "swarm_v2_dev_judge": "dev-verifier-1",
+  "swarm_v2_dev_repo": ""
 }

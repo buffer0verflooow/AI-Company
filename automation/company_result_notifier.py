@@ -36,7 +36,7 @@ try:
         load_config,
         resolve_session_origin,
         select_company_result,
-        swarm_command,
+        swarm_run_result,
         utc_now,
     )
     from .notification_outbox import (
@@ -77,7 +77,7 @@ except ImportError:  # Direct execution from automation/.
         load_config,
         resolve_session_origin,
         select_company_result,
-        swarm_command,
+        swarm_run_result,
         utc_now,
     )
     from notification_outbox import (
@@ -1027,7 +1027,7 @@ def process_once(
             event_id = str(row["route_event_id"])
             run_id = str(row["run_id"])
             try:
-                result = swarm_command(config, "task", "result", "--run-id", run_id, timeout=20)
+                result = swarm_run_result(config, run_id, timeout=20)
             except Exception as exc:  # noqa: BLE001 -- a failing status query must not re-poll forever
                 # A persistently failing status query (e.g. the run was removed
                 # from the swarm DB) must not re-poll forever: advance the

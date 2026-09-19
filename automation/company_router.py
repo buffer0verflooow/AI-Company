@@ -2122,6 +2122,142 @@ def v2_swarm_command(config: dict[str, Any], *args: str, timeout: int = 30) -> d
     return _parse_json_output(proc.stdout)
 
 
+# ── v2 结果查询适配 (D-26 S3 替代已退役的 `swarmctl task result`) ─────
+# v1 的 `task result --run-id` 子命令已随 v1 执行面整体删除;公司侧状态轮询
+# (refresh_session_runs / company_result_notifier)改走 v2 `lineage` 读路径
+# (只读连接)。lineage 恒定输出 JSON 且**不接受** `--json`(argparse 直接拒),
+# 故不复用 swarm_command(它无条件追加 --json);它也不是 v2/worker/company
+# 短路命名空间,`--db` 由 lineage 子参数承接(后置即可)。
+_LINEAGE_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "timeout"})
+
+
+def _lineage_task_nodes(tree: Any) -> list[dict[str, Any]]:
+    # 展开一棵 lineage 任务树(根 + children 递归,rework/review 子任务在
+    # children 里);异形节点(非 dict)直接跳过,与 select_company_result
+    # 的防腐蚀口径一致。
+    nodes: list[dict[str, Any]] = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        nodes.append(node)
+        children = node.get("children")
+        if isinstance(children, list):
+            stack.extend(children)
+    return nodes
+
+
+def _lineage_task_result(node: dict[str, Any]) -> dict[str, Any]:
+    record = node.get("record") if isinstance(node.get("record"), dict) else {}
+    summary = record.get("result_summary")
+    if isinstance(summary, str):
+        try:
+            parsed = json.loads(summary)
+        except json.JSONDecodeError:
+            parsed = {}
+    else:
+        parsed = summary
+    return {
+        "task_id": str(record.get("task_id") or ""),
+        "status": str(record.get("status") or "unknown"),
+        "result_summary": parsed if isinstance(parsed, dict) else {},
+        "ended_at": str(record.get("ended_at") or ""),
+    }
+
+
+def _lineage_run_status_from_tasks(nodes: list[dict[str, Any]]) -> str:
+    # 公司派发把 task_id 钉死为 run_id ⇒ lineage 只回 task 树、没有 run 行,
+    # run 态按 run_finalize 同口径推导:全终态且 ≥1 accepted ⇒ completed;
+    # 全终态无一 accepted ⇒ failed;否则(含零任务)running。
+    if not nodes:
+        return "running"
+    statuses: list[str] = []
+    accepted = False
+    for node in nodes:
+        record = node.get("record") if isinstance(node.get("record"), dict) else {}
+        statuses.append(str(record.get("status") or ""))
+        if record.get("acceptance_status") == "accepted":
+            accepted = True
+    if not all(status in _LINEAGE_TERMINAL_TASK_STATUSES for status in statuses):
+        return "running"
+    return "completed" if accepted else "failed"
+
+
+def _lineage_to_run_result(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """lineage 输出 → 退役 `task result --run-id` 的消费面契约。
+
+    消费方(company_result_notifier / refresh_session_runs /
+    select_company_result)需要的字段:status(终态 {completed, needs_approval,
+    failed, cancelled} / 非终态 {submitted, running},其余值会落 notifier 的
+    "unhandled status" 分支烧尝试次数)、tasks({status: count})、
+    task_results([{task_id, status, result_summary, ended_at}])、
+    result/summary/error 兜底。
+    """
+    kind = payload.get("kind")
+    if kind == "run":
+        run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+        status = str(run.get("status") or "unknown")
+        if status == "pending":
+            # 消费方非终态集是 {submitted, running};pending 直通会进
+            # "unhandled status" 分支,白白烧投递尝试 → 新死信。
+            status = "submitted"
+        trees = payload.get("trees") if isinstance(payload.get("trees"), list) else []
+        nodes = [node for tree in trees for node in _lineage_task_nodes(tree)]
+    elif kind == "task":
+        nodes = _lineage_task_nodes(payload.get("tree"))
+        status = _lineage_run_status_from_tasks(nodes)
+    else:
+        raise RuntimeError(f"unsupported lineage payload kind: {kind!r}")
+
+    tasks: dict[str, int] = {}
+    for node in nodes:
+        record = node.get("record") if isinstance(node.get("record"), dict) else {}
+        task_status = str(record.get("status") or "unknown")
+        tasks[task_status] = tasks.get(task_status, 0) + 1
+
+    result: dict[str, Any] = {
+        "run_id": str(run_id),
+        "status": status,
+        "tasks": tasks,
+        "task_results": [_lineage_task_result(node) for node in nodes],
+        # v2 判定路径不写 result_summary(防两本账),lineage 也不透出 ⇒ 正文
+        # 通常为空,消费方走既有降级文案;结果正文回传通道另立(路线图 N8)。
+        "result": "",
+        "summary": "",
+    }
+    if status == "failed":
+        result["error"] = (
+            "任务全部终态但无一 accepted(tasks: "
+            f"{json.dumps(tasks, ensure_ascii=False)})")
+    return result
+
+
+def swarm_run_result(config: dict[str, Any], run_id: str, timeout: int = 20) -> dict[str, Any]:
+    """v2 run 状态/结果查询(`task result` 退役后的替代;只读)。
+
+    走 `swarmctl lineage <run_id>`(v2 活库只读连接),输出经
+    `_lineage_to_run_result` 映射回 v1 消费面。run 不存在时 lineage 以非零码
+    退出 ⇒ RuntimeError,由调用方既有的 "run status query failed" 分支处理
+    (与 v1 缺失语义一致)。
+    """
+    cmd = [
+        sys.executable,
+        str(Path(config["swarm_repo"]) / "scripts" / "swarmctl.py"),
+        "lineage", str(run_id),
+        "--db", config["swarm_v2_db"],
+    ]
+    proc = subprocess.run(
+        cmd, cwd=config["swarm_repo"], capture_output=True, text=True,
+        timeout=timeout, check=False, env=_v2_subprocess_env(cmd))
+    if proc.returncode != 0:
+        raise RuntimeError(
+            proc.stderr.strip() or proc.stdout.strip()
+            or f"swarmctl lineage exited {proc.returncode}")
+    payload = _parse_json_output(proc.stdout)
+    return _lineage_to_run_result(payload, str(run_id))
+
+
 # ── v1 外部执行面退役 (D-25) ──────────────────────────────────────────
 # 本块原有 `submit_security` / `runner_role_counts` / `build_runner_cmd` /
 # `launch_runner` 四个函数,是把公司任务交给 v1 蜂群(line)执行面的完整接线:
@@ -3651,7 +3787,7 @@ def refresh_session_runs(config: dict[str, Any], state: RouterState, session_id:
     for row in state.active_for_session(session_id):
         run_id = row["run_id"]
         try:
-            result = swarm_command(config, "task", "result", "--run-id", run_id, timeout=15)
+            result = swarm_run_result(config, run_id, timeout=15)
         except Exception as exc:  # noqa: BLE001 -- a failing status query must not abort the session refresh
             updates.append(f"- 蜂群 {run_id[:8]} 状态查询失败：{exc}")
             continue

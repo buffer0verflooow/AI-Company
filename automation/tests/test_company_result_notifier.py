@@ -203,7 +203,7 @@ class NotifierTests(unittest.TestCase):
                     "result_summary": {"content": "证据化最终结论"},
                 }],
             }
-            with patch("automation.company_result_notifier.swarm_command", return_value=result):
+            with patch("automation.company_result_notifier.swarm_run_result", return_value=result):
                 summary = process_once(
                     self._config(td, db_path),
                     deliverer=lambda _cfg, origin, message: (delivered.append((origin, message)) or True, ""),
@@ -222,7 +222,7 @@ class NotifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path, event_id = self._setup_event(td)
             calls = []
-            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "completed", "result": "done"}):
+            with patch("automation.company_result_notifier.swarm_run_result", return_value={"status": "completed", "result": "done"}):
                 summary = process_once(
                     self._config(td, db_path),
                     deliverer=lambda _cfg, _origin, _message: (calls.append(1) or False, "network down"),
@@ -253,7 +253,7 @@ class NotifierTests(unittest.TestCase):
             db_path, event_id = self._setup_event(td)
             config = self._config(td, db_path)
             config["max_delivery_attempts"] = 2
-            with patch("automation.company_result_notifier.swarm_command", side_effect=RuntimeError("run not found")):
+            with patch("automation.company_result_notifier.swarm_run_result", side_effect=RuntimeError("run not found")):
                 first = process_once(config)
                 second = process_once(config)
                 third = process_once(config)
@@ -279,7 +279,7 @@ class NotifierTests(unittest.TestCase):
             db_path, event_id = self._setup_event(td)
             config = self._config(td, db_path)
             config["max_delivery_attempts"] = 1
-            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "weird"}):
+            with patch("automation.company_result_notifier.swarm_run_result", return_value={"status": "weird"}):
                 summary = process_once(config)
             state = RouterState(db_path)
             row = state.db.execute("SELECT * FROM route_events WHERE route_event_id=?", (event_id,)).fetchone()
@@ -298,7 +298,7 @@ class NotifierTests(unittest.TestCase):
             # (pid 999999 is not a swarm_runner) must be flagged suspected_dead.
             config["max_runner_restarts"] = 0
             config["heartbeat_timeout_minutes"] = 0
-            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "running"}):
+            with patch("automation.company_result_notifier.swarm_run_result", return_value={"status": "running"}):
                 summary = process_once(config)
             self.assertEqual(summary["suspected_dead"], 1)
             state = RouterState(db_path)
@@ -597,7 +597,7 @@ class NotifierTests(unittest.TestCase):
             config = self._config(td, db_path)
             config["delivery_fallback_path"] = str(fallback)
             calls = []
-            with patch("automation.company_result_notifier.swarm_command", return_value={"status": "completed", "result": "done"}):
+            with patch("automation.company_result_notifier.swarm_run_result", return_value={"status": "completed", "result": "done"}):
                 first = process_once(
                     config,
                     deliverer=lambda *_args: (calls.append(1) or True, ""),

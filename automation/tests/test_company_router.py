@@ -12,6 +12,7 @@ from automation.company_router import (
     RouterState,
     _float_config,
     _int_config,
+    _lineage_to_run_result,
     _parse_json_output,
     build_context,
     classify_message,
@@ -20,6 +21,7 @@ from automation.company_router import (
     parse_hook_stdin,
     refresh_session_runs,
     select_company_result,
+    swarm_run_result,
 )
 from automation.operations_control import (
     business_period,
@@ -584,7 +586,7 @@ class HookTests(unittest.TestCase):
             decision = classify_message("分析本机 APK 逆向报告中的认证逻辑")
             event_id = state.insert("s1", "cli", "h1", "安全分析", decision)
             state.update(event_id, run_id="run-1", status="running")
-            with patch("automation.company_router.swarm_command", return_value={"status": ["running"]}):
+            with patch("automation.company_router.swarm_run_result", return_value={"status": ["running"]}):
                 updates = refresh_session_runs({"executor": "x"}, state, "s1")
             state.close()
             self.assertEqual(updates, [])
@@ -1043,6 +1045,133 @@ class ParseJsonOutputTests(unittest.TestCase):
             _parse_json_output('submitted\n{"run_id": "r1"}'),
             {"run_id": "r1"},
         )
+
+
+class SwarmRunResultTests(unittest.TestCase):
+    """D-26 S3 后 `swarmctl task result` 退役,v2 `lineage` 读路径的适配。"""
+
+    def test_lineage_run_payload_maps_run_status_and_task_counts(self):
+        payload = {
+            "kind": "run",
+            "source": "v2",
+            "run": {"run_id": "vuln-live-7", "status": "completed"},
+            "trees": [{
+                "record": {"task_id": "t-1", "status": "completed",
+                           "acceptance_status": "accepted",
+                           "ended_at": "2026-09-19 02:30:29"},
+                "children": [],
+            }],
+        }
+        mapped = _lineage_to_run_result(payload, "vuln-live-7")
+        self.assertEqual(mapped["status"], "completed")
+        self.assertEqual(mapped["tasks"], {"completed": 1})
+        self.assertEqual(mapped["task_results"][0]["task_id"], "t-1")
+        self.assertEqual(mapped["result"], "")
+
+    def test_lineage_task_payload_derives_run_status_company_form(self):
+        # 公司派发把 task_id 钉死为 run_id ⇒ lineage 回 kind=task 单树,
+        # run 态按 run_finalize 口径推导(有 accepted ⇒ completed)。
+        payload = {
+            "kind": "task",
+            "source": "v2",
+            "tree": {
+                "record": {"task_id": "company-ops-1", "status": "completed",
+                           "acceptance_status": "accepted"},
+                "children": [],
+            },
+        }
+        mapped = _lineage_to_run_result(payload, "company-ops-1")
+        self.assertEqual(mapped["status"], "completed")
+        self.assertEqual(mapped["tasks"], {"completed": 1})
+
+    def test_lineage_all_terminal_without_acceptance_maps_failed_with_error(self):
+        payload = {
+            "kind": "task",
+            "source": "v2",
+            "tree": {"record": {"task_id": "t-2", "status": "failed",
+                                "acceptance_status": "rejected"}, "children": []},
+        }
+        mapped = _lineage_to_run_result(payload, "r")
+        self.assertEqual(mapped["status"], "failed")
+        self.assertIn("accepted", mapped["error"])
+
+    def test_lineage_pending_run_is_normalized_to_submitted(self):
+        # 消费方非终态集是 {submitted, running};pending 直通会进
+        # "unhandled status" 分支白白烧投递尝试 → 新死信。此归一化是本适配的牙齿。
+        payload = {"kind": "run", "run": {"status": "pending"}, "trees": []}
+        self.assertEqual(_lineage_to_run_result(payload, "r")["status"], "submitted")
+
+    def test_lineage_empty_trees_maps_running(self):
+        # 悬挂 run(budget 拒发后的零任务孤儿)保持 running,由消费方既有
+        # stale/suspected_dead 机制收口,不得伪造成终态。
+        payload = {"kind": "run", "run": {"status": "running"}, "trees": []}
+        mapped = _lineage_to_run_result(payload, "r")
+        self.assertEqual(mapped["status"], "running")
+        self.assertEqual(mapped["tasks"], {})
+
+    def test_lineage_child_tasks_are_counted_and_flattened(self):
+        payload = {
+            "kind": "task",
+            "source": "v2",
+            "tree": {
+                "record": {"task_id": "root", "status": "completed",
+                           "acceptance_status": "accepted"},
+                "children": [
+                    {"record": {"task_id": "rework-1", "status": "completed",
+                                "acceptance_status": "rejected"}, "children": []},
+                ],
+            },
+        }
+        mapped = _lineage_to_run_result(payload, "r")
+        self.assertEqual(mapped["tasks"], {"completed": 2})
+        self.assertEqual(len(mapped["task_results"]), 2)
+
+    def test_lineage_result_summary_corrupt_shapes_degrade_to_empty_dict(self):
+        from automation.company_router import _lineage_task_result
+
+        for bad in ("not json", None, ["list"], 42):
+            node = {"record": {"task_id": "t", "status": "completed",
+                               "result_summary": bad}}
+            self.assertEqual(_lineage_task_result(node)["result_summary"], {})
+
+    def test_swarm_run_result_invokes_lineage_without_json_flag(self):
+        # 变异反证牙齿:lineage 拒绝 `--json`(argparse 直接拒);适配必须
+        # 后置 --db 且不带 --json,否则每分钟轮询必败 → 死信复发。
+        calls = {}
+
+        class _Proc:
+            returncode = 0
+            stdout = json.dumps(
+                {"kind": "run", "run": {"status": "completed"}, "trees": []})
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            return _Proc()
+
+        config = {"swarm_repo": "/opt/swarm", "swarm_v2_db": "/opt/swarm/swarm_v2.db"}
+        with patch("automation.company_router.subprocess.run", side_effect=_fake_run), \
+             patch("automation.company_router._v2_subprocess_env", return_value=None):
+            mapped = swarm_run_result(config, "company-ops-1")
+        cmd = calls["cmd"]
+        self.assertIn("lineage", cmd)
+        self.assertIn("company-ops-1", cmd)
+        self.assertNotIn("--json", cmd)
+        self.assertEqual(mapped["status"], "completed")
+
+    def test_swarm_run_result_raises_on_nonzero_exit(self):
+        # run 不在 v2 库 ⇒ lineage 非零码退出 ⇒ RuntimeError,交给调用方
+        # 既有的 "run status query failed" 分支(与 v1 缺失语义一致)。
+        class _Proc:
+            returncode = 2
+            stdout = "'missing' 不在 v2 库"
+            stderr = ""
+
+        with patch("automation.company_router.subprocess.run", return_value=_Proc()), \
+             patch("automation.company_router._v2_subprocess_env", return_value=None):
+            with self.assertRaises(RuntimeError):
+                swarm_run_result(
+                    {"swarm_repo": "/opt/swarm", "swarm_v2_db": "/x"}, "missing")
 
 
 if __name__ == "__main__":

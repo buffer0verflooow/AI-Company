@@ -1,16 +1,18 @@
 {
   "enabled": true,
   "timezone": "Asia/Shanghai",
-  "dispatch_security": false,
+  "dispatch_security": true,
   "auto_run_security": true,
-  "dispatch_research": false,
+  "dispatch_research": true,
   "authorized_targets": [],
   "swarm_repo": "/home/pwn/workspace/research/swarm-knowledge",
   "swarm_v2_db": "/home/pwn/workspace/research/swarm-knowledge/swarm_v2.db",
   "swarm_v2_gray": {
     "enabled": true,
     "run_types": [
-      "content"
+      "content",
+      "ops",
+      "vuln"
     ],
     "task_types": [],
     "ratio_pct": 100,
@@ -282,5 +284,11 @@
       "请求失败"
     ],
     "auto_suppress_no_findings": true
-  }
+  },
+  "swarm_v2_provider": "deepseek-official",
+  "swarm_v2_model": "deepseek-v4-flash",
+  "swarm_v2_security_agent": "vuln-exec-1",
+  "swarm_v2_security_judge": "vuln-judge-1",
+  "swarm_v2_research_agent": "research-exec-1",
+  "swarm_v2_research_judge": "research-judge-1"
 }

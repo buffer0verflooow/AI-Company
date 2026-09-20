@@ -209,9 +209,16 @@ class ExecSwitchGateTests(unittest.TestCase):
                 popen.return_value.pid = 4321
                 pid = launch_v2_security_worker(config, SEC_RUN)
             self.assertEqual(pid, 4321)
-            popen.assert_called_once()
-            cmd = popen.call_args.args[0]
+            # W20 机制迁移:有界派工 = 边界进程 + worker 两次 Popen;
+            # 第 1 次 = log-boundary(带 pass_fds),第 2 次 = worker(stdout=管道写端)。
+            self.assertEqual(popen.call_count, 2)
+            boundary_call, worker_call = popen.call_args_list
+            self.assertIn("log_boundary.py", boundary_call.args[0][1])
+            self.assertIn("pass_fds", boundary_call.kwargs)
+            cmd = worker_call.args[0]
             self.assertEqual(_perm(cmd), "exec")
+            self.assertIsInstance(worker_call.kwargs.get("stdout"), int,
+                                  "worker stdout 必须是管道写端(fd),不得直连文件")
             self.assertTrue(security_job_path(config, SEC_RUN).exists())
 
 

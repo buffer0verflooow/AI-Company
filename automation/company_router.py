@@ -54,6 +54,11 @@ except ImportError:  # direct ``python automation/company_router.py`` invocation
         sqlite_uri,
     )
 
+try:  # W20 无界之墙:worker 落盘输出的硬边界(水位门 + 有界轮转)
+    from automation import log_boundary
+except ImportError:  # direct ``python automation/company_router.py`` invocation
+    import log_boundary  # type: ignore[no-redef]
+
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "router_config.json"
@@ -1940,6 +1945,23 @@ def _v2_daily_top_precheck(config: dict[str, Any], *, est: int,
             f"未创建 run,无需清理)")
 
 
+def _disk_headroom_precheck(config: dict[str, Any]) -> None:
+    """只读预检(W20):落盘所在分区余量低于水位 ⇒ 造 run 之前响亮拒绝。
+
+    与 :func:`_v2_daily_top_precheck` 同一口径:读数不可得 ⇒ 响亮降级
+    放行;余量不足 ⇒ RuntimeError。**不写库、不建目录、不起进程**。
+    下限来自 log_boundary(单一来源,默认 20GiB,可用
+    ``SWARM_LOG_MIN_FREE_BYTES`` 覆盖)。
+    """
+    log_dir = str(config.get("log_dir") or "").strip()
+    target = Path(log_dir) if log_dir else HERE
+    try:
+        log_boundary.assert_disk_headroom(target)
+    except OSError as exc:
+        LOGGER.warning("W20 磁盘水位预检降级放行(读数不可得:%s: %s)",
+                       type(exc).__name__, exc)
+
+
 def _v2_route_key(client_source: str, message: str) -> str:
     return hashlib.sha256(f"{client_source}|{message}".encode()).hexdigest()[:16]
 
@@ -2337,23 +2359,12 @@ def launch_content_job(
     executor_env["HERMES_SESSION_SOURCE"] = "tool"
     executor_env["HERMES_WRITE_SAFE_ROOT"] = str(job_dir.resolve())
     executor_env["TERMINAL_CWD"] = str(job_dir.resolve())
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, config["content_executor"], "--job-dir", str(job_dir)],
-            cwd=str(HERE.parent),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=executor_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+    return log_boundary.spawn_bounded(
+        [sys.executable, config["content_executor"], "--job-dir", str(job_dir)],
+        log_path=log_path,
+        cwd=str(HERE.parent),
+        env=executor_env,
+    )
 
 
 def _v2_content_intent(decision: RouteDecision) -> str:
@@ -2490,6 +2501,7 @@ def submit_content_v2(
         ensure_ascii=False, sort_keys=True)
     by = cfg["agent"]
     _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
+    _disk_headroom_precheck(config)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -2583,23 +2595,12 @@ def launch_v2_content_worker(config: dict[str, Any], run_id: str) -> int:
     worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(job_dir),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=worker_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+    return log_boundary.spawn_bounded(
+        cmd,
+        log_path=log_path,
+        cwd=str(job_dir),
+        env=worker_env,
+    )
 
 
 # ── 安全线 / research 线 v2 派发 (D-28;按新 head 重写,非合并归档补丁) ──────
@@ -3102,6 +3103,7 @@ def submit_security_v2(
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
+    _disk_headroom_precheck(config)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -3199,23 +3201,12 @@ def launch_v2_security_worker(config: dict[str, Any], run_id: str) -> int:
     worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(job_dir),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=worker_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+    return log_boundary.spawn_bounded(
+        cmd,
+        log_path=log_path,
+        cwd=str(job_dir),
+        env=worker_env,
+    )
 
 
 # ── W11-b:research 线 v2 提交口(与 submit_security_v2 同构) ────────────────
@@ -3326,6 +3317,7 @@ def submit_research_v2(
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
+    _disk_headroom_precheck(config)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -3418,23 +3410,12 @@ def launch_v2_research_worker(config: dict[str, Any], run_id: str) -> int:
     worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(job_dir),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=worker_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+    return log_boundary.spawn_bounded(
+        cmd,
+        log_path=log_path,
+        cwd=str(job_dir),
+        env=worker_env,
+    )
 
 
 # ── W14-b:dev 线 v2 提交口(submit_dev_v2)─────────────────────────────────
@@ -3646,6 +3627,7 @@ def submit_dev_v2(
     focus_body["budget_plan"] = plan
     focus = json.dumps(focus_body, ensure_ascii=False, sort_keys=True)
     _v2_daily_top_precheck(config, est=plan["est_tokens"], run_id=run_id)
+    _disk_headroom_precheck(config)
     v2_swarm_command(
         config, "v2", "run", "create",
         "--run-id", run_id,
@@ -3745,23 +3727,12 @@ def launch_v2_dev_worker(config: dict[str, Any], run_id: str, *,
     worker_env = apply_worker_proxy(worker_env, resolve_worker_proxy(config))
     worker_env["COMPANY_ROUTER_BYPASS"] = "1"
     worker_env["HERMES_SESSION_SOURCE"] = "tool"
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(repo_path.resolve()),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=worker_env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return proc.pid
+    return log_boundary.spawn_bounded(
+        cmd,
+        log_path=log_path,
+        cwd=str(repo_path.resolve()),
+        env=worker_env,
+    )
 
 
 def select_company_result(result: dict[str, Any]) -> str:

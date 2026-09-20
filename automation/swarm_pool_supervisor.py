@@ -47,6 +47,11 @@ except ImportError:  # direct execution from automation/
     from _safe_io import (atomic_write_text, pool_worker_environment,  # type: ignore[no-redef]
                           resolve_worker_proxy)
 
+try:  # W20 无界之墙:worker 落盘输出的硬边界(水位门 + 有界轮转)
+    from automation import log_boundary
+except ImportError:  # direct execution from automation/
+    import log_boundary  # type: ignore[no-redef]
+
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.json"
 HERE = Path(__file__).resolve().parent
 
@@ -285,25 +290,15 @@ def default_launch(cmd: list, *, log_path: Path, cwd: Path,
     """
     if env is None:
         env, _ = pool_worker_environment(proxy_url=resolve_worker_proxy())
-    log_path = Path(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = log_path.open("a", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=env,
-        )
-    except BaseException:
-        log_fh.close()
-        raise
-    log_fh.close()
-    return int(proc.pid)
+    # W20:stdout/stderr 改走有界边界(管道→detached 边界进程,轮转封顶),
+    # 余量不足时零副作用拒绝;其余 Popen 语义(start_new_session/close_fds/
+    # 失败上抛)与原派工逐字一致。
+    return int(log_boundary.spawn_bounded(
+        list(cmd),
+        log_path=Path(log_path),
+        cwd=Path(cwd),
+        env=env,
+    ))
 
 
 def _append_log(path: Path, line: str) -> None:

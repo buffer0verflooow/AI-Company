@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import automation.company_router as company_router
 from automation.company_router import (
     RouterState,
     _float_config,
@@ -1172,6 +1173,58 @@ class SwarmRunResultTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 swarm_run_result(
                     {"swarm_repo": "/opt/swarm", "swarm_v2_db": "/x"}, "missing")
+
+
+class TrafficClassArgvTests(unittest.TestCase):
+    """CR-34/N2:QA 会话流量标注 —— qa-* 会话建 run 带 --traffic-class qa。"""
+
+    def test_qa_session_gets_qa_class(self):
+        self.assertEqual(
+            company_router._v2_traffic_class_argv("qa-w11-supply"),
+            ["--traffic-class", "qa"])
+        self.assertEqual(
+            company_router._v2_traffic_class_argv("QA-w12-conv"),
+            ["--traffic-class", "qa"])
+
+    def test_non_qa_session_defaults_to_production(self):
+        for sid in ("", None, "user-abc", "cron_x", "worker"):
+            self.assertEqual(company_router._v2_traffic_class_argv(sid), [])
+
+    def test_dispatch_includes_flag_for_qa_session(self):
+        # content 提交路径:qa-* 会话 ⇒ run create argv 含 --traffic-class qa
+        captured = {}
+
+        def _fake_v2_command(config, *args, timeout=30):
+            captured.setdefault("argvs", []).append(list(args))
+            return {"ok": True}
+
+        decision = company_router.RouteDecision(
+            route="article", confidence=0.9, action="dispatch_article",
+            reason="test", target="company-internal")
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "swarm_v2_gray": {"enabled": True, "client_source": "qa-unit",
+                                  "est_tokens": 10000, "token_budget": 100000,
+                                  "base_priority": 20},
+                "swarm_v2_agent": "a1", "swarm_v2_judge": "j1",
+                "operations_dir": tmp, "client_source": "qa-unit",
+                "content_job_dir": str(Path(tmp) / "content-jobs"),
+            }
+            with patch.object(company_router, "v2_swarm_command",
+                              side_effect=_fake_v2_command), \
+                 patch.object(company_router, "_v2_daily_top_precheck"), \
+                 patch.object(company_router, "v2_task_plan",
+                              return_value={"token_budget": 100000,
+                                            "est_tokens": 10000,
+                                            "max_turns": 20}):
+                company_router.submit_content_v2(
+                    config, decision=decision, message="写一篇文章",
+                    session_id="qa-test-session", platform="test",
+                    gray={"hit": True, "source": "config"})
+        run_create_argv = captured["argvs"][0]
+        self.assertIn("--traffic-class", run_create_argv)
+        self.assertEqual(run_create_argv[run_create_argv.index("--traffic-class") + 1],
+                         "qa")
 
 
 if __name__ == "__main__":

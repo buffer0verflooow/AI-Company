@@ -1884,6 +1884,21 @@ def _v2_swarm_budget_modules(
     return (swarm_budget, swarm_verdicts), None
 
 
+# ── CR-34/N2:QA 会话流量标注(子池配额维度)────────────────────────────
+# 蜂群 `swarm_runs.traffic_class`(production/qa 闭集)由**建 run 方声明**;
+# 公司侧的 QA 约定 = Hermes 会话 id 以 `qa-` 开头(审计实证:qa-w11-supply /
+# qa-w12-conv)。qa 类 run 的发布受蜂群 QA 子池日配额(budget.QA_DAILY_QUOTA)
+# 约束,不再挤占生产日顶份额;production(默认)不受影响。
+_QA_SESSION_PREFIX = "qa-"
+
+
+def _v2_traffic_class_argv(session_id: str) -> list[str]:
+    """QA 会话 ⇒ `['--traffic-class', 'qa']`;其余(含空)⇒ [](默认 production)。"""
+    if str(session_id or "").strip().lower().startswith(_QA_SESSION_PREFIX):
+        return ["--traffic-class", "qa"]
+    return []
+
+
 def _v2_daily_top_precheck(config: dict[str, Any], *, est: int,
                            run_id: str = "") -> None:
     """只读预检:本日已承诺 + 本次 escrow 超 NFR1 日顶 ⇒ 造 run 之前响亮拒绝。
@@ -2221,8 +2236,8 @@ def _lineage_to_run_result(payload: dict[str, Any], run_id: str) -> dict[str, An
         "status": status,
         "tasks": tasks,
         "task_results": [_lineage_task_result(node) for node in nodes],
-        # v2 判定路径不写 result_summary(防两本账),lineage 也不透出 ⇒ 正文
-        # 通常为空,消费方走既有降级文案;结果正文回传通道另立(路线图 N8)。
+        # 顶层 result/summary 留空:正文经 task_results[].result_summary 透出
+        # (v2 N8 判定同事务回填展示面摘要),select_company_result 优先取该链路。
         "result": "",
         "summary": "",
     }
@@ -2482,6 +2497,7 @@ def submit_content_v2(
         "--target", target,
         "--token-budget", _v2_plan_argv(plan)[0],
         "--by", by,
+        *_v2_traffic_class_argv(session_id),
     )
     publication = v2_swarm_command(
         config, "market", "publish",
@@ -3093,6 +3109,7 @@ def submit_security_v2(
         "--target", target,
         "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
+        *_v2_traffic_class_argv(session_id),
     )
     publication = v2_swarm_command(
         config, "market", "publish",
@@ -3316,6 +3333,7 @@ def submit_research_v2(
         "--target", target,
         "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
+        *_v2_traffic_class_argv(session_id),
     )
     publication = v2_swarm_command(
         config, "market", "publish",
@@ -3635,6 +3653,7 @@ def submit_dev_v2(
         "--target", target,
         "--token-budget", _v2_plan_argv(plan)[0],
         "--by", agent,
+        *_v2_traffic_class_argv(session_id),
     )
     publication = v2_swarm_command(
         config, "market", "publish",

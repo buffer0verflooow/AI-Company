@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
@@ -102,12 +103,28 @@ def _quota_db(td: str, *, pool_spent: int = 0) -> Path:
     return db
 
 
+def _swarm_daily_top() -> int:
+    """日顶读数 = 蜂群单一来源(`src.swarm_v2.budget.DAILY_TOP_TOKENS`)。
+
+    不在公司侧/测试里抄常量:日顶一改,公司侧预检边界与这些种子断言同时跟着变。
+    """
+    inserted = SWARM_REPO not in sys.path
+    if inserted:
+        sys.path.insert(0, SWARM_REPO)
+    try:
+        from src.swarm_v2 import budget as _swarm_budget
+        return int(_swarm_budget.DAILY_TOP_TOKENS)
+    finally:
+        if inserted and SWARM_REPO in sys.path:
+            sys.path.remove(SWARM_REPO)
+
+
 class DailyTopPrecheckTests(unittest.TestCase):
     def test_1_over_top_rejects_before_any_run_create(self):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"
             repo.mkdir()
-            db = _quota_db(td, pool_spent=500000)          # 本日已承诺 = 日顶
+            db = _quota_db(td, pool_spent=_swarm_daily_top())  # 本日已承诺 = 日顶
             cfg = _config(td, swarm_v2_db=str(db), dev_repo=str(repo))
             with mock.patch("automation.company_router.v2_swarm_command") as cli:
                 with self.assertRaises(RuntimeError) as ctx:
@@ -117,8 +134,8 @@ class DailyTopPrecheckTests(unittest.TestCase):
             cli.assert_not_called()                        # 零 run create = 零悬挂 run
             msg = str(ctx.exception)
             self.assertIn("零悬挂 run", msg)
-            self.assertIn("500000", msg)                   # 日顶值
-            self.assertIn("今日已承诺 500000", msg)         # 已用值
+            self.assertIn(str(_swarm_daily_top()), msg)              # 日顶值(单一来源派生)
+            self.assertIn(f"今日已承诺 {_swarm_daily_top()}", msg)     # 已用值
             self.assertIn("escrow 130000", msg)            # 本次需值(ceil(100000×1.3))
             self.assertIn("UTC 日历日", msg)                # 重置口径
             self.assertIn(_day(), msg)
@@ -209,7 +226,7 @@ class DailyTopPrecheckTests(unittest.TestCase):
             cfg_template = _config(td, swarm_v2_db="", dev_repo=str(repo))
 
             def _run(name):
-                db = _quota_db(td, pool_spent=500000)
+                db = _quota_db(td, pool_spent=_swarm_daily_top())
                 cfg = dict(cfg_template, swarm_v2_db=str(db))
                 with mock.patch("automation.company_router.v2_swarm_command") as cli:
                     with self.assertRaises(RuntimeError) as ctx:

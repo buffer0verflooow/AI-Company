@@ -3,10 +3,10 @@
 派工书 §3.2 断言:
   ① 同输入 ⇒ 同计划(确定性,连跑两次逐字相同);
   ② 四档边界(1.9KB/2.0KB/8.0KB/24.0KB 各两侧);
-  ③ 下夹:token_budget ≥ max_turns × 15000;
+  ③ 下夹:token_budget ≥ max_turns × 20000;
   ④ 上夹:超 `swarm_v2_budget_cap` 被压到 cap 且 why 说明;
   ⑤ 轮数永不超过蜂群该档硬顶(跨仓对拍);
-  ⑥ fixed 模式与改前逐字一致(12/40 轮 + 灰度 token_budget/est_tokens);
+  ⑥ fixed 模式与改前逐字一致(12/24 轮 + 灰度 token_budget/est_tokens);
   ⑦ 三处同源:run create --token-budget == market publish --est == worker
      --max-tokens-budget,且轮数 = focus_params.budget_plan.max_turns。
 
@@ -106,9 +106,9 @@ class DeterminismAndTiersTests(unittest.TestCase):
             plan = v2_task_plan(_cfg(), message="x" * size, task_book=None,
                                 run_type="ops")
             self.assertGreaterEqual(plan["token_budget"],
-                                    plan["max_turns"] * 15000)
+                                    plan["max_turns"] * 20000)
         smallest = v2_task_plan(_cfg(), message="x" * 10, task_book=None, run_type="ops")
-        self.assertGreaterEqual(smallest["token_budget"], 180000)
+        self.assertGreaterEqual(smallest["token_budget"], 240000)
 
     def test_4_upper_clamp(self):
         plan = v2_task_plan(_cfg(swarm_v2_budget_cap=50000), message="x" * 6400,
@@ -134,7 +134,7 @@ class DeterminismAndTiersTests(unittest.TestCase):
         fixed = {"swarm_v2_budget_mode": "fixed",
                  "swarm_v2_gray": {"token_budget": 100000, "est_tokens": 100000}}
         for run_type, turns in (("content", 12), ("ops", 12), ("vuln", 12),
-                                ("dev", 40)):
+                                ("dev", 24)):
             with self.subTest(run_type=run_type):
                 plan = v2_task_plan(_cfg(**fixed), message="x" * 6400,
                                     task_book=None, run_type=run_type)
@@ -147,7 +147,7 @@ class DeterminismAndTiersTests(unittest.TestCase):
         self.assertEqual((over["max_turns"], over["token_budget"]), (9, 12345))
         dev_over = v2_task_plan(_cfg(swarm_v2_budget_mode="fixed", max_turns=99),
                                 message="x", task_book=None, run_type="dev")
-        self.assertEqual(dev_over["max_turns"], 40)
+        self.assertEqual(dev_over["max_turns"], 24)
 
     def test_bad_budget_mode_or_cap_fails_loudly(self):
         with self.assertRaises(ValueError):
@@ -246,7 +246,7 @@ class ThreeSiteSamePlanTests(unittest.TestCase):
         self.assertEqual(security[security.index("--max-tokens-budget") + 1], "100000")
         dev = build_v2_dev_worker_cmd(config, "company-dev-000000000001",
                                       dev_repo="/tmp")
-        self.assertEqual(dev[dev.index("--max-turns") + 1], "40")
+        self.assertEqual(dev[dev.index("--max-turns") + 1], "24")
         content = build_v2_content_worker_cmd(config, "company-content-000000000001")
         self.assertEqual(content[content.index("--max-turns") + 1], "12")
 

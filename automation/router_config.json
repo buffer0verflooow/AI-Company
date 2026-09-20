@@ -20,7 +20,7 @@
     "client_source": "company-router"
   },
   "swarm_worker_proxy": "http://127.0.0.1:7890",
-  "swarm_v2_budget_cap": 400000,
+  "swarm_v2_budget_cap": 800000,
   "swarm_v2_agent": "content-writer-1",
   "swarm_v2_judge": "content-judge-1",
   "state_db": "/home/pwn/workspace/company/operations/runtime/company_router.db",

@@ -309,7 +309,7 @@ class WorkerCmdAndSwitchTests(unittest.TestCase):
                 "--agent-runtime",
                 "--permission", "dev",
                 "--repo-root", str(repo.resolve()),
-                "--max-turns", "40",
+                "--max-turns", "24",
                 "--max-tokens-budget", "100000",
                 "--poll-interval", "5.0",
                 "--max-tasks", "1",
@@ -347,7 +347,7 @@ class WorkerCmdAndSwitchTests(unittest.TestCase):
             args, kwargs = popen.call_args
             self.assertEqual(args[0][args[0].index("--permission") + 1], "dev")
             self.assertEqual(args[0][args[0].index("--repo-root") + 1], str(repo.resolve()))
-            self.assertEqual(args[0][args[0].index("--max-turns") + 1], "40")
+            self.assertEqual(args[0][args[0].index("--max-turns") + 1], "24")
             self.assertEqual(kwargs["cwd"], str(repo.resolve()))
 
 
@@ -371,7 +371,7 @@ class NoCrossLineTests(unittest.TestCase):
             self.assertEqual(dev[dev.index("--agent") + 1], "dev-executor-1")
             self.assertEqual(dev[dev.index("--judge-by") + 1], "dev-verifier-1")
             # 轮数:dev=40,其余=12
-            self.assertEqual(dev[dev.index("--max-turns") + 1], "40")
+            self.assertEqual(dev[dev.index("--max-turns") + 1], "24")
             self.assertEqual(content[content.index("--max-turns") + 1], "12")
             self.assertEqual(security[security.index("--max-turns") + 1], "12")
             self.assertEqual(research[research.index("--max-turns") + 1], "12")

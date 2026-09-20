@@ -1518,7 +1518,7 @@ _V2_PERMISSION_BY_RUN_TYPE = {
 }
 #: 轮数上夹 = 蜂群该档硬顶(**跨仓对拍锁测试**:test_w15_budget_plan.py 对拍
 #: `src.swarm_v2.agent_runtime.HARD_MAX_TURNS_BY_PERMISSION`,改一处必红)。
-_V2_HARD_MAX_TURNS = {"read-only": 12, "write": 12, "exec": 24, "dev": 40}
+_V2_HARD_MAX_TURNS = {"read-only": 12, "write": 12, "exec": 24, "dev": 24}
 #: 分档起点(复杂度 → (max_turns, 名义 token))。任务书字符数按 UTF-8 字节
 #: 语义的 `len(message)`(公司消息本来就是 str,按字符数计)。
 _V2_BUDGET_TIERS = (
@@ -1527,10 +1527,11 @@ _V2_BUDGET_TIERS = (
     (24576, 24, 280000),     # 8–24KB
     (None, 24, 360000),      # >24KB(24 = exec 档硬顶)
 )
-#: 每轮 token 下限(下夹依据;实测 11.3k/20.9k 每轮 ⇒ 取 15k)。
-_V2_BUDGET_MIN_PER_TURN = 15000
+#: 每轮 token 下限(下夹依据;实测 11.3k/20.9k 每轮;**2026-09-20 W17 实跑 19,049/轮**
+#: ⇒ 取 20k,与实测对齐,避免"下夹给不够 ⇒ 结构化撞 budget_exceeded")。
+_V2_BUDGET_MIN_PER_TURN = 20000
 #: 预算上夹缺省(config `swarm_v2_budget_cap` 可覆盖)。
-_V2_BUDGET_CAP_DEFAULT = 400000
+_V2_BUDGET_CAP_DEFAULT = 800000
 #: 发布计划进程内登记(run_id → plan);拉起侧优先复用,避免"发布/拉起不同值"。
 _V2_BUDGET_PLANS: dict[str, dict[str, Any]] = {}
 _V2_BUDGET_PLANS_MAX = 512
@@ -1707,9 +1708,10 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
 
     分档起点(`_V2_BUDGET_TIERS`):<2KB→12 轮、2–8KB→18 轮、8–24KB→24 轮、
     >24KB→24 轮;判据 ≥4 条 **或** 声明 `mcp` 能力 ⇒ 上一档。
-    **dev 线例外**(W16-①):多轮工序 ⇒ `max_turns = max(分档值, 40)`,下限 40
-    = `_V2_HARD_MAX_TURNS["dev"]`(W14 行为保持,不许被简报压低)。
-    **下夹** `token_budget ≥ max_turns × 15000`;**上夹** `≤ swarm_v2_budget_cap`。
+    **dev 线例外**(W16-①,2026-09-20 校准):多轮工序 ⇒ `max_turns = max(分档值, 24)`,
+    下限 24 = `_V2_HARD_MAX_TURNS["dev"]`(原 40;W17 实测 ~19k/轮 ⇒ 400k 上夹下 40 轮
+    结构上跑不完,按用户裁定与实测对齐;不许被简报压低)。
+    **下夹** `token_budget ≥ max_turns × 20000`;**上夹** `≤ swarm_v2_budget_cap`。
     轮数上夹 = 蜂群该档硬顶(`_V2_HARD_MAX_TURNS`,跨仓对拍锁定)。
 
     `swarm_v2_budget_mode="fixed"` ⇒ 走 :func:`_v2_fixed_budget_plan`(与改前
@@ -1755,7 +1757,7 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
         # token 预算仍走下夹并经 `swarm_v2_budget_cap` 上夹。
         dev_floor = _V2_HARD_MAX_TURNS["dev"]
         max_turns = max(tier_turns, dev_floor)
-        why.append(f"dev 是多轮工序,轮数下限 {dev_floor}(W14 行为保持)")
+        why.append(f"dev 是多轮工序,轮数下限 {dev_floor}(2026-09-20 用户裁定 40→24,与实测 ~19k/轮对齐)")
     else:
         max_turns = tier_turns
     if max_turns > hard_cap:

@@ -2464,6 +2464,27 @@ _V2_SPEC_ASSETS = ("projects/wechat-publisher/assets/wechat-article.css",)
 #: 任务含这些词 ⇒ 追加"排版/预览"产物(与 hermes 执行器步骤 5/6 同源)
 _V2_FORMAT_KEYWORDS = ("排版", "公众号", "微信")
 _V2_FORMATTED_DELIVERABLES = ("draft-formatted.md", "wechat-preview.html")
+#: CV2 判定面:质量门**标记**(声明给蜂群判定器做机械核验;出处 = 共享规范
+#: `marketing/content-quality-gates.md` 的 Gate 小节标题)。判定器只核验**发布方
+#: 声明过的**标记 ⇒ 蜂群不必内置任何公司口径(不新增跨仓键名耦合)。
+_V2_QUALITY_MARKER_FILE = "qa-report.md"
+_V2_QUALITY_MARKERS: dict[str, list[str]] = {
+    "article": ["Gate 1", "Gate 2", "Gate 3"],
+}
+#: 含排版关键词时额外要求的门(微信预览检查)
+_V2_FORMAT_MARKERS = ("Gate 4",)
+
+
+def content_quality_markers(route: str, message: str) -> dict[str, list[str]]:
+    """该任务的**质量门标记**声明(`{产物文件名: [标记]}`,空 = 不核验)。
+
+    单一来源 = `marketing/content-quality-gates.md`;随 `focus_params.content_verify.markers`
+    下发,由 `content-trace-verify` 机械核验(文件里出现该字样 = 该门有留痕)。
+    """
+    markers = list(_V2_QUALITY_MARKERS.get(route, []))
+    if route == "article" and any(k in (message or "") for k in _V2_FORMAT_KEYWORDS):
+        markers += [m for m in _V2_FORMAT_MARKERS if m not in markers]
+    return {_V2_QUALITY_MARKER_FILE: markers} if markers else {}
 
 
 def content_deliverables(route: str, message: str) -> list[str]:
@@ -2549,6 +2570,14 @@ def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) ->
     ]
     for idx, name in enumerate(deliverables, 1):
         lines.append(f"  {idx}) {job_dir / name}")
+    markers = content_quality_markers(route, message)
+    if markers:
+        for fname, ms in markers.items():
+            lines.append(
+                f"  · {fname} 必须逐项写出 "
+                + " / ".join(f"`{m}`" for m in ms)
+                + " 字样(判定器按字样机械核验质量门是否真的跑了;"
+                  "缺任一项 ⇒ 该任务判负)")
     lines.append("  若任务明确要求排版/封面，在产物目录内一并产出对应文件（如 draft-formatted.md）并复核。")
     lines += [
         "",
@@ -2613,6 +2642,10 @@ def submit_content_v2(
     # CV2:规范全文 + CSS 模板**随任务落盘**(内建运行时读不到公司仓库;内联节选有
     # 4000 字截断)⇒ 质量门在蜂群线上第一次真正可得。落盘早于 worker 拉起。
     ship_content_specs(job_dir, route)
+    cv_block: dict[str, Any] = {"files": content_deliverables(route, message)}
+    markers = content_quality_markers(route, message)
+    if markers:
+        cv_block["markers"] = markers      # CV2:质量门标记(判定面机械核验)
     focus = json.dumps(
         {
             "content_route": route,
@@ -2627,7 +2660,7 @@ def submit_content_v2(
             # 产物目录,运行时读不到公司仓库里的规范文件。
             "runtime_brief": build_runtime_brief(decision, message, job_dir),
             # 声明式产物清单 ⇒ content 判定器按声明核验(空声明只要求"有过写动作")
-            "content_verify": {"files": content_deliverables(route, message)},
+            "content_verify": cv_block,
         },
         ensure_ascii=False, sort_keys=True)
     by = cfg["agent"]

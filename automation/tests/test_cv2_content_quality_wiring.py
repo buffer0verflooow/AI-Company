@@ -30,6 +30,7 @@ from automation.company_router import (
     _V2_SPEC_ASSETS,
     classify_message,
     content_deliverables,
+    content_quality_markers,
     content_job_path,
     ship_content_specs,
     submit_content_v2,
@@ -115,6 +116,23 @@ class DeliverablesTests(unittest.TestCase):
                          ["task-report.md", "result.json"])
 
 
+class QualityMarkerTests(unittest.TestCase):
+    """CV2 判定面:发布方声明"质量门标记",蜂群只核验声明过的(单向下发)。"""
+
+    def test_article_declares_three_gates(self):
+        self.assertEqual(content_quality_markers("article", PLAIN_ARTICLE),
+                         {"qa-report.md": ["Gate 1", "Gate 2", "Gate 3"]})
+
+    def test_wechat_task_also_declares_gate4(self):
+        self.assertEqual(content_quality_markers("article", ARTICLE_MESSAGE),
+                         {"qa-report.md": ["Gate 1", "Gate 2", "Gate 3", "Gate 4"]})
+
+    def test_other_routes_declare_nothing(self):
+        """未声明 ⇒ 蜂群判定面逐字旧行为(不核验任何标记)。"""
+        self.assertEqual(content_quality_markers("company", "微信相关的公司报告"), {})
+        self.assertEqual(content_quality_markers("video", ARTICLE_MESSAGE), {})
+
+
 class PublishWiringTests(unittest.TestCase):
     def _submit(self, config, message=ARTICLE_MESSAGE):
         decision = classify_message(message)
@@ -139,6 +157,9 @@ class PublishWiringTests(unittest.TestCase):
             self.assertIn("content-quality-gates.md", brief)
             self.assertIn("以全文为准", brief)
             self.assertIn("fs.append", brief)
+            self.assertIn("Gate 1", brief)      # CV2:标记要求必须让执行体看见
+            self.assertEqual(focus["content_verify"]["markers"],
+                             {"qa-report.md": ["Gate 1", "Gate 2", "Gate 3", "Gate 4"]})
             self.assertEqual(focus["content_verify"]["files"],
                              ["draft.md", "draft-humanized.md", "qa-report.md",
                               "draft-formatted.md", "wechat-preview.html"])
@@ -151,6 +172,8 @@ class PublishWiringTests(unittest.TestCase):
             focus = json.loads(publish[publish.index("--focus") + 1])
             self.assertEqual(focus["content_verify"]["files"],
                              ["draft.md", "draft-humanized.md", "qa-report.md"])
+            self.assertEqual(focus["content_verify"]["markers"],
+                             {"qa-report.md": ["Gate 1", "Gate 2", "Gate 3"]})
 
 
 if __name__ == "__main__":

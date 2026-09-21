@@ -253,9 +253,16 @@ class GrayHitTests(unittest.TestCase):
             self.assertIn(ARTICLE_MESSAGE, brief)
             self.assertIn("draft.md", brief)
             self.assertIn("article-quality-constraints.md", brief)
+            # CV2(2026-09-21):质量门规范**全文随任务落盘**(内联节选只有 4000 字)
+            self.assertIn("content-quality-gates.md", brief)
+            self.assertIn("_spec/", brief)
+            self.assertIn("fs.append", brief)          # CV-3:长文分段写
             # 声明式产物清单 ⇒ 判定器按声明核验;必须是 jail 内相对路径
             files = focus["content_verify"]["files"]
-            self.assertEqual(files, ["draft.md", "draft-humanized.md", "qa-report.md"])
+            # CV2:任务含「公众号」⇒ 追加排版/预览两件(与 hermes 执行器步骤 5/6 同源;
+            # 改前 v2 侧从不声明 ⇒ 排版环节在蜂群线上等于没有)
+            self.assertEqual(files, ["draft.md", "draft-humanized.md", "qa-report.md",
+                                     "draft-formatted.md", "wechat-preview.html"])
             for name in files:
                 self.assertFalse(os.path.isabs(name))
 

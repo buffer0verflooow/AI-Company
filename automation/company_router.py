@@ -2446,13 +2446,65 @@ _V2_CONTENT_DELIVERABLES: dict[str, list[str]] = {
 #: 随任务下发的公司规范(内建运行时 path jail 根 = 产物目录 ⇒ 读不到公司仓库)
 _V2_CONTENT_SPECS: dict[str, list[str]] = {
     "article": ["operations/business-lines/article-production.md",
-                "marketing/article-quality-constraints.md"],
+                "marketing/article-quality-constraints.md",
+                # CV2(2026-09-21):去 AI 味 / QA Gate 1-4 / 微信预览与排版 = 共享单一来源
+                "marketing/content-quality-gates.md"],
     "company": ["Home.md", "operations/agent-roster.md"],
     "video": ["operations/business-lines/video-production.md",
               "strategy/video-production-strategy.md"],
 }
 #: 单份规范内联上限(超出截断并如实标注)
 _V2_SPEC_EXCERPT_CHARS = 4000
+
+#: CV2:规范/模板**随任务落盘**的副本目录(内建运行时 path jail 根 = 产物目录
+#: ⇒ 只有落进去它才读得到)。落盘 = **全量正文**,不受 4000 字内联截断限制。
+_V2_SPEC_SUBDIR = "_spec"
+#: 与规范一起下发的模板(相对公司仓库根)
+_V2_SPEC_ASSETS = ("projects/wechat-publisher/assets/wechat-article.css",)
+#: 任务含这些词 ⇒ 追加"排版/预览"产物(与 hermes 执行器步骤 5/6 同源)
+_V2_FORMAT_KEYWORDS = ("排版", "公众号", "微信")
+_V2_FORMATTED_DELIVERABLES = ("draft-formatted.md", "wechat-preview.html")
+
+
+def content_deliverables(route: str, message: str) -> list[str]:
+    """该内容子线的**强制产物清单**(单一来源;`runtime_brief` 与判定面共用)。
+
+    静态部分 = `_V2_CONTENT_DELIVERABLES[route]`;任务含「排版/公众号/微信」⇒ 追加
+    `draft-formatted.md` + `wechat-preview.html`(CV2:hermes 执行器步骤 5/6 要的就是
+    这两件,而 v2 侧此前**从不声明** ⇒ 排版/预览环节在蜂群线上等于没有)。
+    """
+    out = list(_V2_CONTENT_DELIVERABLES.get(route, ["draft.md"]))
+    if route == "article" and any(k in (message or "") for k in _V2_FORMAT_KEYWORDS):
+        out += [n for n in _V2_FORMATTED_DELIVERABLES if n not in out]
+    return out
+
+
+def ship_content_specs(job_dir: Path, route: str) -> list[tuple[str, int]]:
+    """把该子线规范全文 + CSS 模板复制进 `<job_dir>/_spec/`(CV2;如实返回清单)。
+
+    返回 `[(相对产物目录的路径, 字节数)]`;源文件读不到 ⇒ 跳过(不假装已下发)。
+    为什么要落盘:内建运行时读不到公司仓库,而 4000 字内联节选会**砍掉过半规范**
+    (实测 `article-quality-constraints.md` 9,997 B、`article-production.md` 8,557 B)
+    ⇒ 质量门在蜂群里形同没有。
+    """
+    root = HERE.parent
+    if route not in _V2_CONTENT_SPECS:
+        return []                      # 未知子线不假装已下发
+    # 微信 CSS 模板只对 article 线有意义(排版/预览产物只在 article 声明)
+    rels = list(_V2_CONTENT_SPECS[route])
+    if route == "article":
+        rels += list(_V2_SPEC_ASSETS)
+    out: list[tuple[str, int]] = []
+    for rel in rels:
+        src = root / rel
+        if not src.is_file():
+            continue
+        dest = job_dir / _V2_SPEC_SUBDIR / Path(rel).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = src.read_bytes()
+        dest.write_bytes(data)
+        out.append((f"{_V2_SPEC_SUBDIR}/{Path(rel).name}", len(data)))
+    return out
 
 
 def _v2_spec_excerpts(route: str) -> list[tuple[str, str]]:
@@ -2479,7 +2531,7 @@ def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) ->
     内容质量要求整段丢掉。产物清单同样随任务声明,供 content 判定器按声明核验。
     """
     route = str(getattr(decision, "route", "") or "")
-    deliverables = _V2_CONTENT_DELIVERABLES.get(route, ["draft.md"])
+    deliverables = content_deliverables(route, message)
     lines = [
         "你是公司内容产线的执行体，由蜂群内建 agent 运行时承载。直接完成任务，不要只写计划。",
         "",
@@ -2487,7 +2539,8 @@ def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) ->
         f"内容子线：{route or 'unknown'}",
         f"产物目录：{job_dir}（只能在此目录内读写）",
         "",
-        "可用工具：fs.list / fs.read / fs.write / fs.edit（路径须相对产物目录）。",
+        "可用工具：fs.list / fs.read / fs.write / fs.edit / fs.append（路径须相对产物目录）；"
+        "长文/翻译类产物用 fs.append 分段追加（单次输出有硬上限，整篇一次写会被截断）。",
         "产物目录初始为空；公司仓库文件不在你的可见范围内（本节已内联全部必需规范），",
         "不要尝试列出/读取公司仓库路径，直接开始写文件；先落产物骨架再迭代打磨。",
         "无网络、无 shell 写操作、无外部 CLI —— 需要外部资料而实现不了时，如实说明并标注「未获取」，不得臆造。",
@@ -2509,6 +2562,17 @@ def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) ->
     lines += ["", "必须遵循的公司规范（原文随任务下发）："]
     for rel, text in _v2_spec_excerpts(route):
         lines += [f"--- {rel} ---", text, ""]
+    spec_names = [Path(r).name for r in _V2_CONTENT_SPECS.get(route, [])] \
+        + [Path(a).name for a in _V2_SPEC_ASSETS]
+    if spec_names:
+        lines += [
+            "**规范全文（未截断）已随任务落盘**："
+            + "、".join(f"`{_V2_SPEC_SUBDIR}/{n}`" for n in spec_names),
+            f"开始动手前先用 fs.read 逐份读完（上面的内联节选**有 4000 字截断**，"
+            f"与 `{_V2_SPEC_SUBDIR}/` 全文冲突时**以全文为准**）；"
+            "质量门（去 AI 味 / QA Gate 1-4 / 微信预览与排版）逐项按全文执行。",
+            "",
+        ]
     lines += [
         "边界：",
         "- 只写产物目录内的文件；不修改公司仓库其它任何文件；",
@@ -2546,6 +2610,9 @@ def submit_content_v2(
     plan = v2_task_plan(config, message=message, task_book=None, run_type=run_type)
     _v2_register_budget_plan(run_id, plan)
     job_dir = content_job_path(config, run_id)
+    # CV2:规范全文 + CSS 模板**随任务落盘**(内建运行时读不到公司仓库;内联节选有
+    # 4000 字截断)⇒ 质量门在蜂群线上第一次真正可得。落盘早于 worker 拉起。
+    ship_content_specs(job_dir, route)
     focus = json.dumps(
         {
             "content_route": route,
@@ -2560,8 +2627,7 @@ def submit_content_v2(
             # 产物目录,运行时读不到公司仓库里的规范文件。
             "runtime_brief": build_runtime_brief(decision, message, job_dir),
             # 声明式产物清单 ⇒ content 判定器按声明核验(空声明只要求"有过写动作")
-            "content_verify": {"files": list(
-                _V2_CONTENT_DELIVERABLES.get(route, []))},
+            "content_verify": {"files": content_deliverables(route, message)},
         },
         ensure_ascii=False, sort_keys=True)
     by = cfg["agent"]

@@ -1535,6 +1535,15 @@ _V2_BUDGET_TIERS = (
 #: 每轮 token 下限(下夹依据;实测 11.3k/20.9k 每轮;**2026-09-20 W17 实跑 19,049/轮**
 #: ⇒ 取 20k,与实测对齐,避免"下夹给不够 ⇒ 结构化撞 budget_exceeded")。
 _V2_BUDGET_MIN_PER_TURN = 20000
+#: **读源码 / 多轮工序类(run_type=dev)的每轮下夹**(CV8,2026-09-21)。
+#: 实测依据(全部取自蜂群 run 账本,`tokens_spent ÷ 轮数`):
+#:   - 2026-09-20 W17 dev 重跑:19,049/轮;
+#:   - 2026-09-21 CV1 v1(`company-dev-84c1c4c4cf64`):541,045 ÷ 17 = **31,826/轮**;
+#:   - 2026-09-21 CV1 v2(`company-dev-8228381db841`):525,386 ÷ 23 = **22,843/轮**。
+#: 通用 20k 在 dev 线**结构上不够**:24 轮 ×20k=480k 只够 15~21 轮,两次 CV1 都
+#: 撞 `budget_exceeded` 且零产出 ⇒ 按实测取 25k(= `swarm-progress/preflight.py`
+#: 的 `PER_TURN_MEASURED` 同源判据值),dev 档下夹 24×25k=600k ≤ 上夹 800k。
+_V2_BUDGET_MIN_PER_TURN_BY_RUN_TYPE: dict[str, int] = {"dev": 25000}
 #: 预算上夹缺省(config `swarm_v2_budget_cap` 可覆盖)。
 _V2_BUDGET_CAP_DEFAULT = 800000
 #: 发布计划进程内登记(run_id → plan);拉起侧优先复用,避免"发布/拉起不同值"。
@@ -1672,6 +1681,37 @@ def _v2_budget_cap(config: dict[str, Any]) -> int:
     return cap
 
 
+def _v2_min_per_turn(run_type: str) -> int:
+    """该 run_type 的**每轮 token 下夹判据值**(单一来源)。
+
+    通用 20k(`_V2_BUDGET_MIN_PER_TURN`);dev 线按实测取 25k
+    (`_V2_BUDGET_MIN_PER_TURN_BY_RUN_TYPE`)—— 读源码/多轮工序实测 22.8k~31.8k/轮,
+   通用口径在 dev 线结构上不够(CV8)。
+    """
+    return _V2_BUDGET_MIN_PER_TURN_BY_RUN_TYPE.get(run_type,
+                                                   _V2_BUDGET_MIN_PER_TURN)
+
+
+def _v2_budget_selfcheck(*, max_turns: int, token_budget: int, per_turn: int) -> dict:
+    """预算 × 轮数自检读数(CV8;纯函数,零副作用)。
+
+    `ok=false` ⇒ 该配置按实测每轮口径**打不满 `max_turns`**(发布面据此写 why /
+    体检与事后复算报警)。上夹(W15-④)与 dev 轮数下限(W16-①)是锁定行为,本函数
+    只**如实读数**,不擅自改轮数/预算。
+    """
+    turns = max(0, int(max_turns))
+    budget = max(0, int(token_budget))
+    need = turns * int(per_turn)
+    affordable = budget // int(per_turn) if per_turn > 0 else 0
+    return {
+        "ok": bool(budget >= need),
+        "per_turn": int(per_turn),
+        "needed": int(need),
+        "budget": int(budget),
+        "affordable_turns": int(affordable),
+    }
+
+
 def _v2_fixed_budget_plan(config: dict[str, Any], *, run_type: str) -> dict[str, Any]:
     """改前固定口径(回归锁):轮数 12(dev 40)+ 灰度块的 token_budget/est_tokens。
 
@@ -1716,8 +1756,12 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
     **dev 线例外**(W16-①,2026-09-20 校准):多轮工序 ⇒ `max_turns = max(分档值, 24)`,
     下限 24 = `_V2_HARD_MAX_TURNS["dev"]`(原 40;W17 实测 ~19k/轮 ⇒ 400k 上夹下 40 轮
     结构上跑不完,按用户裁定与实测对齐;不许被简报压低)。
-    **下夹** `token_budget ≥ max_turns × 20000`;**上夹** `≤ swarm_v2_budget_cap`。
-    轮数上夹 = 蜂群该档硬顶(`_V2_HARD_MAX_TURNS`,跨仓对拍锁定)。
+    **下夹** `token_budget ≥ max_turns × 每轮判据值`(通用 20k;dev 25k = 实测,
+    见 `_V2_BUDGET_MIN_PER_TURN_BY_RUN_TYPE`);**上夹** `≤ swarm_v2_budget_cap`。
+    **CV8 自洽自检(2026-09-21)**:上夹后仍不自洽 ⇒ 轮数下修留痕;连一轮都打不起
+    ⇒ 拒发(零写库)。轮数上夹 = 蜂群该档硬顶(`_V2_HARD_MAX_TURNS`,跨仓对拍锁定)。
+    `fixed` 模式 = 改前口径**逃生舱**(数值由操作者显式声明),不受本自洽闸;
+    生产配置无 `swarm_v2_budget_mode` 键 ⇒ 走 auto(受闸)。
 
     `swarm_v2_budget_mode="fixed"` ⇒ 走 :func:`_v2_fixed_budget_plan`(与改前
     逐字一致);任何未配置/非法输入都必须响亮失败,不静默降级。
@@ -1771,13 +1815,32 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
         why.append(f"{permission} 档硬顶 {hard_cap} 上夹")
     token_budget = _V2_BUDGET_TIERS[tier_idx][2]
 
-    floor = max_turns * _V2_BUDGET_MIN_PER_TURN
+    per_turn = _v2_min_per_turn(run_type)
+    floor = max_turns * per_turn
     if token_budget < floor:
-        why.append(f"下夹 {max_turns}×{_V2_BUDGET_MIN_PER_TURN}={floor}")
+        why.append(f"下夹 {max_turns}×{per_turn}={floor}")
         token_budget = floor
     if token_budget > cap:
         why.append(f"上夹 swarm_v2_budget_cap={cap}")
         token_budget = cap
+    # CV8 发布前自检(2026-09-21):**预算 × 轮数自洽**必须可判定。
+    # 两条锁定不变量不动(改它们要变更记录):① 上夹永远赢(W15-④);
+    # ② dev 轮数下限 24 不得被压低(W16-①)。故本批的牙长在两处:
+    #   - 连一轮都打不起(预算 < 每轮判据值)⇒ **拒发**(零写库,不制造必超顶 run);
+    #   - 打得满但打不满 max_turns ⇒ 计划里落**可判定的自检读数**
+    #     (`budget_selfcheck`)并写进 why,供发布/体检/事后复算报警(不再静默压预算)。
+    if token_budget < per_turn:
+        raise ValueError(
+            f"预算不自洽:token_budget={token_budget} < 每轮判据值 {per_turn}"
+            f"(run_type={run_type})⇒ 连一轮都打不起,拒发(零写库)。"
+            f"请上调 swarm_v2_budget_cap(现值 {cap})")
+    selfcheck = _v2_budget_selfcheck(max_turns=max_turns, token_budget=token_budget,
+                                     per_turn=per_turn)
+    if not selfcheck["ok"]:
+        why.append(f"**预算×轮数不自洽**:token_budget={token_budget} 只够 "
+                   f"{selfcheck['affordable_turns']} 轮(需 {selfcheck['needed']}"
+                   f"= {max_turns}×{per_turn})⇒ 结构上跑不到 {max_turns} 轮;"
+                   f"请上调 swarm_v2_budget_cap(现值 {cap})或下调轮数")
     # `est_tokens` = 市场 escrow 驱动项(`market publish --est` ⇒ escrow=ceil(est×1.3),
     # F1.1/L5#15),保持**配置口径**(缺省 100000)而不是复杂度放大的 token_budget:
     # 实测 2026-09-19 当日已承诺 187,488,若按 360k 预算发 escrow=468k 会撞
@@ -1789,6 +1852,8 @@ def v2_task_plan(config: dict[str, Any], *, message: str, task_book: dict | None
         "max_turns": int(max_turns),
         "token_budget": int(token_budget),
         "est_tokens": int(est_tokens),
+        # CV8:预算 × 轮数自检读数(可判定;**不改** W15 上夹 / W16 轮数下限两条锁定行为)
+        "budget_selfcheck": selfcheck,
         "why": "; ".join(why),
     }
 

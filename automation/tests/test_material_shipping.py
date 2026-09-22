@@ -154,6 +154,9 @@ class PublishTests(unittest.TestCase):
             # 素材正文**未被内联**(15 KB 内联是 72k tok/轮 的根因)
             self.assertNotIn("Pwning AI Agents (Part 1/4)", brief)
             self.assertLess(len(brief), 30_000)
+            # 2026-09-22:发布方声明**产物根** ⇒ 中标者若是别人,supervisor
+            # (`src/swarm_v2/award_exec.py`)补位执行时才能把产物写回本 run 的 job dir
+            self.assertEqual(focus["repo_root"], str(job))
 
     def test_bad_material_fails_before_publish(self):
         with tempfile.TemporaryDirectory() as td:

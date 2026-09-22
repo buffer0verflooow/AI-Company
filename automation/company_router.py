@@ -2733,6 +2733,10 @@ def submit_content_v2(
             "company_session_id": session_id,
             "company_platform": platform,
             "client_source": cfg["client_source"],
+            # 2026-09-22:发布方声明**产物根** —— 中标者若不是发布方(开竞标后可能),
+            # 由 `src/swarm_v2/award_exec.py` 的 supervisor 用中标者身份补位拉起
+            # per-task worker 时,靠这个字段把产物写回本 run 的 job dir(而非蜂群仓库根)。
+            "repo_root": str(job_dir),
             # W15-b②:发布侧算出的预算/轮数计划,拉起侧原样复用(单一来源)。
             "budget_plan": plan,
             # 内建运行时的任务书(D-22):规范正文随任务下发 —— path jail 根 =

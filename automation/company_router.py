@@ -2461,6 +2461,66 @@ _V2_SPEC_EXCERPT_CHARS = 4000
 _V2_SPEC_SUBDIR = "_spec"
 #: 与规范一起下发的模板(相对公司仓库根)
 _V2_SPEC_ASSETS = ("projects/wechat-publisher/assets/wechat-article.css",)
+#: 任务**素材**随任务落盘的目录(2026-09-22):运行时 path jail 根 = 产物目录 ⇒
+#: 素材必须落进去才读得到。**不要把长素材内联进任务书** —— 实测 15 KB 素材内联 ⇒
+#: ≈72k tok/轮(每轮重发 + 每次截断重试再发一整遍);素材作文件 ⇒ 09-21 已 accepted
+#: 的同类单全程仅 48.5k tok。
+_V2_MATERIAL_SUBDIR = "_material"
+#: 单份素材上限(超限拒绝,不静默截断)
+_V2_MATERIAL_MAX_BYTES = 262_144
+
+
+def ship_task_materials(job_dir: Path, materials: Iterable[str], *,
+                        roots: Iterable[Path] | None = None) -> list[tuple[str, int]]:
+    """把任务素材复制进 `<job_dir>/_material/`(返回 `[(相对路径, 字节)]`)。
+
+    安全/纪律:只允许**允许根**内的现存文件(缺省 = 公司仓库根;可加 `roots`);
+    越界 / 不存在 / 超过 `_V2_MATERIAL_MAX_BYTES` ⇒ **响亮拒绝**(ValueError,
+    发布前失败,不制造"没素材却照写"的任务);同名不同源 ⇒ 追加序号,不覆盖。
+    """
+    allowed = [Path(r).expanduser().resolve() for r in (roots or (HERE.parent,))]
+    out: list[tuple[str, int]] = []
+    seen: dict[str, int] = {}
+    for raw in materials:
+        src = Path(str(raw)).expanduser()
+        if not src.is_absolute():
+            src = HERE.parent / src
+        real = src.resolve()
+        if not any(real == a or a in real.parents for a in allowed):
+            raise ValueError(
+                f"素材不在允许的根内: {raw}(允许: {[str(a) for a in allowed]})")
+        if not real.is_file():
+            raise ValueError(f"素材不存在: {raw}")
+        data = real.read_bytes()
+        if len(data) > _V2_MATERIAL_MAX_BYTES:
+            raise ValueError(
+                f"素材过大({len(data)} B > {_V2_MATERIAL_MAX_BYTES}): {raw}")
+        name = real.name
+        if name in seen:
+            seen[name] += 1
+            name = f"{real.stem}-{seen[real.name]}{real.suffix}"
+        else:
+            seen[name] = 0
+        dest = job_dir / _V2_MATERIAL_SUBDIR / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        out.append((f"{_V2_MATERIAL_SUBDIR}/{name}", len(data)))
+    return out
+
+
+def _v2_material_roots(config: dict[str, Any]) -> list[Path]:
+    """允许的素材根:公司仓库根 + `swarm_v2_material_roots`(缺省再含蜂群 `materials/`,
+    即 09-21 起 m10x 等素材的既有落点)。"""
+    roots = [HERE.parent]
+    for item in (config.get("swarm_v2_material_roots") or []):
+        p = Path(str(item)).expanduser()
+        if p.is_dir():
+            roots.append(p)
+    swarm = Path(str(config.get("swarm_repo") or "")).expanduser()
+    fallback = swarm / "materials"
+    if fallback.is_dir() and fallback not in roots:
+        roots.append(fallback)
+    return roots
 #: 任务含这些词 ⇒ 追加"排版/预览"产物(与 hermes 执行器步骤 5/6 同源)
 _V2_FORMAT_KEYWORDS = ("排版", "公众号", "微信")
 _V2_FORMATTED_DELIVERABLES = ("draft-formatted.md", "wechat-preview.html")
@@ -2544,7 +2604,8 @@ def _v2_spec_excerpts(route: str) -> list[tuple[str, str]]:
     return out
 
 
-def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) -> str:
+def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path,
+                        materials: Iterable[str] = ()) -> str:
     """公司侧拼给蜂群**内建 agent 运行时**的自包含任务书(D-22;F14 执行面自给)。
 
     为什么规范要内联:内建运行时的 path jail 根 = `--repo-root`(= 本任务产物目录),
@@ -2568,6 +2629,14 @@ def build_runtime_brief(decision: RouteDecision, message: str, job_dir: Path) ->
         "",
         "强制交付（按顺序，全部落在产物目录内）：",
     ]
+    material_list = list(materials)
+    if material_list:
+        lines += [
+            "",
+            "素材（**已随任务落盘**；先用 fs.read 逐份读完再动笔；不要尝试访问任何 URL）：",
+        ]
+        for rel in material_list:
+            lines.append(f"  - {rel}")
     for idx, name in enumerate(deliverables, 1):
         lines.append(f"  {idx}) {job_dir / name}")
     markers = content_quality_markers(route, message)
@@ -2620,6 +2689,7 @@ def submit_content_v2(
     session_id: str,
     platform: str,
     gray: dict[str, Any],
+    materials: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Publish one content task into the v2 market (gray hit only).
 
@@ -2642,6 +2712,10 @@ def submit_content_v2(
     # CV2:规范全文 + CSS 模板**随任务落盘**(内建运行时读不到公司仓库;内联节选有
     # 4000 字截断)⇒ 质量门在蜂群线上第一次真正可得。落盘早于 worker 拉起。
     ship_content_specs(job_dir, route)
+    # 2026-09-22:任务素材同样**随任务落盘**(不要把长素材内联进任务书:实测内联 ⇒
+    # ≈72k tok/轮,素材作文件 ⇒ 同类单全程 48.5k)。越界/缺失/超限 ⇒ 发布前响亮拒绝。
+    material_files = ship_task_materials(job_dir, materials or (),
+                                         roots=_v2_material_roots(config))
     cv_block: dict[str, Any] = {"files": content_deliverables(route, message)}
     markers = content_quality_markers(route, message)
     if markers:
@@ -2658,7 +2732,8 @@ def submit_content_v2(
             "budget_plan": plan,
             # 内建运行时的任务书(D-22):规范正文随任务下发 —— path jail 根 =
             # 产物目录,运行时读不到公司仓库里的规范文件。
-            "runtime_brief": build_runtime_brief(decision, message, job_dir),
+            "runtime_brief": build_runtime_brief(decision, message, job_dir,
+                                                 materials=[r for r, _ in material_files]),
             # 声明式产物清单 ⇒ content 判定器按声明核验(空声明只要求"有过写动作")
             "content_verify": cv_block,
         },
@@ -4365,6 +4440,23 @@ def _stored_decision_fallback(row: sqlite3.Row) -> RouteDecision:
     )
 
 
+def _hook_materials(payload: dict[str, Any]) -> list[str]:
+    """hook 载荷里的素材路径(`extra.materials` / 顶层 `materials`;非列表/非字符串 ⇒ 忽略)。
+
+    用法:`{"session_id":…,"extra":{"user_message":"文章：…","materials":["materials/x.md"]}}`
+    —— 素材会**随任务落盘**到 `_material/`(任务书只给路径,不内联正文)。
+    """
+    for holder in (payload.get("extra"), payload):
+        if not isinstance(holder, dict):
+            continue
+        raw = holder.get("materials")
+        if isinstance(raw, str):
+            return [raw]
+        if isinstance(raw, list):
+            return [str(x) for x in raw if isinstance(x, str) and x.strip()]
+    return []
+
+
 def _handle_hook(
     state: RouterState,
     payload: dict[str, Any],
@@ -4853,6 +4945,7 @@ def _handle_hook(
                     session_id=session_id,
                     platform=platform,
                     gray=gray,
+                    materials=_hook_materials(payload),
                 )
                 run_id = str(v2_run.get("run_id") or "")
                 pid = launch_v2_content_worker(config, run_id)

@@ -103,6 +103,14 @@ class ShipTests(unittest.TestCase):
 
 
 class BriefTests(unittest.TestCase):
+    def test_brief_carries_hard_chunking_rule(self):
+        """单次写入 ≤2000 字 / 长文 fs.append 分段 —— 2026-09-22 实测校准的定价规则。"""
+        decision = classify_message("文章：写一篇技术文章")
+        brief = build_runtime_brief(decision, "文章：写一篇技术文章", Path("/tmp/job-z"))
+        self.assertIn("≤ 2000 字", brief)
+        self.assertIn("分多次追加", brief)
+        self.assertIn("禁止一次写整篇", brief)
+
     def test_brief_lists_path_but_never_inlines_body(self):
         decision = classify_message("文章：把它翻成中文公众号文章")
         job = Path("/tmp/job-x")
